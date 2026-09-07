@@ -23,6 +23,8 @@ rx_buf = bytearray()
 ccd_buf = bytearray()
 tx_queue = []
 session = ''
+single_capture = False
+legacy_passthrough = False
 sequence = 0
 period_us = 50000
 next_sample = 0
@@ -32,8 +34,10 @@ last_command = 0
 
 
 def stop():
-    global session, capture_begin
+    global session, capture_begin, single_capture, legacy_passthrough
     session = ''
+    single_capture = False
+    legacy_passthrough = False
     capture_begin = None
     ccd_buf.clear()
     laser.value(0)
@@ -50,6 +54,7 @@ def enqueue(message):
 
 def handle(line, received_at):
     global session, sequence, period_us, next_sample, center_mode, last_command
+    global single_capture, legacy_passthrough
     text = line.decode('ascii', 'ignore').strip()
     parts = text.split()
     if not parts:
@@ -67,8 +72,10 @@ def handle(line, received_at):
         enqueue('PONG')
     elif command == 'SYNC' and len(parts) == 2:
         enqueue(('SYNC', parts[1], received_at))
-    elif command == 'CAL' and len(parts) == 3:
-        handle(('START CAL 1 {} {}'.format(parts[1], parts[2])).encode(), received_at)
+    elif command == 'CAL' and len(parts) in (3, 4):
+        token = parts[1] if len(parts) == 4 else 'CAL'
+        handle(('START {} 1 {} {}'.format(token, parts[-2], parts[-1])).encode(), received_at)
+        single_capture = bool(session)
     elif command == 'START' and len(parts) == 5:
         stop()
         try:
@@ -89,6 +96,7 @@ def handle(line, received_at):
         laser.value(1)
         enqueue('OK START ' + session)
     elif text.startswith('@c') and not session:
+        legacy_passthrough = True
         ccd.write(text.encode())
     else:
         enqueue('ERROR COMMAND')
@@ -110,10 +118,17 @@ def poll():
             del rx_buf[:pos + 1]
             handle(line, clock.now())
     data = ccd.read(ccd.any()) if ccd.any() else None
+    end = clock.now()
+    # Check the interval before accepting a complete frame; otherwise a late
+    # reply clears capture_begin and bypasses the timeout below.
+    if capture_begin is not None and end - capture_begin > 250000:
+        stop()
+        enqueue('ERROR CCD_TIMEOUT')
+        data = None
     if data:
-        end = clock.now()
         if not session:
-            enqueue(data)
+            if legacy_passthrough:
+                enqueue(data)
         elif capture_begin is not None:
             ccd_buf.extend(data)
             if center_mode == 'fffe':
@@ -129,12 +144,9 @@ def poll():
                 enqueue('PIX {} {} {} {} {}'.format(session, sequence, capture_begin, end, pixel if pixel <= 1499 else -1))
                 ccd_buf.clear()
                 capture_begin = None
-                if session == 'CAL':
-                    session = ''
+                if single_capture:
+                    stop()
     now = clock.now()
-    if capture_begin is not None and now - capture_begin > 250000:
-        stop()
-        enqueue('ERROR CCD_TIMEOUT')
     if session and now - last_command > 40000000:
         stop()
         enqueue('ERROR WATCHDOG')
@@ -155,7 +167,7 @@ def poll():
 
 
 def main():
-    enqueue('READY MEASUREMENT_SYNC_V1')
+    enqueue('READY MEASUREMENT_SYNC_V2')
     try:
         while True:
             poll()

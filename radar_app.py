@@ -10,6 +10,7 @@ from pathlib import Path
 import queue
 import random
 import re
+import secrets
 import threading
 import time
 import tkinter as tk
@@ -260,6 +261,7 @@ class RadarApp:
         self.motor_clock = DeviceClock()
         self.calibration_parser = MotorLineParser()
         self.calibration_pending = False
+        self.calibration_session = ''
         self.calibration = CalibrationModel.from_dict(self.config.get("calibration"))
         if demo:
             self.calibration = CalibrationModel(p0=740.0, k=120.0, points=[(860, 1.0), (800, 2.0)], rmse=0.0)
@@ -656,6 +658,8 @@ class RadarApp:
             return
         self.rotation.reset()
         self.motor_clock = DeviceClock()
+        self.calibration_pending = False
+        self.calibration_session = ''
         self.ccd_parser.reset()
         self.motor_parser.reset()
         self.measure_endpoint.write_line(f"@c{exposure:04d}#@")
@@ -726,17 +730,25 @@ class RadarApp:
             self._log(f"TX MOTOR  {command}")
 
     def _measurement_data(self, data: bytes, timestamp: float) -> None:
-        if self.calibration_pending:
+        # Once CAL is used, its ASCII replies must never enter the raw CCD
+        # parser, including delayed/duplicate packets received after timeout.
+        if self.calibration_session:
             for line in self.calibration_parser.feed(data):
+                if not self.calibration_pending:
+                    continue
+                if timestamp >= self.calibration_deadline:
+                    continue
                 parts = line.split()
-                if len(parts) == 6 and parts[:2] == ["PIX", "CAL"]:
+                if len(parts) == 6 and parts[:2] == ["PIX", self.calibration_session]:
                     try:
-                        pixel = int(parts[5])
+                        sequence, begin, end, pixel = map(int, parts[2:])
                     except ValueError:
+                        continue
+                    if sequence != 1 or begin < 0 or not 0 <= end - begin <= 250000:
                         continue
                     self.calibration_pending = False
                     if 0 <= pixel <= 1499:
-                        self.events.put(("ccd_pixel", pixel, timestamp))
+                        self.events.put(("calibration_pixel", (parts[1], pixel), timestamp))
                     else:
                         self.events.put(("error", "未检测到有效中心像素", timestamp))
                 elif line.startswith("ERROR"):
@@ -760,6 +772,10 @@ class RadarApp:
                 kind, value, timestamp = self.events.get_nowait()
                 if kind == "ccd_pixel":
                     self._handle_pixel(int(value), float(timestamp))
+                elif kind == "calibration_pixel":
+                    session, pixel = value
+                    if session == self.calibration_session:
+                        self._handle_pixel(int(pixel), float(timestamp))
                 elif kind == "motor_line":
                     self._handle_motor_line(str(value), float(timestamp))
                 elif kind == "error":
@@ -833,10 +849,15 @@ class RadarApp:
             messagebox.showwarning("协议不支持", "标定读取请选择 FF FE 或原始 2 字节协议。")
             return
         self.latest_pixel = None
+        self.current_pixel_var.set("当前像素：等待新读数")
         self.calibration_parser.reset()
+        self.calibration_session = 'CAL-' + secrets.token_hex(6)
         self.calibration_pending = True
         self.calibration_deadline = time.perf_counter() + 2.0
-        self.measure_endpoint.write_line(f"CAL {config['exposure_index']} {mode}")
+        if not self.measure_endpoint.write_line(f"CAL {self.calibration_session} {config['exposure_index']} {mode}"):
+            self.calibration_pending = False
+            self._log("标定请求发送失败，请检查测距串口")
+            return
         self.root.after(2000, self._calibration_timeout)
 
     def _calibration_timeout(self):

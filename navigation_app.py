@@ -782,10 +782,11 @@ class NavigationApp:
             if not self.running:
                 return
             self._log(str(value))
-            label = "校时中" if self.sync.state == "syncing" else "同步采集中"
+            starting = self.sync.state in {"starting_measurement", "starting_rotation"}
+            label = "校时中" if self.sync.state == "syncing" else ("设备启动中" if starting else "同步采集中")
             self.connection_label.configure(text="●  " + label, fg=COLORS["cyan"])
             if str(value) != "完整扫描":
-                self.navigator.state = "校时中" if self.sync.state == "syncing" else "等待有效扫描"
+                self.navigator.state = label if starting or self.sync.state == "syncing" else "等待有效扫描"
                 self.navigator.detail = str(value)
         elif kind == "sync_error":
             self.stop()

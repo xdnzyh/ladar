@@ -2,6 +2,8 @@
 
 当前实物同步入口为 `start_hardware_navigation.bat`，配套旋转端 Arduino 固件与测距端 MicroPython 固件。烧录、标定步骤、时间误差限制及硬件检查见 [同步建图检查与烧录说明](同步建图检查与烧录说明.md)。`start_radar.bat` 的“读取当前像素”支持新测距固件的静止标定；下面的旧版扫描命令仅适用于旧固件。
 
+测距固件当前为 `MEASUREMENT_SYNC_V2`：升级电脑端时，请同步将 `esp32_measurement_sync.py` 保存为测距板的 `main.py`。标定请求使用独立编号，防止迟到响应被当成新读数；同步扫描会等待测距端启动确认，再启动旋转端。旋转端继续使用 `esp32_rotation_sync/esp32_rotation_sync.ino`。
+
 电脑端程序用于控制挑战实验中的旋转三角测距雷达，连接两对 GFSK/LoRa 串口：
 
 - 测距串口：向上层 ESP32 发送激光和 CCD 指令，接收光斑中心坐标。

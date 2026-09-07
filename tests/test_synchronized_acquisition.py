@@ -5,7 +5,7 @@ import sys
 import types
 import unittest
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from data_fusion import parse_trigger
 from radar_core import CalibrationModel, RotationTracker
@@ -18,9 +18,12 @@ class Endpoint:
     def __init__(self):
         self.messages = []
         self.now = 0.0
+        self.rejected_prefix = None
 
     def write_line(self, line, on_sent=None):
         self.messages.append(line)
+        if self.rejected_prefix and line.startswith(self.rejected_prefix):
+            return False
         if on_sent:
             on_sent(self.now)
         return True
@@ -97,6 +100,92 @@ class SweepTests(unittest.TestCase):
 
 
 class AcquisitionTests(unittest.TestCase):
+    def finish_clock_sync(self, acquisition, endpoints):
+        for i in range(8):
+            now = 0.2 + i * 0.1
+            for endpoint in endpoints:
+                endpoint.now = now
+            acquisition.poll(now)
+            for source in acquisition.endpoints:
+                token = acquisition.outstanding[source][0]
+                acquisition.feed(source, f'SYNC {token} {round((now+0.002)*1e6)} {round((now+0.003)*1e6)}\n'.encode(), now+0.005)
+            acquisition.poll(now+0.005)
+
+    def test_motor_waits_for_measurement_start_ack(self):
+        a, endpoints, _ = self.make()
+        self.finish_clock_sync(a, endpoints)
+        self.assertFalse(any(line.startswith('ROT ') for line in endpoints[1].messages))
+        a.feed('measurement', f'OK START {a.session}\n'.encode(), 1.0)
+        a.poll(1.0)
+        self.assertEqual(endpoints[1].messages[-1], 'ROT ' + a.session)
+        self.assertNotEqual(a.state, 'running')
+        a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
+        a.poll(1.1)
+        self.assertEqual(a.state, 'running')
+
+    def test_rejected_start_does_not_start_motor(self):
+        a, endpoints, output = self.make()
+        endpoints[0].rejected_prefix = 'START '
+        self.finish_clock_sync(a, endpoints)
+        self.assertEqual(a.state, 'stopped')
+        self.assertFalse(any(line.startswith('ROT ') for line in endpoints[1].messages))
+        self.assertTrue(any(event[0] == 'sync_error' for event in output))
+
+    def test_missing_start_ack_stops_both_devices(self):
+        a, endpoints, output = self.make()
+        self.finish_clock_sync(a, endpoints)
+        a.poll(5.0)
+        self.assertEqual(a.state, 'stopped')
+        self.assertFalse(any(line.startswith('ROT ') for line in endpoints[1].messages))
+        self.assertEqual(endpoints[1].messages[-1], 'OFF')
+        self.assertTrue(any('启动' in str(event[1]) for event in output if event[0] == 'sync_error'))
+
+    def test_stale_and_duplicate_start_acks_cannot_restart_motor(self):
+        a, endpoints, _ = self.make()
+        self.finish_clock_sync(a, endpoints)
+        a.feed('measurement', b'OK START old-session\n', 1.0)
+        a.poll(1.0)
+        self.assertFalse(any(line.startswith('ROT ') for line in endpoints[1].messages))
+        acknowledgement = f'OK START {a.session}\n'.encode()
+        a.feed('measurement', acknowledgement * 2, 1.1)
+        a.poll(1.1)
+        self.assertEqual(sum(line.startswith('ROT ') for line in endpoints[1].messages), 1)
+
+    def test_rotation_start_send_failure_stops_measurement(self):
+        a, endpoints, output = self.make()
+        self.finish_clock_sync(a, endpoints)
+        endpoints[1].rejected_prefix = 'ROT '
+        a.feed('measurement', f'OK START {a.session}\n'.encode(), 1.0)
+        a.poll(1.0)
+        self.assertEqual(a.state, 'stopped')
+        self.assertEqual(endpoints[0].messages[-2:], ['STOP', 'LASER 0'])
+        self.assertTrue(any(event[0] == 'sync_error' for event in output))
+
+    def test_pixels_waiting_for_rotation_ack_are_preserved(self):
+        a, _, _ = self.make()
+        self.finish_clock_sync(a, a.endpoints.values())
+        session = a.session
+        a.feed('measurement', f'OK START {session}\nPIX {session} 1 1049000 1051000 800\n'.encode(), 1.1)
+        a.poll(1.1)
+        self.assertEqual(a.last_sequence['measurement'], 1)
+        self.assertEqual(len(a.pending), 1)
+        self.assertIsNone(a.builder.anchor)
+        a.feed('rotation', f'OK ROT {session}\n'.encode(), 1.2)
+        a.poll(1.2)
+        self.assertEqual(a.state, 'running')
+        self.assertEqual(len(a.pending), 1)
+
+    def test_late_rotation_ack_does_not_bypass_start_timeout(self):
+        a, endpoints, output = self.make()
+        self.finish_clock_sync(a, endpoints)
+        session = a.session
+        a.feed('measurement', f'OK START {session}\n'.encode(), 1.0)
+        a.poll(1.0)
+        a.feed('rotation', f'OK ROT {session}\n'.encode(), 3.1)
+        a.poll(3.1)
+        self.assertEqual(a.state, 'stopped')
+        self.assertTrue(any(event[0] == 'sync_error' for event in output))
+
     def make(self):
         endpoints = [Endpoint(), Endpoint()]
         output = []
@@ -115,15 +204,10 @@ class AcquisitionTests(unittest.TestCase):
 
     def test_complete_eight_probe_handshake(self):
         a, endpoints, output = self.make()
-        for i in range(8):
-            now = 0.2 + i * 0.1
-            for endpoint in endpoints:
-                endpoint.now = now
-            a.poll(now)
-            for source in a.endpoints:
-                token = a.outstanding[source][0]
-                a.feed(source, f'SYNC {token} {round((now+0.002)*1e6)} {round((now+0.003)*1e6)}\n'.encode(), now+0.005)
-            a.poll(now+0.005)
+        self.finish_clock_sync(a, endpoints)
+        a.feed('measurement', f'OK START {a.session}\n'.encode(), 1.0)
+        a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
+        a.poll(1.1)
         self.assertEqual(a.state, 'running')
         self.assertTrue(endpoints[0].messages[-1].startswith('START '))
         self.assertTrue(endpoints[1].messages[-1].startswith('ROT '))
@@ -289,6 +373,19 @@ class MeasurementFirmwareTests(unittest.TestCase):
         self.assertEqual(f.session, '')
         self.assertIn(b'ERROR CCD_TIMEOUT\r\n', f.lora.writes)
 
+    def test_late_complete_frame_cannot_bypass_capture_timeout(self):
+        f = self.firmware
+        f.handle(b'START abc 20 8 fffe', 0)
+        f.poll()
+        self.tick = 200000
+        f.poll()
+        self.tick = 450001
+        f.ccd.rx.extend(b'\xff\xfe\x03\x20')
+        f.poll()
+        self.assertEqual(f.session, '')
+        self.assertFalse(any(packet.startswith(b'PIX ') for packet in f.lora.writes))
+        self.assertIn(b'ERROR CCD_TIMEOUT\r\n', f.lora.writes)
+
     def test_calibration_takes_one_frame_without_motor(self):
         f = self.firmware
         f.handle(b'CAL 8 raw2', 0)
@@ -300,6 +397,66 @@ class MeasurementFirmwareTests(unittest.TestCase):
         f.poll()
         self.assertEqual(f.session, '')
         self.assertIn(b'PIX CAL 1 200000 205000 800\r\n', f.lora.writes)
+
+    def test_pc_named_calibration_round_trip_through_firmware(self):
+        import queue
+        from radar_app import RadarApp
+        from radar_core import MotorLineParser
+        app = object.__new__(RadarApp)
+        app.calibration_pending = False
+        app.calibration_session = ''
+        app.calibration_parser = MotorLineParser()
+        app.scanning = False
+        app.root = Mock()
+        app.current_pixel_var = Mock()
+        app.events = queue.Queue()
+        app._collect_config = lambda: {'ccd_parser': 'raw2', 'exposure_index': 8}
+        app.measure_endpoint = Mock(is_open=True)
+        app.measure_endpoint.write_line.return_value = True
+        with patch('radar_app.time.perf_counter', return_value=0):
+            app.read_calibration_pixel()
+        command = app.measure_endpoint.write_line.call_args.args[0]
+        f = self.firmware
+        f.lora.rx.extend((command + '\n').encode())
+        f.poll()
+        self.tick = 200000
+        f.poll()
+        self.tick = 205000
+        f.ccd.rx.extend(b'\x03\x20')
+        f.poll()
+        self.tick = 1200000
+        f.poll()
+        self.assertEqual(f.session, '')
+        self.assertEqual(f.laser.value(), 0)
+        self.assertEqual(f.ccd.writes.count(b'@c0081#@'), 1)
+        # A radio packet can be fragmented at any byte boundary.
+        for byte in b''.join(f.lora.writes):
+            app._measurement_data(bytes([byte]), 1.3)
+        self.assertEqual(app.events.get_nowait()[:2], ('calibration_pixel', (app.calibration_session, 800)))
+        self.assertTrue(app.events.empty())
+
+    def test_late_raw2_tail_is_not_forwarded_after_timeout(self):
+        f = self.firmware
+        f.handle(b'START abc 20 8 raw2', 0)
+        f.poll()
+        self.tick = 200000
+        f.poll()
+        self.tick = 205000
+        f.ccd.rx.extend(b'\x03')
+        f.poll()
+        self.tick = 450001
+        f.poll()
+        self.tick = 460000
+        f.ccd.rx.extend(b'\x20')
+        f.poll()
+        self.assertEqual(f.lora.writes[-1], b'ERROR CCD_TIMEOUT\r\n')
+
+    def test_legacy_ccd_command_still_forwards_binary_response(self):
+        f = self.firmware
+        f.handle(b'@c0081#@', 0)
+        f.ccd.rx.extend(b'\x03\x20')
+        f.poll()
+        self.assertIn(b'\x03\x20', f.lora.writes)
 
     def test_extended_clock_survives_counter_wrap(self):
         f = self.firmware

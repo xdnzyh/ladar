@@ -174,6 +174,9 @@ class SynchronizedAcquisition:
                 self._line(source, line, arrival)
         if self.state == "syncing":
             self._sync_poll(now)
+        elif self.state in {"starting_measurement", "starting_rotation"}:
+            if now >= self.start_deadline:
+                self._fail("设备启动确认超时，请检查两端固件和无线链路")
         elif self.state == "running":
             watermark = min(self.latest.values())
             while self.pending and self.pending[0][0] <= watermark:
@@ -229,20 +232,28 @@ class SynchronizedAcquisition:
                 return
         if all(len(items) >= 8 for items in self.exchanges.values()):
             self.clocks = {source: min(items, key=lambda item: item.uncertainty) for source, items in self.exchanges.items()}
-            self.state = "running"
-            self.started_at = now
-            self.last_arrival = {source: now for source in self.endpoints}
             mode = str(self.config.get("measurement_mode", "fffe"))
             if mode not in {"fffe", "raw2"}:
                 self._fail("同步采集支持 fffe 或 raw2 中心像素协议")
                 return
-            rate = float(self.config.get("hardware_sample_rate_hz", 20))
-            exposure = int(self.config.get("exposure_index", 8))
-            self.endpoints["measurement"].write_line(f"START {self.session} {rate:g} {exposure} {mode}")
-            self.endpoints["rotation"].write_line(f"ROT {self.session}")
+            try:
+                rate = float(self.config.get("hardware_sample_rate_hz", 20))
+                exposure = int(self.config.get("exposure_index", 8))
+                if not 1 <= rate <= 100 or not 0 <= exposure <= 13:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                self._fail("采集参数无效：频率需为 1～100 Hz，曝光档位需为 0～13")
+                return
+            self.state = "starting_measurement"
+            self.started_at = now
+            self.start_deadline = now + 2
+            self.last_arrival = {source: now for source in self.endpoints}
+            if not self.endpoints["measurement"].write_line(f"START {self.session} {rate:g} {exposure} {mode}"):
+                self._fail("测距启动命令发送失败")
+                return
             names = {"measurement": "测距", "rotation": "旋转"}
             errors = "，".join(f"{names[name]} ±{clock.uncertainty * 1000:.2f} ms" for name, clock in self.clocks.items())
-            self._status(f"校时完成：{errors}；等待稳定完整扫描")
+            self._status(f"校时完成：{errors}；等待测距端启动确认")
 
     def _line(self, source, line, arrival):
         parts = line.split()
@@ -266,10 +277,27 @@ class SynchronizedAcquisition:
         if parts[0] == "ERROR":
             self._fail(f"{source}: {line}")
             return
-        if parts[0] == "READY" and self.state == "running":
+        if parts[0] == "READY" and self.state in {"starting_measurement", "starting_rotation", "running"}:
             self._fail(f"{source} 设备重启，请重新开始扫描")
             return
-        if self.state != "running" or len(parts) < 2 or parts[1] != self.session:
+        if self.state in {"starting_measurement", "starting_rotation"}:
+            if arrival >= self.start_deadline:
+                self._fail("设备启动确认超时，请检查两端固件和无线链路")
+                return
+            if source == "measurement" and parts == ["OK", "START", self.session] and self.state == "starting_measurement":
+                self.state = "starting_rotation"
+                self.start_deadline = arrival + 2
+                if not self.endpoints["rotation"].write_line(f"ROT {self.session}"):
+                    self._fail("旋转启动命令发送失败")
+                    return
+                self._status("测距端已启动，等待旋转端启动确认")
+                return
+            if source == "rotation" and parts == ["OK", "ROT", self.session] and self.state == "starting_rotation":
+                self.state = "running"
+                self.last_arrival[source] = arrival
+                self._status("两端已启动，等待稳定完整扫描")
+                return
+        if self.state not in {"running", "starting_rotation"} or len(parts) < 2 or parts[1] != self.session:
             return
         try:
             if source == "measurement" and parts[0] == "PIX" and len(parts) == 6:
