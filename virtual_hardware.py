@@ -4,10 +4,9 @@ from dataclasses import dataclass, replace
 import heapq
 import math
 import random
-from collections import deque
 
 from navigation_core import HiddenWorld, VelocityCommand, mecanum_mix, wrap_angle
-from synchronized_acquisition import TimedSweepBuilder, EstimatedSweepBuilder
+from scan_acquisition import DistanceObservationReceiver, HardwareObservation, ReceivedObservation
 
 
 @dataclass(frozen=True)
@@ -101,21 +100,6 @@ def simulation_parameters(config: dict) -> SimulationParameters:
     return parameters
 
 
-@dataclass(frozen=True)
-class HardwareObservation:
-    source: str
-    sequence: int
-    device_timestamp: float
-    distance: float | None = None
-    status: str = "ok"
-
-
-@dataclass(frozen=True)
-class ReceivedObservation:
-    observation: HardwareObservation
-    arrival_time: float
-
-
 class VirtualCommunicationLink:
     def __init__(self, parameters: SimulationParameters, seed: int):
         self.p = parameters
@@ -145,103 +129,6 @@ class VirtualCommunicationLink:
     def receive(self, now: float):
         while self.pending and self.pending[0][0] <= now:
             yield heapq.heappop(self.pending)[2]
-
-
-class DistanceObservationReceiver:
-    def __init__(self, config: dict):
-        self.config = config
-        self.builder = EstimatedSweepBuilder(config) if config.get("arbitrary_phase_scans", False) else TimedSweepBuilder(config)
-        self.reorder_s = float(config.get("simulation_reorder_s", 0.3))
-        if not math.isfinite(self.reorder_s) or self.reorder_s < 0:
-            raise ValueError("重排等待时间必须是非负有限数")
-        self.pending = []
-        self.seen = {}
-        self.counter = 0
-        self.watermark = -math.inf
-        self.accepted = self.discarded = self.late = self.duplicates = 0
-        self.warmup = 0
-        self._preview = deque(maxlen=512)
-        self.preview_points = ()
-
-    def reset(self, now: float):
-        if isinstance(self.builder, EstimatedSweepBuilder):
-            self.builder.begin_after(now)
-            return
-        previous_period = self.builder.previous_period
-        stable_periods = self.builder.stable_periods
-        self.builder.reset()
-        self.builder.previous_period = previous_period
-        self.builder.stable_periods = stable_periods
-        self.pending.clear()
-        self.seen.clear()
-        self.watermark = now
-
-    def feed(self, received: ReceivedObservation):
-        packet = received.observation
-        timestamp = packet.device_timestamp
-        key = packet.source, packet.sequence
-        if key in self.seen:
-            self.duplicates += 1
-            return
-        if not math.isfinite(timestamp) or timestamp <= self.watermark:
-            self.late += 1
-            return
-        self.seen[key] = timestamp
-        self.counter += 1
-        heapq.heappush(self.pending, (timestamp, 0 if packet.source == "rotation" else 1, self.counter, packet))
-
-    def poll(self, now: float):
-        cutoff = max(self.watermark, now - self.reorder_s)
-        results = []
-        def finish_window(timestamp):
-            if isinstance(self.builder, EstimatedSweepBuilder):
-                result = self.builder.poll(timestamp)
-                if result is not None:
-                    if result[1]:
-                        self.accepted += 1
-                        results.append(result)
-                    else:
-                        self.discarded += 1
-        while self.pending and self.pending[0][0] <= cutoff:
-            timestamp, _, _, packet = heapq.heappop(self.pending)
-            finish_window(timestamp)
-            if packet.source == "range":
-                distance = packet.distance
-                if packet.status in {"ok", "over_range"} and distance is not None and math.isfinite(distance):
-                    if float(self.config.get("min_range_m", 0.08)) <= distance <= float(self.config.get("max_range_m", 3.0)):
-                        self.builder.sample(timestamp, 0.0, 0, distance)
-                        if (isinstance(self.builder, EstimatedSweepBuilder) and self.builder.anchor is not None
-                                and self.builder.stable_periods >= 2 and self.builder.period_s is not None
-                                and 0 <= timestamp - self.builder.anchor[0] <= self.builder.period_s * 1.5):
-                            direction = 1 if self.config.get("clockwise", True) else -1
-                            angle = math.radians(float(self.config.get("angle_offset_deg", 0))) + direction * math.tau * (timestamp - self.builder.anchor[0]) / self.builder.period_s
-                            self._preview.append((timestamp, angle % math.tau, distance))
-            elif packet.source == "rotation":
-                if isinstance(self.builder, EstimatedSweepBuilder):
-                    before = self.builder.invalidated
-                    self.builder.trigger(timestamp, 0.0, packet.sequence)
-                    self.discarded += self.builder.invalidated - before
-                    if self.builder.stable_periods < 2:
-                        self.warmup += 1
-                    continue
-                had_anchor = self.builder.anchor is not None
-                points = self.builder.trigger(timestamp, 0.0, packet.sequence)
-                if points:
-                    self.accepted += 1
-                    results.append((packet.sequence, points, self.builder.period_s))
-                elif had_anchor:
-                    if self.builder.reason == "等待连续稳定转动":
-                        self.warmup += 1
-                    else:
-                        self.discarded += 1
-        finish_window(cutoff)
-        period = self.builder.period_s or float(self.config.get("radar_period_s", 1.5))
-        while self._preview and self._preview[0][0] < cutoff - period:
-            self._preview.popleft()
-        self.preview_points = tuple(self._preview)
-        self.watermark = cutoff
-        self.seen = {key: timestamp for key, timestamp in self.seen.items() if timestamp > cutoff}
-        return results
 
 
 class VirtualRotationHardware:
