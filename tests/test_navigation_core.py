@@ -72,6 +72,19 @@ class SimulatorTests(unittest.TestCase):
         command = VelocityCommand(right_mps=0.13, duration_s=0.42)
         self.assertFalse(navigator._command_has_clearance(command))
 
+    def test_one_way_planner_rejects_path_behind_current_progress(self):
+        route_distances = {(0, 0): 0.0, (0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0}
+        self.assertTrue(
+            NavigationEngine._is_forward_path(
+                [(0, 2), (0, 3)], route_distances, current_progress=2.0
+            )
+        )
+        self.assertFalse(
+            NavigationEngine._is_forward_path(
+                [(0, 2), (0, 1), (0, 0)], route_distances, current_progress=2.0
+            )
+        )
+
     def test_navigation_builds_map_without_access_to_hidden_map(self):
         world = HiddenWorld(seed=20260903)
         navigator = NavigationEngine(

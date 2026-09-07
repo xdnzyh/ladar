@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
 from serial_backend import SerialEndpoint, list_serial_ports
+from data_fusion import DeviceClock, parse_trigger
 
 
 APP_NAME = "TriScan 雷达控制台"
@@ -256,6 +257,9 @@ class RadarApp:
         self.events: queue.Queue = queue.Queue()
         self.ccd_parser = CCDFrameParser(str(self.config.get("ccd_parser", "fffe")))
         self.motor_parser = MotorLineParser()
+        self.motor_clock = DeviceClock()
+        self.calibration_parser = MotorLineParser()
+        self.calibration_pending = False
         self.calibration = CalibrationModel.from_dict(self.config.get("calibration"))
         if demo:
             self.calibration = CalibrationModel(p0=740.0, k=120.0, points=[(860, 1.0), (800, 2.0)], rmse=0.0)
@@ -450,13 +454,16 @@ class RadarApp:
         ttk.Label(parent, text="距离标定", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         self.calibration_state_var = tk.StringVar(value="未标定")
         ttk.Label(parent, textvariable=self.calibration_state_var, style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
+        self.current_pixel_var = tk.StringVar(value="当前像素：—")
+        ttk.Label(parent, textvariable=self.current_pixel_var, style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
 
-        self.cal_tree = ttk.Treeview(parent, columns=("pixel", "distance"), show="headings", height=11)
+        self.cal_tree = ttk.Treeview(parent, columns=("pixel", "distance"), show="headings", height=8)
         self.cal_tree.heading("pixel", text="中心像素")
         self.cal_tree.heading("distance", text="实测距离 / m")
         self.cal_tree.column("pixel", width=110, anchor="center")
         self.cal_tree.column("distance", width=130, anchor="center")
         self.cal_tree.pack(fill="x")
+        ttk.Button(parent, text="读取当前像素", command=self.read_calibration_pixel).pack(fill="x", pady=(10, 0))
 
         row = ttk.Frame(parent, style="Panel.TFrame")
         row.pack(fill="x", pady=10)
@@ -466,8 +473,7 @@ class RadarApp:
         ttk.Button(parent, text="清空标定", command=self.clear_calibration).pack(fill="x", pady=(8, 0))
 
         note = (
-            "在多个已知距离处保持雷达静止，每个位置等待读数稳定后添加当前点。"
-            "建议覆盖实际量程并采集不少于 6 个距离。"
+            "保持雷达静止，在不少于 6 个已知距离处读取像素并添加标定点。"
         )
         ttk.Label(parent, text=note, style="Muted.TLabel", wraplength=330, justify="left").pack(anchor="w", pady=(16, 0))
         self._refresh_calibration_view()
@@ -649,14 +655,14 @@ class RadarApp:
             messagebox.showerror("参数错误", str(exc))
             return
         self.rotation.reset()
+        self.motor_clock = DeviceClock()
         self.ccd_parser.reset()
         self.motor_parser.reset()
         self.measure_endpoint.write_line(f"@c{exposure:04d}#@")
         self.measure_endpoint.write_line("LASER 1")
         self.laser_on = True
         self.laser_button.configure(text="关闭激光")
-        self.send_motor("RESETCNT")
-        self.send_motor("ON")
+        self.send_motor("ROT 1")
         self.scanning = True
         self.last_request_time = 0.0
         self.scan_button.configure(text="停止扫描")
@@ -720,6 +726,23 @@ class RadarApp:
             self._log(f"TX MOTOR  {command}")
 
     def _measurement_data(self, data: bytes, timestamp: float) -> None:
+        if self.calibration_pending:
+            for line in self.calibration_parser.feed(data):
+                parts = line.split()
+                if len(parts) == 6 and parts[:2] == ["PIX", "CAL"]:
+                    try:
+                        pixel = int(parts[5])
+                    except ValueError:
+                        continue
+                    self.calibration_pending = False
+                    if 0 <= pixel <= 1499:
+                        self.events.put(("ccd_pixel", pixel, timestamp))
+                    else:
+                        self.events.put(("error", "未检测到有效中心像素", timestamp))
+                elif line.startswith("ERROR"):
+                    self.calibration_pending = False
+                    self.events.put(("error", line, timestamp))
+            return
         for pixel in self.ccd_parser.feed(data):
             self.events.put(("ccd_pixel", pixel, timestamp))
 
@@ -763,6 +786,7 @@ class RadarApp:
 
     def _handle_pixel(self, pixel: int, timestamp: float) -> None:
         self.latest_pixel = pixel
+        self.current_pixel_var.set(f"当前像素：{pixel}")
         distance = self.calibration.distance(pixel)
         if distance is None:
             return
@@ -790,10 +814,35 @@ class RadarApp:
     def _handle_motor_line(self, line: str, timestamp: float) -> None:
         self.last_motor_message = line
         self._log(f"RX MOTOR  {line}")
-        match = re.match(r"TRIG(?:\s+(\d+))?", line, re.I)
-        if match:
-            count = int(match.group(1)) if match.group(1) else None
-            self.rotation.trigger(timestamp, count)
+        parsed = parse_trigger(line)
+        if parsed is not None:
+            count, device_us = parsed
+            mapped = timestamp if device_us is None else self.motor_clock.observe(device_us, timestamp)
+            self.rotation.trigger(mapped, count)
+            return
+
+    def read_calibration_pixel(self) -> None:
+        if self.calibration_pending:
+            return
+        if not self.measure_endpoint.is_open or self.scanning:
+            messagebox.showwarning("无法读取", "请连接测距设备并停止扫描。")
+            return
+        config = self._collect_config()
+        mode = config["ccd_parser"]
+        if mode not in {"fffe", "raw2"}:
+            messagebox.showwarning("协议不支持", "标定读取请选择 FF FE 或原始 2 字节协议。")
+            return
+        self.latest_pixel = None
+        self.calibration_parser.reset()
+        self.calibration_pending = True
+        self.calibration_deadline = time.perf_counter() + 2.0
+        self.measure_endpoint.write_line(f"CAL {config['exposure_index']} {mode}")
+        self.root.after(2000, self._calibration_timeout)
+
+    def _calibration_timeout(self):
+        if self.calibration_pending and time.perf_counter() >= self.calibration_deadline:
+            self.calibration_pending = False
+            self._log("标定读取超时，请确认已烧录配套测距固件并选择正确的中心像素协议")
 
     def _draw(self) -> None:
         points = [(point.x, point.y, alpha) for point, alpha in self.rotation.all_points()]

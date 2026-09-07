@@ -517,7 +517,7 @@ class NavigationEngine:
                 second_angle += math.tau
             dense.append(first)
             gap = second_angle - first_angle
-            if gap <= math.radians(4) or abs(second.distance_m - first.distance_m) > 0.28:
+            if gap <= math.radians(4) or gap > math.radians(15) or abs(second.distance_m - first.distance_m) > 0.28:
                 continue
             subdivisions = min(5, max(1, math.ceil(gap / math.radians(4))))
             for step in range(1, subdivisions):
@@ -544,12 +544,15 @@ class NavigationEngine:
             route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
             reachable, parents = self.grid.reachable_tree(start, blocked)
             route_distances, _ = self.grid.reachable_tree(route_start, blocked)
+            current_progress = route_distances.get(start, 0.0)
             for cluster in clusters[:8]:
                 goal = self._reachable_frontier_goal(cluster, blocked, set(reachable))
                 if goal is None:
                     continue
                 path = self.grid.path_from_tree(parents, goal)
                 if len(path) < 2:
+                    continue
+                if not self._is_forward_path(path, route_distances, current_progress):
                     continue
                 self.reachable_frontier_count += 1
                 progress = route_distances.get(goal, 0.0)
@@ -618,7 +621,7 @@ class NavigationEngine:
             if (
                 current_progress is not None
                 and probe_progress is not None
-                and probe_progress < current_progress - 2
+                and probe_progress < current_progress - 1
             ):
                 continue
             novelty = min(
@@ -647,6 +650,23 @@ class NavigationEngine:
                 self.last_progress_angle_world = chosen_world
             return command
         return VelocityCommand()
+
+    @staticmethod
+    def _is_forward_path(
+        path: Sequence[tuple[int, int]],
+        route_distances: Mapping[tuple[int, int], float],
+        current_progress: float,
+    ) -> bool:
+        """Reject paths that revisit cells behind the current one-way progress."""
+        minimum_progress = current_progress - 1.0
+        progress_values = [route_distances.get(cell) for cell in path]
+        if any(progress is None or progress < minimum_progress for progress in progress_values):
+            return False
+        return all(
+            later + 1.0 >= earlier
+            for earlier, later in zip(progress_values, progress_values[1:])
+            if earlier is not None and later is not None
+        )
 
     def _free_distance_field(self, start: tuple[int, int]) -> dict[tuple[int, int], int]:
         if not self.grid.in_bounds(*start):

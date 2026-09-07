@@ -215,6 +215,24 @@ class MotorLineParser:
         return lines
 
 
+class DeviceClockMapper:
+    def __init__(self, keep: int = 9) -> None:
+        self.offsets: Deque[float] = deque(maxlen=max(3, keep))
+
+    def reset(self) -> None:
+        self.offsets.clear()
+
+    def observe(self, device_us: int, host_timestamp: float) -> None:
+        offset = host_timestamp - float(device_us) / 1_000_000.0
+        self.offsets.append(offset)
+
+    def to_device_time(self, host_timestamp: float) -> float:
+        if not self.offsets:
+            return host_timestamp
+        values = sorted(self.offsets)
+        return host_timestamp - values[len(values) // 2]
+
+
 @dataclass
 class PolarPoint:
     distance_m: float
@@ -278,7 +296,10 @@ class RotationTracker:
         completed: list[PolarPoint] = []
         if self.last_trigger is not None:
             period = timestamp - self.last_trigger
-            if 0.1 <= period <= 60:
+            if timestamp <= self.last_trigger or (count is not None and count == self.trigger_count):
+                return []
+            consecutive = count is None or count == self.trigger_count + 1
+            if 0.1 <= period <= 60 and consecutive:
                 self.period_history.append(period)
                 ordered = sorted(self.period_history)
                 self.period_s = ordered[len(ordered) // 2]
@@ -325,8 +346,8 @@ class RotationTracker:
         points: list[PolarPoint] = []
         for sample in samples:
             phase = (sample.timestamp - start) / period
-            if 0.0 <= phase < 1.05:
-                points.append(self._to_point(sample, min(1.0, phase)))
+            if 0.0 <= phase < 1.0:
+                points.append(self._to_point(sample, phase))
         return points
 
     def _to_point(self, sample: PendingSample, phase: float) -> PolarPoint:

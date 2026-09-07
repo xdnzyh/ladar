@@ -63,7 +63,7 @@ class SerialEndpoint:
         self._reader_thread: threading.Thread | None = None
         self._writer_thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._write_queue: queue.Queue[bytes | None] = queue.Queue()
+        self._write_queue: queue.Queue = queue.Queue()
 
     @property
     def is_open(self) -> bool:
@@ -75,6 +75,7 @@ class SerialEndpoint:
         self.port = port
         self.baudrate = baudrate
         self._stop.clear()
+        self._write_queue = queue.Queue()
         self._transport = _open_transport(port, baudrate)
         self._reader_thread = threading.Thread(target=self._read_loop, name=f"{self.name}-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name=f"{self.name}-writer", daemon=True)
@@ -96,16 +97,16 @@ class SerialEndpoint:
         self._reader_thread = None
         self._writer_thread = None
 
-    def write(self, data: bytes | str) -> bool:
+    def write(self, data: bytes | str, on_sent: Callable[[float], None] | None = None) -> bool:
         if not self.is_open:
             return False
         if isinstance(data, str):
             data = data.encode("ascii", "ignore")
-        self._write_queue.put(bytes(data))
+        self._write_queue.put((bytes(data), on_sent))
         return True
 
-    def write_line(self, text: str) -> bool:
-        return self.write(text.rstrip("\r\n") + "\r\n")
+    def write_line(self, text: str, on_sent: Callable[[float], None] | None = None) -> bool:
+        return self.write(text.rstrip("\r\n") + "\r\n", on_sent)
 
     def _read_loop(self) -> None:
         try:
@@ -134,7 +135,10 @@ class SerialEndpoint:
                 transport = self._transport
                 if transport is None:
                     break
-                transport.write(data)
+                payload, on_sent = data
+                if on_sent is not None:
+                    on_sent(time.perf_counter())
+                transport.write(payload)
         except Exception as exc:
             if not self._stop.is_set():
                 self.on_error(f"{self.name}发送失败：{exc}")
@@ -162,7 +166,7 @@ class _PySerialTransport:
         return bool(self.serial_port and self.serial_port.is_open)
 
     def read(self, size: int) -> bytes:
-        return self.serial_port.read(size)
+        return self.serial_port.read(max(1, min(size, self.serial_port.in_waiting)))
 
     def write(self, data: bytes) -> None:
         self.serial_port.write(data)
@@ -173,6 +177,14 @@ class _PySerialTransport:
 
 
 if sys.platform == "win32":
+    class COMSTAT(ctypes.Structure):
+        _fields_ = [
+            ("flags", wintypes.DWORD),
+            ("cbInQue", wintypes.DWORD),
+            ("cbOutQue", wintypes.DWORD),
+        ]
+
+
     class DCB(ctypes.Structure):
         _fields_ = [
             ("DCBlength", wintypes.DWORD),
@@ -261,6 +273,13 @@ class _Win32SerialTransport:
     def read(self, size: int) -> bytes:
         if not self.handle:
             return b""
+        errors = wintypes.DWORD()
+        state = COMSTAT()
+        if not self.kernel32.ClearCommError(self.handle, ctypes.byref(errors), ctypes.byref(state)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if errors.value:
+            raise OSError(f"串口通信错误：{errors.value}")
+        size = max(1, min(size, state.cbInQue))
         buffer = ctypes.create_string_buffer(size)
         count = wintypes.DWORD()
         ok = self.kernel32.ReadFile(self.handle, buffer, size, ctypes.byref(count), None)

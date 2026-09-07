@@ -45,6 +45,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parser.feed(b"READY\r\nTR"), ["READY"])
         self.assertEqual(parser.feed(b"IG 2\nSTATUS MOTOR=1 COUNT=2\r"), ["TRIG 2", "STATUS MOTOR=1 COUNT=2"])
 
+    def test_rotation_firmware_report_line(self):
+        parser = MotorLineParser()
+        line = b"SLIDE_REPORT WINDOW=1 CYCLE[12-12] TIME_S=2.50 AVG_RPS=0.400\r\n"
+        self.assertEqual(parser.feed(line), [line.decode().strip()])
+
 
 class RotationTests(unittest.TestCase):
     def test_completed_revolution_uses_actual_period(self):

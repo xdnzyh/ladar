@@ -73,7 +73,7 @@ class SequenceMonitor:
         return missing
 
 
-_TRIGGER_RE = re.compile(r"^TRIG(?:[ ,]+(\d+))?(?:[ ,]+(\d+))?$", re.I)
+_TRIGGER_RE = re.compile(r"^TRIG(?:[ ,]+(\d+))?(?:[ ,]+(?:TICK_US=)?(\d+))?$", re.I)
 def parse_trigger(line: str) -> tuple[int | None, int | None] | None:
     match = _TRIGGER_RE.match(line.strip())
     if not match:

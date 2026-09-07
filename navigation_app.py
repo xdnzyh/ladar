@@ -27,6 +27,7 @@ from navigation_core import (
 from radar_app import COLORS, RadarCanvas
 from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
 from serial_backend import SerialEndpoint, list_serial_ports
+from synchronized_acquisition import SynchronizedAcquisition
 
 
 if sys.platform == "win32":
@@ -44,6 +45,15 @@ RADAR_CONFIG_PATH = APP_DIR / "radar_config.json"
 NAV_CONFIG_PATH = APP_DIR / "navigation_config.json"
 
 DEFAULT_CONFIG = {
+    "synchronized_acquisition": True,
+    "hardware_sample_rate_hz": 20.0,
+    "exposure_index": 8,
+    "max_timing_position_error_m": 0.04,
+    "clock_drift_bound_ppm": 500,
+    "irq_timestamp_uncertainty_ms": 2.0,
+    "sync_scan_duration_s": 30,
+    "period_tolerance": 0.05,
+    "max_scan_gap_deg": 25,
     "measurement_port": "",
     "rotation_port": "",
     "chassis_port": "",
@@ -90,6 +100,7 @@ def load_configuration() -> dict:
         "max_range_m",
         "angle_offset_deg",
         "clockwise",
+        "exposure_index",
     ):
         if key in radar_config:
             config[key] = radar_config[key]
@@ -104,6 +115,10 @@ def load_configuration() -> dict:
             loaded = json.loads(NAV_CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 config.update(loaded)
+                if CalibrationModel.from_dict(radar_config.get("calibration")).ready:
+                    config["calibration"] = radar_config.get("calibration", {})
+                    config["measurement_mode"] = radar_config.get("ccd_parser", config["measurement_mode"])
+                    config["exposure_index"] = radar_config.get("exposure_index", config["exposure_index"])
         except (OSError, ValueError):
             pass
     return config
@@ -343,6 +358,10 @@ class NavigationApp:
         self.measure_endpoint = SerialEndpoint("测距串口", self._measurement_data, self._serial_error)
         self.rotation_endpoint = SerialEndpoint("旋转串口", self._rotation_data, self._serial_error)
         self.chassis_endpoint = SerialEndpoint("底盘串口", self._chassis_data, self._serial_error)
+        self.sync = SynchronizedAcquisition(
+            self.measure_endpoint, self.rotation_endpoint, self.calibration, self.config,
+            lambda kind, value, timestamp: self.events.put((kind, value, timestamp)),
+        )
 
         self._build_window()
         self._build_styles()
@@ -610,7 +629,7 @@ class NavigationApp:
                 messagebox.showwarning("设备未连接", "请先连接对应串口。")
                 return
             mode = str(self.config.get("measurement_mode", "fffe"))
-            if mode != "timestamped_ascii" and not self.calibration.ready:
+            if (self.config.get("synchronized_acquisition", True) or mode != "timestamped_ascii") and not self.calibration.ready:
                 messagebox.showwarning("尚未标定", "当前测距格式需要先在原雷达程序中完成距离标定。")
                 return
             if self.view_mode.get() == "navigation":
@@ -634,10 +653,13 @@ class NavigationApp:
         if self.simulation:
             self.simulation.stop()
         if self.source == "hardware":
+            if self.config.get("synchronized_acquisition", True):
+                self.sync.stop()
             self.rotation_endpoint.write_line("OFF")
             self.measure_endpoint.write_line("LASER 0")
             self._send_chassis_stop()
         self.running = False
+        self.accept_samples = False
         self.moving = False
         self.start_button.configure(text="开始")
         self.connection_label.configure(
@@ -665,6 +687,12 @@ class NavigationApp:
         self._log("模拟场景已重置")
 
     def _start_hardware_scan(self) -> None:
+        if self.config.get("synchronized_acquisition", True):
+            self.accept_samples = True
+            self.rotation.reset()
+            self.sync.start()
+            self.connection_label.configure(text="●  校时中", fg=COLORS["yellow"])
+            return
         self.accept_samples = True
         self.rotation.reset()
         self.ccd_parser.reset()
@@ -677,6 +705,9 @@ class NavigationApp:
         self.connection_label.configure(text="●  实物扫描", fg=COLORS["green"])
 
     def _measurement_data(self, data: bytes, host_time: float) -> None:
+        if self.config.get("synchronized_acquisition", True):
+            self.sync.feed("measurement", data, host_time)
+            return
         if str(self.config.get("measurement_mode")) == "timestamped_ascii":
             for line in self.measure_line_parser.feed(data):
                 parsed = parse_timestamped_distance(line)
@@ -692,6 +723,9 @@ class NavigationApp:
                     self.events.put(("range", (distance, pixel, None), host_time))
 
     def _rotation_data(self, data: bytes, host_time: float) -> None:
+        if self.config.get("synchronized_acquisition", True):
+            self.sync.feed("rotation", data, host_time)
+            return
         for line in self.rotation_parser.feed(data):
             parsed = parse_trigger(line)
             if parsed is not None:
@@ -720,6 +754,8 @@ class NavigationApp:
 
     def _poll(self) -> None:
         now = time.perf_counter()
+        if self.source == "hardware" and self.config.get("synchronized_acquisition", True):
+            self.sync.poll(now)
         event_limit = 2 if self.source == "simulation" else 64
         for _ in range(event_limit):
             try:
@@ -734,7 +770,7 @@ class NavigationApp:
             timestamp, _, kind, value = heapq.heappop(self.pending_events)
             self._handle_event(kind, value, timestamp)
 
-        if self.running and self.source == "hardware" and self.accept_samples and self.measure_endpoint.is_open:
+        if self.running and self.source == "hardware" and not self.config.get("synchronized_acquisition", True) and self.accept_samples and self.measure_endpoint.is_open:
             interval = 1.0 / max(1.0, float(self.config.get("sample_rate_hz", 80.0)))
             if now - self.last_request_time >= interval:
                 self.measure_endpoint.write_line(str(self.config.get("ccd_command", "@c0071#@")))
@@ -742,7 +778,40 @@ class NavigationApp:
         self.root.after(15, self._poll)
 
     def _handle_event(self, kind: str, value: object, timestamp: float) -> None:
-        if kind == "sweep":
+        if kind == "sync_status":
+            if not self.running:
+                return
+            self._log(str(value))
+            label = "校时中" if self.sync.state == "syncing" else "同步采集中"
+            self.connection_label.configure(text="●  " + label, fg=COLORS["cyan"])
+            if str(value) != "完整扫描":
+                self.navigator.state = "校时中" if self.sync.state == "syncing" else "等待有效扫描"
+                self.navigator.detail = str(value)
+        elif kind == "sync_error":
+            self.stop()
+            self._log(str(value))
+            self.connection_label.configure(text="●  同步采集异常", fg=COLORS["red"])
+            self.navigator.state = "采集异常"
+            self.navigator.detail = str(value)
+        elif kind == "sync_expired":
+            if self.running and not self.moving:
+                self._start_hardware_scan()
+        elif kind == "sync_range":
+            session, distance = value
+            if self.running and session == self.sync.session:
+                self.latest_distance = distance
+        elif kind == "sync_period":
+            session, period = value
+            if self.running and session == self.sync.session:
+                self.rotation.period_s = period
+                self.rotation.period_history.append(period)
+        elif kind == "sync_sweep":
+            session, sequence, polar_points, period = value
+            if self.running and not self.moving and session == self.sync.session:
+                self.rotation.period_s = period
+                self.rotation.period_history.append(period)
+                self._handle_sweep(sequence, [ScanPoint(p.angle_rad, p.distance_m) for p in polar_points], timestamp)
+        elif kind == "sweep":
             sequence, points, bias = value  # type: ignore[misc]
             self.latest_bias = float(bias)
             self._handle_sweep(int(sequence), list(points), timestamp)
@@ -821,6 +890,8 @@ class NavigationApp:
             return
         self.moving = True
         self.accept_samples = False
+        if self.config.get("synchronized_acquisition", True):
+            self.sync.stop()
         self.rotation_endpoint.write_line("OFF")
         self.chassis_endpoint.write_line(line)
         self.navigator.predict_motion(command)
@@ -836,6 +907,9 @@ class NavigationApp:
         self.rotation.reset()
         self.accept_samples = True
         self.moving = False
+        if self.config.get("synchronized_acquisition", True):
+            self._start_hardware_scan()
+            return
         self.rotation_endpoint.write_line("RESETCNT")
         self.rotation_endpoint.write_line("ON")
 
@@ -868,7 +942,7 @@ class NavigationApp:
             period = self.rotation.period_s
         else:
             period = float(self.config.get("radar_period_s", 1.5))
-        self.metric_vars["period"].set(f"{period:.2f}")
+        self.metric_vars["period"].set("—" if self.source == "hardware" and not self.rotation.period_history else f"{period:.2f}")
         self.metric_vars["scans"].set(str(self.navigator.completed_scans))
         self.metric_vars["drift"].set(f"{self.latest_bias * 1000:+.1f}" if self.source == "simulation" else "—")
         self.map_percent_var.set(f"{self.grid.known_area_m2():.1f} m²" if navigation_view else "—")
