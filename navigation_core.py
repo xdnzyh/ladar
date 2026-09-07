@@ -78,6 +78,11 @@ class OccupancyGrid:
     UNKNOWN = 0
     FREE = -1
     OCCUPIED = 1
+    HIT_LOG_ODDS = 2.0
+    FREE_LOG_ODDS = 1.0
+    MIN_QUALITY = 0.25
+    MIN_SCAN_CONFIDENCE = 0.55
+    ENDPOINT_SIGMA_CELLS = 0.75
 
     def __init__(self, width: int = 180, height: int = 180, resolution_m: float = 0.04) -> None:
         if width <= 0 or height <= 0 or resolution_m <= 0:
@@ -89,10 +94,14 @@ class OccupancyGrid:
         self.origin_row = round(self.height * 0.84)
         self.log_odds = [0] * (self.width * self.height)
         self.update_count = 0
+        self._revision = 0
+        self._field_cache = {}
 
     def clear(self) -> None:
         self.log_odds[:] = [0] * len(self.log_odds)
         self.update_count = 0
+        self._revision += 1
+        self._field_cache.clear()
 
     def _index(self, col: int, row: int) -> int:
         return row * self.width + col
@@ -111,7 +120,7 @@ class OccupancyGrid:
             (self.origin_row - row) * self.resolution_m,
         )
 
-    def value(self, col: int, row: int) -> int:
+    def value(self, col: int, row: int) -> float:
         if not self.in_bounds(col, row):
             return 20
         return self.log_odds[self._index(col, row)]
@@ -124,11 +133,12 @@ class OccupancyGrid:
             return self.FREE
         return self.UNKNOWN
 
-    def _add(self, col: int, row: int, amount: int) -> None:
+    def _add(self, col: int, row: int, amount: float) -> None:
         if not self.in_bounds(col, row):
             return
         index = self._index(col, row)
         self.log_odds[index] = max(-20, min(20, self.log_odds[index] + amount))
+        self._revision += 1
 
     @staticmethod
     def _line_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
@@ -159,21 +169,98 @@ class OccupancyGrid:
         points: Sequence[ScanPoint],
         max_range_m: float,
         min_range_m: float = 0.08,
+        scan_confidence: float = 1.0,
     ) -> None:
+        if not math.isfinite(scan_confidence) or scan_confidence < self.MIN_SCAN_CONFIDENCE:
+            return
+        confidence = min(1.0, scan_confidence)
         start = self.world_to_cell(pose.x, pose.y)
-        self._add(*start, -4)
+        hits = {}
+        frees = {}
         for point in points:
-            if not min_range_m <= point.distance_m <= max_range_m:
+            if (not math.isfinite(point.angle_rad) or not math.isfinite(point.quality)
+                    or point.quality < self.MIN_QUALITY
+                    or not min_range_m <= point.distance_m <= max_range_m):
                 continue
+            weight = min(1.0, point.quality) * confidence / (1 + 0.1 * (point.distance_m / max_range_m) ** 2)
             endpoint = pose.local_to_world(point.x, point.y)
             end = self.world_to_cell(*endpoint)
             cells = self._line_cells(start, end)
-            if len(cells) > 1:
-                for col, row in cells[:-1]:
-                    self._add(col, row, -2)
-            if point.distance_m < max_range_m * 0.985:
-                self._add(*cells[-1], 6)
+            has_hit = point.distance_m < max_range_m - 1e-6
+            for cell in cells[:-1] if has_hit else cells:
+                frees[cell] = max(frees.get(cell, 0.0), weight)
+            if has_hit:
+                sigma = self.resolution_m * self.ENDPOINT_SIGMA_CELLS
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        cell = end[0] + dx, end[1] + dy
+                        cx, cy = self.cell_to_world(*cell)
+                        squared = (cx - endpoint[0]) ** 2 + (cy - endpoint[1]) ** 2
+                        spatial_weight = math.exp(-squared / (2 * sigma ** 2))
+                        hits[cell] = max(hits.get(cell, 0.0), weight * spatial_weight)
+        if not hits and not frees:
+            return
+        for cell, weight in frees.items():
+            if cell not in hits:
+                self._add(*cell, -self.FREE_LOG_ODDS * weight)
+        for cell, weight in hits.items():
+            self._add(*cell, self.HIT_LOG_ODDS * weight)
         self.update_count += 1
+
+    @staticmethod
+    def _squared_distance_transform(values: Sequence[float]) -> list[float]:
+        sites = [index for index, value in enumerate(values) if math.isfinite(value)]
+        if not sites:
+            return [math.inf] * len(values)
+        vertices = [sites[0]]
+        boundaries = [-math.inf, math.inf]
+        for site in sites[1:]:
+            previous = vertices[-1]
+            crossing = ((values[site] + site * site) - (values[previous] + previous * previous)) / (2 * (site - previous))
+            while crossing <= boundaries[-2]:
+                vertices.pop()
+                boundaries.pop(-2)
+                previous = vertices[-1]
+                crossing = ((values[site] + site * site) - (values[previous] + previous * previous)) / (2 * (site - previous))
+            vertices.append(site)
+            boundaries.insert(-1, crossing)
+        result = []
+        vertex = 0
+        for index in range(len(values)):
+            while boundaries[vertex + 1] < index:
+                vertex += 1
+            source = vertices[vertex]
+            result.append((index - source) ** 2 + values[source])
+        return result
+
+    def likelihood_field(self, sigma_m: float, minimum_evidence: float = 4.0) -> list[float]:
+        if not math.isfinite(sigma_m) or sigma_m <= 0 or not math.isfinite(minimum_evidence) or minimum_evidence <= 0:
+            raise ValueError("距离场尺度和证据阈值必须为正有限数")
+        key = (sigma_m, minimum_evidence)
+        cached = self._field_cache.get(key)
+        if cached is not None and cached[0] == self._revision:
+            return cached[1]
+        distance_key = ("distance", minimum_evidence)
+        distances = self._field_cache.get(distance_key)
+        if distances is None or distances[0] != self._revision:
+            horizontal = []
+            for row in range(self.height):
+                horizontal.extend(self._squared_distance_transform([
+                    0.0 if self.log_odds[row * self.width + col] >= minimum_evidence else math.inf
+                    for col in range(self.width)]))
+            squared = [math.inf] * len(self.log_odds)
+            for col in range(self.width):
+                column = self._squared_distance_transform([horizontal[row * self.width + col] for row in range(self.height)])
+                for row, value in enumerate(column):
+                    squared[row * self.width + col] = value
+            self._field_cache.clear()
+            self._field_cache[distance_key] = (self._revision, squared)
+        else:
+            squared = distances[1]
+        coefficient = self.resolution_m ** 2 / (2 * sigma_m ** 2)
+        field = [math.exp(-distance * coefficient) for distance in squared]
+        self._field_cache[key] = (self._revision, field)
+        return field
 
     def known_ratio(self) -> float:
         known = sum(1 for value in self.log_odds if abs(value) >= 2)
@@ -346,7 +433,16 @@ class OccupancyGrid:
 
 
 class CorrelativeScanMatcher:
-    def __init__(self, translation_window_m: float = 0.08, rotation_window_deg: float = 4.0) -> None:
+    MIN_CONFIDENCE = 0.55
+    MIN_HIT_POINTS = 8
+    MAX_TRANSLATION_WINDOW_M = 0.30
+    MAX_ROTATION_WINDOW_RAD = math.radians(15)
+    LIKELIHOOD_SIGMA_M = 0.055
+    MIN_SCORE_GAIN = 0.02
+
+    def __init__(self, translation_window_m: float = 0.20, rotation_window_deg: float = 10.0) -> None:
+        if not all(math.isfinite(v) and v >= 0 for v in (translation_window_m, rotation_window_deg)):
+            raise ValueError("匹配搜索窗口必须为非负有限数")
         self.translation_window_m = translation_window_m
         self.rotation_window_rad = math.radians(rotation_window_deg)
 
@@ -355,30 +451,86 @@ class CorrelativeScanMatcher:
         grid: OccupancyGrid,
         predicted: Pose2D,
         points: Sequence[ScanPoint],
+        *,
+        window_scale: float = 1.0,
+        minimum_evidence: float = 4.0,
     ) -> tuple[Pose2D, float]:
-        if grid.update_count < 2 or len(grid.occupied_cells()) < 12 or len(points) < 12:
+        if not math.isfinite(window_scale) or window_scale < 0:
+            raise ValueError("搜索窗口倍率必须为非负有限数")
+        valid = [p for p in points if math.isfinite(p.angle_rad) and math.isfinite(p.distance_m)
+                 and math.isfinite(p.quality) and p.quality >= grid.MIN_QUALITY and p.distance_m > 0]
+        if len(valid) < self.MIN_HIT_POINTS or sum(v >= minimum_evidence for v in grid.log_odds) < self.MIN_HIT_POINTS:
             return Pose2D(predicted.x, predicted.y, predicted.yaw), 0.0
-        sampled = points[:: max(1, len(points) // 48)]
-        translation_step = max(grid.resolution_m, self.translation_window_m / 2)
-        translation_values = self._steps(self.translation_window_m, translation_step)
-        angle_values = self._steps(self.rotation_window_rad, max(math.radians(2), self.rotation_window_rad / 2))
-        best_pose = Pose2D(predicted.x, predicted.y, predicted.yaw)
-        best_score = -math.inf
-        for dyaw in angle_values:
-            yaw = wrap_angle(predicted.yaw + dyaw)
-            for dx in translation_values:
-                for dy in translation_values:
-                    candidate = Pose2D(predicted.x + dx, predicted.y + dy, yaw)
-                    score = self._score(grid, candidate, sampled)
-                    score -= 0.25 * (abs(dx) + abs(dy)) / max(grid.resolution_m, 1e-6)
-                    score -= 0.15 * abs(dyaw) / max(math.radians(1), 1e-6)
-                    if score > best_score:
-                        best_score = score
-                        best_pose = candidate
-        normalized = best_score / max(1, len(sampled))
-        if normalized < 0.12:
-            return Pose2D(predicted.x, predicted.y, predicted.yaw), normalized
-        return best_pose, normalized
+        ordered = sorted(valid, key=lambda p: p.angle_rad % math.tau)
+        if len(ordered) > 64:
+            ordered = [ordered[index * len(ordered) // 64] for index in range(64)]
+        sampled = [(p.x, p.y, min(1.0, p.quality)) for p in ordered]
+        translation = min(self.MAX_TRANSLATION_WINDOW_M, self.translation_window_m * window_scale)
+        rotation = min(self.MAX_ROTATION_WINDOW_RAD, self.rotation_window_rad * window_scale)
+        levels = ((translation, rotation, 0.05, math.radians(2.5), 0.12),
+                  (0.05, math.radians(2.5), 0.02, math.radians(1), 0.08),
+                  (0.015, math.radians(0.8), 0.005, math.radians(0.2), self.LIKELIHOOD_SIGMA_M))
+        centers = [Pose2D(predicted.x, predicted.y, predicted.yaw)]
+        for level, (xy_window, yaw_window, xy_step, yaw_step, sigma) in enumerate(levels):
+            field = grid.likelihood_field(sigma, minimum_evidence)
+            candidates = []
+            for center in centers:
+                for dyaw in self._steps(yaw_window, yaw_step):
+                    yaw = wrap_angle(center.yaw + dyaw)
+                    if abs(wrap_angle(yaw - predicted.yaw)) > rotation + 1e-9:
+                        continue
+                    sine, cosine = math.sin(yaw), math.cos(yaw)
+                    rotated = [(x * cosine + y * sine, -x * sine + y * cosine, weight) for x, y, weight in sampled]
+                    for dx in self._steps(xy_window, xy_step):
+                        x = center.x + dx
+                        if abs(x - predicted.x) > translation + 1e-9:
+                            continue
+                        for dy in self._steps(xy_window, xy_step):
+                            y = center.y + dy
+                            if abs(y - predicted.y) > translation + 1e-9:
+                                continue
+                            score = self._field_score(grid, field, x, y, rotated)
+                            penalty = (0.06 * (abs(x - predicted.x) + abs(y - predicted.y)) / max(translation, 1e-9)
+                                       + 0.05 * abs(wrap_angle(yaw - predicted.yaw)) / max(rotation, 1e-9))
+                            candidates.append((score - penalty, x, y, yaw))
+            candidates.sort(reverse=True)
+            centers = []
+            for _, x, y, yaw in candidates:
+                if not centers or all(math.hypot(x - p.x, y - p.y) >= 0.04
+                                      or abs(wrap_angle(yaw - p.yaw)) >= math.radians(2) for p in centers):
+                    centers.append(Pose2D(x, y, yaw))
+                    if len(centers) >= (3 if level == 0 else 1):
+                        break
+        best = centers[0]
+        field = grid.likelihood_field(self.LIKELIHOOD_SIGMA_M, minimum_evidence)
+        def pose_score(pose):
+            sine, cosine = math.sin(pose.yaw), math.cos(pose.yaw)
+            endpoints = [(x * cosine + y * sine, -x * sine + y * cosine, weight) for x, y, weight in sampled]
+            return self._field_score(grid, field, pose.x, pose.y, endpoints)
+        if pose_score(best) - pose_score(predicted) < self.MIN_SCORE_GAIN:
+            best = Pose2D(predicted.x, predicted.y, predicted.yaw)
+        sine, cosine = math.sin(best.yaw), math.cos(best.yaw)
+        endpoints = [(p.x * cosine + p.y * sine, -p.x * sine + p.y * cosine, min(1.0, p.quality)) for p in valid]
+        weighted_score = observed_weight = total_weight = inlier_weight = 0.0
+        inliers = 0
+        sectors = set()
+        for point, endpoint in zip(valid, endpoints):
+            weight = endpoint[2]
+            total_weight += weight
+            likelihood = self._field_score(grid, field, best.x, best.y, [endpoint])
+            col, row = grid.world_to_cell(best.x + endpoint[0], best.y + endpoint[1])
+            if likelihood > 0.1 or grid.state(col, row) != grid.UNKNOWN:
+                weighted_score += weight * likelihood
+                observed_weight += weight
+            if likelihood >= 0.4:
+                inliers += 1
+                inlier_weight += weight
+                sectors.add(int((point.angle_rad % math.tau) / (math.tau / 8)))
+        confidence = min(weighted_score / max(observed_weight, 1e-9),
+                         inlier_weight / max(0.5 * total_weight, 1e-9), 1.0)
+        if inliers < self.MIN_HIT_POINTS or len(sectors) < 3:
+            confidence = 0.0
+        return best, confidence
 
     @staticmethod
     def _steps(window: float, step: float) -> list[float]:
@@ -388,27 +540,39 @@ class CorrelativeScanMatcher:
         return [window * index / count for index in range(-count, count + 1)]
 
     @staticmethod
-    def _score(grid: OccupancyGrid, pose: Pose2D, points: Sequence[ScanPoint]) -> float:
-        score = 0.0
-        for point in points:
-            world = pose.local_to_world(point.x, point.y)
-            col, row = grid.world_to_cell(*world)
-            if grid.state(col, row) == grid.OCCUPIED:
-                score += 2.5
+    def _field_score(grid: OccupancyGrid, field: Sequence[float], x: float, y: float, endpoints) -> float:
+        width, height = grid.width, grid.height
+        inverse = 1 / grid.resolution_m
+        origin_col = grid.origin_col + x * inverse
+        origin_row = grid.origin_row - y * inverse
+        total = weight_sum = 0.0
+        for px, py, weight in endpoints:
+            weight_sum += weight
+            col, row = origin_col + px * inverse, origin_row - py * inverse
+            if not (0 <= col < width - 1 and 0 <= row < height - 1):
                 continue
-            nearby = False
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)):
-                if grid.state(col + dx, row + dy) == grid.OCCUPIED:
-                    nearby = True
-                    break
-            if nearby:
-                score += 1.0
-            elif grid.state(col, row) == grid.FREE:
-                score -= 0.35
-        return score
+            left, top = int(col), int(row)
+            fx, fy = col - left, row - top
+            index = top * width + left
+            value = ((1 - fx) * (1 - fy) * field[index] + fx * (1 - fy) * field[index + 1]
+                     + (1 - fx) * fy * field[index + width] + fx * fy * field[index + width + 1])
+            total += weight * value
+        return total / max(weight_sum, 1e-9)
+
+    @staticmethod
+    def _score(grid: OccupancyGrid, pose: Pose2D, points: Sequence[ScanPoint]) -> float:
+        sine, cosine = math.sin(pose.yaw), math.cos(pose.yaw)
+        endpoints = [(p.x * cosine + p.y * sine, -p.x * sine + p.y * cosine, min(1.0, p.quality))
+                     for p in points if math.isfinite(p.quality) and p.quality >= grid.MIN_QUALITY]
+        return CorrelativeScanMatcher._field_score(
+            grid, grid.likelihood_field(CorrelativeScanMatcher.LIKELIHOOD_SIGMA_M), pose.x, pose.y, endpoints)
 
 
 class NavigationEngine:
+    MAP_UPDATE_MIN_CONFIDENCE = 0.55
+    LOST_AFTER_FAILURES = 3
+    BOOTSTRAP_SCANS = 3
+
     def __init__(
         self,
         grid: OccupancyGrid | None = None,
@@ -431,6 +595,12 @@ class NavigationEngine:
         self.reachable_frontier_count = 0
         self.completed_scans = 0
         self.match_score = 0.0
+        self.match_failures = 0
+        self.rejected_scans = 0
+        self.mapping_attempts = 0
+        self._predicted_travel_m = 0.0
+        self._predicted_strafe_m = 0.0
+        self._map_initialized = self.grid.update_count >= self.BOOTSTRAP_SCANS and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS
         self._empty_frontier_scans = 0
         self._parking_goal: tuple[int, int] | None = None
         self.last_progress_angle_world = 0.0
@@ -449,6 +619,12 @@ class NavigationEngine:
         self.reachable_frontier_count = 0
         self.completed_scans = 0
         self.match_score = 0.0
+        self.match_failures = 0
+        self.rejected_scans = 0
+        self.mapping_attempts = 0
+        self._predicted_travel_m = 0.0
+        self._predicted_strafe_m = 0.0
+        self._map_initialized = False
         self._empty_frontier_scans = 0
         self._parking_goal = None
         self.last_progress_angle_world = 0.0
@@ -470,6 +646,8 @@ class NavigationEngine:
             return
         local_x = command.right_mps * command.duration_s
         local_y = command.forward_mps * command.duration_s
+        self._predicted_travel_m += math.hypot(local_x, local_y)
+        self._predicted_strafe_m += abs(local_x)
         world_x, world_y = self.pose.local_to_world(local_x, local_y)
         self.pose.x = world_x
         self.pose.y = world_y
@@ -478,13 +656,26 @@ class NavigationEngine:
             self.trajectory.append((self.pose.x, self.pose.y))
 
     def process_scan(self, points: Sequence[ScanPoint]) -> VelocityCommand:
+        if self.auto_enabled:
+            self.mapping_attempts += 1
         valid = [
             point
             for point in points
-            if math.isfinite(point.distance_m) and 0.08 <= point.distance_m <= self.max_range_m
+            if math.isfinite(point.distance_m) and math.isfinite(point.angle_rad)
+            and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
+            and 0.08 <= point.distance_m <= self.max_range_m
         ]
+        unique = {}
+        for point in valid:
+            key = round(point.angle_rad % math.tau, 6)
+            previous = unique.get(key)
+            if previous is None or (point.quality, -point.distance_m) > (previous.quality, -previous.distance_m):
+                unique[key] = point
+        valid = list(unique.values())
         self.latest_scan = valid
         if len(valid) < 12:
+            if self.auto_enabled and self.grid.update_count:
+                return self._reject_scan(0.0, f"有效点仅 {len(valid)} 个，停车重扫")
             self.state = "扫描不足"
             self.detail = f"本圈只有 {len(valid)} 个有效点"
             return VelocityCommand()
@@ -495,13 +686,45 @@ class NavigationEngine:
             self.detail = f"已接收 {self.completed_scans} 圈"
             return VelocityCommand()
 
-        mapping_points = self._densify_for_mapping(valid)
-        corrected, score = self.matcher.match(self.grid, self.pose, mapping_points)
+        matching_points = [p for p in valid if p.distance_m < self.max_range_m - 1e-6]
+        sectors = {int((p.angle_rad % math.tau) / (math.tau / 8)) for p in matching_points}
+        if len(matching_points) < self.matcher.MIN_HIT_POINTS or len(sectors) < 3:
+            return self._reject_scan(0.0, "有效障碍回波不足，等待重扫")
+        initializing = not self._map_initialized
+        if self.grid.update_count == 0:
+            corrected, score = Pose2D(self.pose.x, self.pose.y, self.pose.yaw), 1.0
+        else:
+            scale = min(1.5, 0.6 + self._predicted_travel_m * 2 + self._predicted_strafe_m * 3
+                        + max(0.0, 0.85 - self.match_score) + self.match_failures * 0.15)
+            corrected, score = self.matcher.match(
+                self.grid, self.pose, matching_points, window_scale=0.0 if initializing else scale,
+                minimum_evidence=0.25 if initializing else 4.0)
+            if not math.isfinite(score) or score < self.MAP_UPDATE_MIN_CONFIDENCE:
+                return self._reject_scan(score, "本圈未写入地图，停车重扫")
         self.pose = corrected
         self.match_score = score
-        self.grid.update_scan(self.pose, mapping_points, self.max_range_m)
+        self.match_failures = 0
+        self._predicted_travel_m = self._predicted_strafe_m = 0.0
+        self.grid.update_scan(self.pose, valid, self.max_range_m, scan_confidence=score)
+        if initializing:
+            self._map_initialized = (self.grid.update_count >= self.BOOTSTRAP_SCANS
+                                     and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS)
+        if not self._map_initialized:
+            self.state = "建图初始化"
+            self.detail = "停车复测初始环境"
+            return VelocityCommand()
 
         return self._plan_next_command()
+
+    def _reject_scan(self, score: float, detail: str) -> VelocityCommand:
+        self.match_score = score if math.isfinite(score) else 0.0
+        self.match_failures += 1
+        self.rejected_scans += 1
+        self.state = "定位丢失" if self.match_failures >= self.LOST_AFTER_FAILURES else "定位不可信"
+        self.detail = detail
+        self.path_cells.clear()
+        self.target_cell = None
+        return VelocityCommand()
 
     @staticmethod
     def _densify_for_mapping(points: Sequence[ScanPoint]) -> list[ScanPoint]:
@@ -526,7 +749,7 @@ class NavigationEngine:
                     ScanPoint(
                         angle_rad=wrap_angle(first_angle + gap * fraction),
                         distance_m=first.distance_m + (second.distance_m - first.distance_m) * fraction,
-                        quality=min(first.quality, second.quality) * 0.75,
+                        quality=min(first.quality, second.quality) * 0.20,
                     )
                 )
         return dense
@@ -958,16 +1181,27 @@ class HiddenWorld:
         fraction = clamp(((x - x1) * delta_x + (y - y1) * delta_y) / length_squared, 0.0, 1.0)
         return math.hypot(x - (x1 + fraction * delta_x), y - (y1 + fraction * delta_y))
 
-    def ray_distance(self, angle_rad: float, max_range_m: float) -> float:
+    def ray_distance(self, angle_rad: float, max_range_m: float, origin: tuple[float, float] | None = None) -> float:
         world_angle = self.pose.yaw + angle_rad
-        step = self.resolution_m
-        distance = 0.04
-        while distance <= max_range_m:
-            x = self.pose.x + math.sin(world_angle) * distance
-            y = self.pose.y + math.cos(world_angle) * distance
-            if self._occupied(x, y):
-                return distance
-            distance += step
+        ox, oy = origin if origin is not None else (self.pose.x, self.pose.y)
+        sine, cosine = math.sin(world_angle), math.cos(world_angle)
+        def occupied(distance):
+            return self._occupied(ox + sine * distance, oy + cosine * distance)
+        if occupied(0.0):
+            return 0.0
+        step = min(self.resolution_m, self.wall_thickness_m * 0.5)
+        lower = 0.0
+        while lower < max_range_m:
+            upper = min(max_range_m, lower + step)
+            if occupied(upper):
+                while upper - lower > 0.0001:
+                    middle = (lower + upper) * 0.5
+                    if occupied(middle):
+                        upper = middle
+                    else:
+                        lower = middle
+                return upper
+            lower = upper
         return max_range_m
 
     def scan(

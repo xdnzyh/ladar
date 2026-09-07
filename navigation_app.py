@@ -28,6 +28,7 @@ from radar_app import COLORS, RadarCanvas
 from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
 from serial_backend import SerialEndpoint, list_serial_ports
 from synchronized_acquisition import SynchronizedAcquisition
+from virtual_hardware import HardwareSimulation
 
 
 if sys.platform == "win32":
@@ -77,6 +78,10 @@ DEFAULT_CONFIG = {
     "wheel_signs": [1, 1, 1, 1],
     "simulation_sample_rate_hz": 20.0,
     "simulation_speed": 1.0,
+    "simulation_profile": "NOMINAL",
+    "simulation_seed": 20260907,
+    "simulation_reorder_s": 0.3,
+    "simulation_settle_s": 0.25,
     "simulation_map_file": "simulation_map.json",
 }
 
@@ -242,11 +247,13 @@ class SimulationSource:
     def __init__(self, event_queue: queue.Queue, config: dict) -> None:
         self.events = event_queue
         self.config = config
-        self.world = self._create_world()
+        self._world = self._create_world()
+        self.hardware = HardwareSimulation(self._world, self.config)
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.lock = threading.Lock()
         self.scan_count = 0
+        self.generation = 0
 
     def _create_world(self) -> HiddenWorld:
         configured = Path(str(self.config.get("simulation_map_file", "simulation_map.json")))
@@ -261,12 +268,13 @@ class SimulationSource:
         if self.running:
             return
         now = time.perf_counter()
-        if self.world.map_error:
-            self.events.put(("error", f"自定义地图无法读取，已使用内置地图：{self.world.map_error}", now))
-        elif self.world.map_loaded and self.world.map_path is not None:
-            self.events.put(("info", f"已加载模拟地图  {self.world.map_path.name}", now))
+        if self._world.map_error:
+            self.events.put(("error", f"自定义地图无法读取，已使用内置地图：{self._world.map_error}", now))
+        elif self._world.map_loaded and self._world.map_path is not None:
+            self.events.put(("info", f"已加载模拟地图  {self._world.map_path.name}", now))
         else:
             self.events.put(("info", "未找到自定义地图，使用内置场景", now))
+        self.generation += 1
         self.stop_event.clear()
         self.thread = threading.Thread(target=self._run, name="navigation-simulator", daemon=True)
         self.thread.start()
@@ -276,43 +284,42 @@ class SimulationSource:
         if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
             self.thread.join(timeout=0.5)
         self.thread = None
+        with self.lock:
+            self.hardware.stop()
 
     def reset(self) -> None:
         with self.lock:
-            self.world = self._create_world()
+            self._world = self._create_world()
+            self.hardware = HardwareSimulation(self._world, self.config)
             self.scan_count = 0
 
-    def execute(self, command: VelocityCommand) -> VelocityCommand:
+    def execute(self, command: VelocityCommand) -> None:
         with self.lock:
-            return self.world.apply(command)
+            self.hardware.execute(command)
 
     def _run(self) -> None:
-        while not self.stop_event.is_set():
-            started = time.perf_counter()
-            with self.lock:
-                period = float(self.config.get("radar_period_s", 1.5))
-                sample_rate = float(self.config.get("simulation_sample_rate_hz", 20.0))
-                points = self.world.scan(
-                    sample_count=max(12, round(period * sample_rate)),
-                    max_range_m=float(self.config.get("max_range_m", 3.0)),
-                )
-                bias = self.world.distance_bias_m
-                self.scan_count += 1
-                sequence = self.scan_count
-            self.events.put(("sweep", (sequence, points, bias), started))
-            speed = max(0.1, float(self.config.get("simulation_speed", 1.0)))
-            deadline = started + period / speed
-            while not self.stop_event.is_set() and time.perf_counter() < deadline:
-                self.stop_event.wait(min(0.03, max(0.0, deadline - time.perf_counter())))
+        try:
+            while not self.stop_event.is_set():
+                started = time.perf_counter()
+                with self.lock:
+                    sweeps = self.hardware.advance(0.02)
+                for sequence, points, period in sweeps:
+                    self.events.put(("simulation_sweep", (self.generation, sequence, points, period), started))
+                speed = max(0.1, float(self.config.get("simulation_speed", 1.0)))
+                self.stop_event.wait(max(0.0, 0.02 / speed - (time.perf_counter() - started)))
+        except Exception as exc:
+            self.events.put(("error", f"模拟采集停止：{exc}", time.perf_counter()))
 
 
 class NavigationApp:
-    def __init__(self, root: tk.Tk, source: str, initial_view: str = "radar", simulation_speed: float | None = None) -> None:
+    def __init__(self, root: tk.Tk, source: str, initial_view: str = "radar", simulation_speed: float | None = None, simulation_profile: str | None = None) -> None:
         self.root = root
         self.source = source
         self.config = load_configuration()
         if simulation_speed is not None:
             self.config["simulation_speed"] = simulation_speed
+        if simulation_profile is not None:
+            self.config["simulation_profile"] = simulation_profile
         self.events: queue.Queue = queue.Queue()
         self.pending_events: list[tuple[float, int, str, object]] = []
         self.event_counter = 0
@@ -416,7 +423,7 @@ class NavigationApp:
         ttk.Label(header, text="自主建图与麦轮导航", style="HeaderSub.TLabel").pack(side="left", padx=(12, 0), pady=(9, 0))
         self.source_badge = tk.Label(
             header,
-            text="隐藏地图模拟" if self.source == "simulation" else "三串口实物",
+            text=f"硬件仿真 · {self.config.get('simulation_profile', 'NOMINAL')}" if self.source == "simulation" else "三串口实物",
             bg="#193852" if self.source == "simulation" else COLORS["panel_alt"],
             fg=COLORS["cyan"] if self.source == "simulation" else COLORS["text"],
             padx=12,
@@ -495,6 +502,9 @@ class NavigationApp:
         self.frontier_var = tk.StringVar(value="前沿 0   匹配 —")
         ttk.Label(status, textvariable=self.frontier_var, style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
 
+        if self.source == "simulation":
+            self.sim_status_var = tk.StringVar()
+            ttk.Label(status, textvariable=self.sim_status_var, style="Muted.TLabel", wraplength=390).pack(anchor="w", pady=(6, 0))
         if self.source == "hardware":
             self._build_hardware_controls(status)
 
@@ -812,10 +822,14 @@ class NavigationApp:
                 self.rotation.period_s = period
                 self.rotation.period_history.append(period)
                 self._handle_sweep(sequence, [ScanPoint(p.angle_rad, p.distance_m) for p in polar_points], timestamp)
-        elif kind == "sweep":
-            sequence, points, bias = value  # type: ignore[misc]
-            self.latest_bias = float(bias)
-            self._handle_sweep(int(sequence), list(points), timestamp)
+        elif kind == "simulation_sweep":
+            if self.running:
+                generation, sequence, polar_points, period = value
+                if self.simulation is None or generation != self.simulation.generation:
+                    return
+                self.rotation.period_s = period
+                self.rotation.period_history.append(period)
+                self._handle_sweep(sequence, [ScanPoint(p.angle_rad, p.distance_m) for p in polar_points], timestamp)
         elif kind == "range" and self.accept_samples:
             distance, pixel, sequence = value  # type: ignore[misc]
             if sequence is not None:
@@ -862,8 +876,8 @@ class NavigationApp:
             return
         if self.source == "simulation":
             assert self.simulation is not None
-            applied = self.simulation.execute(command)
-            self.navigator.predict_motion(applied)
+            self.simulation.execute(command)
+            self.navigator.predict_motion(command)
             return
 
         template = self.protocol_var.get().strip()
@@ -939,13 +953,13 @@ class NavigationApp:
         )
         self.metric_vars["distance"].set("—" if self.latest_distance is None else f"{self.latest_distance:.2f}")
         self.metric_vars["angle"].set("—" if self.latest_angle is None else f"{self.latest_angle:.1f}")
-        if self.source == "hardware" and self.rotation.period_history:
+        if self.rotation.period_history:
             period = self.rotation.period_s
         else:
             period = float(self.config.get("radar_period_s", 1.5))
-        self.metric_vars["period"].set("—" if self.source == "hardware" and not self.rotation.period_history else f"{period:.2f}")
+        self.metric_vars["period"].set("—" if not self.rotation.period_history else f"{period:.2f}")
         self.metric_vars["scans"].set(str(self.navigator.completed_scans))
-        self.metric_vars["drift"].set(f"{self.latest_bias * 1000:+.1f}" if self.source == "simulation" else "—")
+        self.metric_vars["drift"].set("—")
         self.map_percent_var.set(f"{self.grid.known_area_m2():.1f} m²" if navigation_view else "—")
         self.nav_state_var.set(self.navigator.state)
         self.nav_detail_var.set(self.navigator.detail)
@@ -955,6 +969,9 @@ class NavigationApp:
         self.frontier_var.set(
             f"可达前沿 {self.navigator.reachable_frontier_count}/{self.navigator.frontier_count}   匹配 {score}"
         )
+        if self.simulation is not None:
+            receiver = self.simulation.hardware.receiver
+            self.sim_status_var.set(f"有效 {receiver.accepted} 圈 · 丢弃 {receiver.discarded} 圈 · 迟到 {receiver.late} 包\n{receiver.builder.reason}")
         self.root.after(120, self._draw)
 
     def _log(self, message: str) -> None:
@@ -1015,12 +1032,13 @@ def capture_window(root: tk.Tk, path: Path, delay_ms: int) -> None:
 def run_app(source: str, argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="TriScan 自主建图与导航")
     parser.add_argument("--view", choices=("radar", "navigation"), default="radar")
+    parser.add_argument("--profile", choices=("IDEAL", "NOMINAL", "STRESS"), help="仿真误差档位")
     parser.add_argument("--speed", type=float, help="模拟速度倍率")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--screenshot-delay", type=int, default=2600)
     arguments = parser.parse_args(argv)
     root = tk.Tk()
-    NavigationApp(root, source=source, initial_view=arguments.view, simulation_speed=arguments.speed)
+    NavigationApp(root, source=source, initial_view=arguments.view, simulation_speed=arguments.speed, simulation_profile=arguments.profile)
     if arguments.screenshot:
         capture_window(root, arguments.screenshot.resolve(), arguments.screenshot_delay)
     root.mainloop()

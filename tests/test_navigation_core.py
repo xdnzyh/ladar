@@ -8,8 +8,9 @@ from navigation_core import HiddenWorld, NavigationEngine, OccupancyGrid, Pose2D
 class OccupancyGridTests(unittest.TestCase):
     def test_scan_marks_free_space_and_obstacle(self):
         grid = OccupancyGrid(80, 80, 0.05)
-        points = [ScanPoint(0.0, 1.0) for _ in range(3)]
-        grid.update_scan(Pose2D(), points, 3.0)
+        points = [ScanPoint(0.0, 1.0)]
+        for _ in range(3):
+            grid.update_scan(Pose2D(), points, 3.0)
         start = grid.world_to_cell(0.0, 0.0)
         middle = grid.world_to_cell(0.0, 0.5)
         end = grid.world_to_cell(0.0, 1.0)
