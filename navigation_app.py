@@ -47,6 +47,9 @@ NAV_CONFIG_PATH = APP_DIR / "navigation_config.json"
 
 DEFAULT_CONFIG = {
     "synchronized_acquisition": True,
+    "arbitrary_phase_scans": True,
+    "observation_reorder_s": 0.3,
+    "hardware_settle_s": 0.2,
     "hardware_sample_rate_hz": 20.0,
     "exposure_index": 8,
     "max_timing_position_error_m": 0.04,
@@ -353,6 +356,8 @@ class NavigationApp:
         self.last_request_time = 0.0
         self.accept_samples = True
         self.moving = False
+        self.motion_generation = 0
+        self.scan_collect_after = -math.inf
 
         self.calibration = CalibrationModel.from_dict(self.config.get("calibration"))
         self.ccd_parser = CCDFrameParser(str(self.config.get("measurement_mode", "fffe")))
@@ -665,6 +670,7 @@ class NavigationApp:
         self._log("开始自动导航" if self.view_mode.get() == "navigation" else "开始雷达扫描")
 
     def stop(self) -> None:
+        self.motion_generation += 1
         if self.simulation:
             self.simulation.stop()
         if self.source == "hardware":
@@ -702,6 +708,7 @@ class NavigationApp:
         self._log("模拟场景已重置")
 
     def _start_hardware_scan(self) -> None:
+        self.scan_collect_after = time.perf_counter()
         if self.config.get("synchronized_acquisition", True):
             self.accept_samples = True
             self.rotation.reset()
@@ -779,7 +786,8 @@ class NavigationApp:
             except queue.Empty:
                 break
 
-        delay = 0.0 if self.source == "simulation" else float(self.config.get("fusion_delay_ms", 80)) / 1000.0
+        delay = (0.0 if self.source == "simulation" or self.config.get("synchronized_acquisition", True)
+                 else float(self.config.get("fusion_delay_ms", 80)) / 1000.0)
         cutoff = now - delay
         while self.pending_events and self.pending_events[0][0] <= cutoff:
             timestamp, _, kind, value = heapq.heappop(self.pending_events)
@@ -823,7 +831,8 @@ class NavigationApp:
                 self.rotation.period_history.append(period)
         elif kind == "sync_sweep":
             session, sequence, polar_points, period = value
-            if self.running and not self.moving and session == self.sync.session:
+            if (self.running and not self.moving and session == self.sync.session
+                    and polar_points and polar_points[0].timestamp >= self.scan_collect_after):
                 self.rotation.period_s = period
                 self.rotation.period_history.append(period)
                 self._handle_sweep(sequence, [ScanPoint(p.angle_rad, p.distance_m) for p in polar_points], timestamp)
@@ -850,7 +859,24 @@ class NavigationApp:
             if completed:
                 points = [ScanPoint(point.angle_rad, point.distance_m) for point in completed]
                 self._handle_sweep(self.rotation.trigger_count - 1, points, timestamp)
+        elif kind == "motion_sent":
+            generation, command = value
+            if self.running and self.moving and generation == self.motion_generation:
+                self.navigator.predict_motion(command)
+                remaining = timestamp + command.duration_s - time.perf_counter()
+                self.root.after(max(1, round(remaining * 1000)),
+                                lambda: self._finish_hardware_motion(generation))
+        elif kind == "motion_stopped":
+            generation = value
+            if self.running and self.moving and generation == self.motion_generation:
+                self.scan_collect_after = timestamp + float(self.config.get("hardware_settle_s", 0.2))
+                self.sync.begin_after(self.scan_collect_after)
+                remaining = self.scan_collect_after - time.perf_counter()
+                self.root.after(max(1, round(remaining * 1000)),
+                                lambda: self._restart_hardware_scan(generation))
         elif kind == "error":
+            if self.source == "hardware" and self.running:
+                self.stop()
             self._log(str(value))
         elif kind == "info":
             self._log(str(value))
@@ -910,26 +936,40 @@ class NavigationApp:
             return
         self.moving = True
         self.accept_samples = False
+        self.motion_generation += 1
+        generation = self.motion_generation
+        self.scan_collect_after = math.inf
         if self.config.get("synchronized_acquisition", True):
-            self.sync.stop()
-        self.rotation_endpoint.write_line("OFF")
-        self.chassis_endpoint.write_line(line)
-        self.navigator.predict_motion(command)
-        self.root.after(max(1, round(command.duration_s * 1000)), self._finish_hardware_motion)
+            if self.sync.receiver is not None:
+                self.sync.begin_after(math.inf)
+            else:
+                self.sync.stop()
+        else:
+            self.rotation_endpoint.write_line("OFF")
+        if not self.chassis_endpoint.write_line(
+                line, lambda stamp: self.events.put(("motion_sent", (generation, command), stamp))):
+            self.stop()
+            self._log("底盘运动指令发送失败")
 
-    def _finish_hardware_motion(self) -> None:
-        self._send_chassis_stop()
-        self.root.after(250, self._restart_hardware_scan)
-
-    def _restart_hardware_scan(self) -> None:
-        if not self.running:
+    def _finish_hardware_motion(self, generation: int) -> None:
+        if not self.running or not self.moving or generation != self.motion_generation:
             return
-        self.rotation.reset()
+        command = self.stop_command_var.get().strip()
+        if not command or not self.chassis_endpoint.write_line(
+                command, lambda stamp: self.events.put(("motion_stopped", generation, stamp))):
+            self.stop()
+            self._log("底盘停止指令发送失败")
+
+    def _restart_hardware_scan(self, generation: int) -> None:
+        if not self.running or generation != self.motion_generation:
+            return
         self.accept_samples = True
         self.moving = False
         if self.config.get("synchronized_acquisition", True):
-            self._start_hardware_scan()
+            if self.sync.state == "stopped":
+                self._start_hardware_scan()
             return
+        self.rotation.reset()
         self.rotation_endpoint.write_line("RESETCNT")
         self.rotation_endpoint.write_line("ON")
 
@@ -942,8 +982,9 @@ class NavigationApp:
 
     def _draw(self) -> None:
         radar_points = [(point.x, point.y, 1.0) for point in self.latest_points]
-        if self.simulation is not None:
-            preview = self.simulation.hardware.receiver.preview_points
+        receiver = self.simulation.hardware.receiver if self.simulation is not None else self.sync.receiver
+        if receiver is not None:
+            preview = receiver.preview_points
             radar_points = [(distance * math.sin(angle), distance * math.cos(angle), 1.0)
                             for _, angle, distance in preview]
             if preview:
