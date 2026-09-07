@@ -1,0 +1,21 @@
+{
+  "measurement_port": "",
+  "motor_port": "",
+  "baudrate": 115200,
+  "ccd_command": "@c0071#@",
+  "ccd_parser": "fffe",
+  "exposure_index": 8,
+  "sample_rate_hz": 20.0,
+  "min_range_m": 0.08,
+  "max_range_m": 3.0,
+  "angle_offset_deg": 0.0,
+  "clockwise": true,
+  "keep_revolutions": 1,
+  "initial_period_s": 2.5,
+  "calibration": {
+    "p0": null,
+    "k": null,
+    "rmse": null,
+    "points": []
+  }
+}
