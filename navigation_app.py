@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     "simulation_profile": "NOMINAL",
     "simulation_seed": 20260907,
     "simulation_reorder_s": 0.3,
-    "simulation_settle_s": 0.25,
+    "simulation_settle_s": 0.2,
     "simulation_map_file": "simulation_map.json",
 }
 
@@ -299,6 +299,7 @@ class SimulationSource:
 
     def _run(self) -> None:
         try:
+            deadline = time.perf_counter()
             while not self.stop_event.is_set():
                 started = time.perf_counter()
                 with self.lock:
@@ -306,7 +307,11 @@ class SimulationSource:
                 for sequence, points, period in sweeps:
                     self.events.put(("simulation_sweep", (self.generation, sequence, points, period), started))
                 speed = max(0.1, float(self.config.get("simulation_speed", 1.0)))
-                self.stop_event.wait(max(0.0, 0.02 / speed - (time.perf_counter() - started)))
+                deadline += 0.02 / speed
+                now = time.perf_counter()
+                if now - deadline > 0.5:
+                    deadline = now
+                self.stop_event.wait(max(0.0, deadline - now))
         except Exception as exc:
             self.events.put(("error", f"模拟采集停止：{exc}", time.perf_counter()))
 
@@ -937,11 +942,18 @@ class NavigationApp:
 
     def _draw(self) -> None:
         radar_points = [(point.x, point.y, 1.0) for point in self.latest_points]
+        if self.simulation is not None:
+            preview = self.simulation.hardware.receiver.preview_points
+            radar_points = [(distance * math.sin(angle), distance * math.cos(angle), 1.0)
+                            for _, angle, distance in preview]
+            if preview:
+                self.latest_angle = math.degrees(preview[-1][1]) % 360
+                self.latest_distance = min(point[2] for point in preview)
         self.radar_canvas.update_scene(
             radar_points,
             float(self.config.get("max_range_m", 3.0)),
             self.latest_angle or 0.0,
-            "等待完整扫描" if self.running and not radar_points else "",
+            ("等待转速估计" if self.simulation is not None else "等待完整扫描") if self.running and not radar_points else "",
         )
         navigation_view = self.view_mode.get() == "navigation"
         self.map_canvas.update_scene(
@@ -972,7 +984,7 @@ class NavigationApp:
         if self.simulation is not None:
             receiver = self.simulation.hardware.receiver
             self.sim_status_var.set(f"有效 {receiver.accepted} 圈 · 丢弃 {receiver.discarded} 圈 · 迟到 {receiver.late} 包\n{receiver.builder.reason}")
-        self.root.after(120, self._draw)
+        self.root.after(50, self._draw)
 
     def _log(self, message: str) -> None:
         self.status_history.append(f"{datetime.now():%H:%M:%S}  {message}")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
 import heapq
 import math
 import queue
@@ -99,6 +100,94 @@ class TimedSweepBuilder:
             return []
         self.reason = "完整扫描"
         return result
+
+
+class EstimatedSweepBuilder:
+    def __init__(self, config: dict):
+        self.config = config
+        self.anchor = None
+        self.periods = deque(maxlen=5)
+        self.period_s = None
+        self.previous_period = None
+        self.stable_periods = 0
+        self.reason = "等待转速估计"
+        self.samples = []
+        self.window = None
+        self.collect_after = 0.0
+        self.sequence = 0
+        self.invalidated = 0
+
+    def begin_after(self, timestamp: float):
+        self.samples = []
+        self.window = None
+        self.collect_after = timestamp
+        self.reason = "等待停车稳定"
+
+    def trigger(self, timestamp: float, uncertainty: float, count: int):
+        previous = self.anchor
+        self.anchor = (timestamp, uncertainty, count)
+        if previous is None:
+            return
+        period = timestamp - previous[0]
+        valid = count == previous[2] + 1 and 0.1 <= period <= 60
+        if valid and self.periods:
+            valid = abs(period / (sum(self.periods) / len(self.periods)) - 1) <= float(self.config.get("period_tolerance", 0.05))
+        if not valid:
+            self.invalidated += self.window is not None
+            self.window = None
+            self.samples = []
+            self.periods.clear()
+            self.period_s = None
+            self.stable_periods = 0
+            self.reason = "零位或转速异常，重新估计"
+            return
+        self.periods.append(period)
+        self.previous_period = period
+        self.period_s = sum(self.periods) / len(self.periods)
+        self.stable_periods = max(0, len(self.periods) - 1)
+
+    def sample(self, timestamp: float, uncertainty: float, pixel: int, distance: float):
+        if timestamp < self.collect_after or self.anchor is None or self.stable_periods < 2:
+            return
+        if timestamp - self.anchor[0] > self.period_s * 1.5:
+            self.reason = "零位更新超时"
+            return
+        if self.window is None:
+            self.window = (timestamp, timestamp + self.period_s, self.anchor, self.period_s,
+                           max(self.periods) - min(self.periods))
+            self.samples = []
+        self.samples.append((timestamp, uncertainty, pixel, distance))
+        self.reason = "扫描中"
+
+    def poll(self, timestamp: float):
+        if self.window is None or timestamp < self.window[1]:
+            return None
+        start, end, anchor, period, spread = self.window
+        samples, self.samples = self.samples, []
+        self.window = None
+        self.sequence += 1
+        points = []
+        direction = 1 if self.config.get("clockwise", True) else -1
+        offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
+        for stamp, error, pixel, distance in samples:
+            if not start <= stamp < end:
+                continue
+            phase = (stamp - anchor[0]) / period
+            angular_error = math.tau * ((error + anchor[1]) / period + abs(phase) * spread / period)
+            if distance * angular_error > float(self.config.get("max_timing_position_error_m", 0.04)):
+                self.reason = "角度估计误差过大，本圈丢弃"
+                return self.sequence, [], period
+            points.append(PolarPoint(distance, (offset + direction * math.tau * phase) % math.tau, stamp, pixel))
+        if len(points) < 12:
+            self.reason = "本圈有效测距不足 12 点"
+            return self.sequence, [], period
+        angles = sorted(p.angle_rad for p in points)
+        gaps = [b - a for a, b in zip(angles, angles[1:] + [angles[0] + math.tau])]
+        if max(gaps) > math.radians(float(self.config.get("max_scan_gap_deg", 25))):
+            self.reason = "扫描存在过大的角度空缺，本圈丢弃"
+            return self.sequence, [], period
+        self.reason = "完整扫描"
+        return self.sequence, points, period
 
 
 class SynchronizedAcquisition:

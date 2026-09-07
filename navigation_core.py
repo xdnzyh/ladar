@@ -572,6 +572,7 @@ class NavigationEngine:
     MAP_UPDATE_MIN_CONFIDENCE = 0.55
     LOST_AFTER_FAILURES = 3
     BOOTSTRAP_SCANS = 3
+    MAX_MOTION_SEGMENT_M = 0.16
 
     def __init__(
         self,
@@ -961,6 +962,19 @@ class NavigationEngine:
         forward = speed * local_y / distance
         right = speed * local_x / distance
         command = VelocityCommand(forward, right, 0.0, 0.38)
+        if self.match_score >= 0.75:
+            blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
+            travel = min(distance, self.MAX_MOTION_SEGMENT_M)
+            while travel > speed * 0.38 + 0.01:
+                candidate = VelocityCommand(forward, right, 0.0, travel / speed)
+                target = self.pose.local_to_world(right * candidate.duration_s, forward * candidate.duration_s)
+                cells = self.grid._line_cells(self.grid.world_to_cell(self.pose.x, self.pose.y),
+                                              self.grid.world_to_cell(*target))
+                if (all(self.grid.state(*cell) == self.grid.FREE and cell not in blocked for cell in cells)
+                        and self._command_has_clearance(candidate)):
+                    command = candidate
+                    break
+                travel *= 0.7
         guarded = self._collision_guard(command)
         if not guarded.stopped:
             path_direction = wrap_angle(self.pose.yaw + math.atan2(local_x, local_y))
