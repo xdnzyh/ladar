@@ -146,7 +146,7 @@ class MeasurementNode:
         self.session = ""
         self.scan_active = False
         self.center_mode = DEFAULT_CENTER_MODE
-        self.scan_period_us = 50000       # 20 Hz until START changes it
+        self.scan_period_us = 20000       # 50 Hz until START changes it
         self.next_sample_us = 0
         self.sequence = 0
         self.last_command_us = self.clock.now()

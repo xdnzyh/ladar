@@ -379,7 +379,7 @@ class SynchronizedAcquisition:
                 self._fail("同步采集支持 fffe 或 raw2 中心像素协议")
                 return
             try:
-                rate = float(self.config.get("hardware_sample_rate_hz", 20))
+                rate = float(self.config.get("hardware_sample_rate_hz", 50))
                 exposure = int(self.config.get("actual_exposure_index", self.config.get("exposure_index", 3)))
                 if not 1 <= rate <= 100 or not 0 <= exposure <= 13:
                     raise ValueError

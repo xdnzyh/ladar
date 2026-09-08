@@ -30,7 +30,8 @@ class EstimatedSweepTests(unittest.TestCase):
         simulation = HardwareSimulation(HiddenWorld(), {"simulation_profile": "IDEAL"})
         simulation.advance(12)
         preview = simulation.receiver.preview_points
-        self.assertLessEqual(len(preview), 31)
+        samples_per_revolution = simulation.sensor.rate * simulation.rotation.period
+        self.assertLessEqual(len(preview), math.ceil(samples_per_revolution) + 1)
         self.assertLessEqual(preview[-1][0] - preview[0][0], 1.5 + 1e-9)
 
     def builder(self, **config):

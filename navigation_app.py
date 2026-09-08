@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "safety_max_observation_age_s": 0.5,
     "safety_blind_timeout_s": 0.75,
     "safety_max_angle_error_deg": 15,
-    "hardware_sample_rate_hz": 20.0,
+    "hardware_sample_rate_hz": 50.0,
     "exposure_index": 3,
     "actual_exposure_index": 3,
     "measurement_firmware_version": "CCD-CAL-1.3-SYNC",
@@ -70,7 +70,7 @@ DEFAULT_CONFIG = {
     "baudrate": 115200,
     "measurement_mode": "fffe",
     "ccd_command": "@c0071#@",
-    "sample_rate_hz": 80.0,
+    "sample_rate_hz": 50.0,
     "min_range_m": 0.10,
     "max_range_m": 0.50,
     "hardware_min_range_m": 0.10,
@@ -92,7 +92,7 @@ DEFAULT_CONFIG = {
     "chassis_feedback_protocol": "",
     "wheel_output_scale": 1000,
     "wheel_signs": [1, 1, 1, 1],
-    "simulation_sample_rate_hz": 20.0,
+    "simulation_sample_rate_hz": 50.0,
     "simulation_speed": 1.0,
     "simulation_profile": "NOMINAL",
     "simulation_seed": 20260907,
@@ -1097,7 +1097,7 @@ class NavigationApp:
             if (self.running and self.source == "hardware"
                     and not self.config.get("synchronized_acquisition", True)
                     and self.accept_samples and self.measure_endpoint.is_open):
-                interval = 1.0 / max(1.0, float(self.config.get("sample_rate_hz", 80.0)))
+                interval = 1.0 / max(1.0, float(self.config.get("sample_rate_hz", 50.0)))
                 if now - self.last_request_time >= interval:
                     self.measure_endpoint.write_line(str(self.config.get("ccd_command", "@c0071#@")))
                     self.last_request_time = now
