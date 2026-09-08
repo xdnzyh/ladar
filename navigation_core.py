@@ -61,6 +61,7 @@ class ScanPoint:
     angle_rad: float
     distance_m: float
     quality: float = 1.0
+    is_echo: bool | None = None
 
     @property
     def x(self) -> float:
@@ -69,6 +70,11 @@ class ScanPoint:
     @property
     def y(self) -> float:
         return self.distance_m * math.cos(self.angle_rad)
+
+    def has_echo(self, max_range_m: float) -> bool:
+        if self.is_echo is not None:
+            return bool(self.is_echo)
+        return self.distance_m < max_range_m - 1e-6
 
 
 @dataclass(frozen=True)
@@ -199,7 +205,7 @@ class OccupancyGrid:
             endpoint = pose.local_to_world(point.x, point.y)
             end = self.world_to_cell(*endpoint)
             cells = self._line_cells(start, end)
-            has_hit = point.distance_m < max_range_m - 1e-6
+            has_hit = point.has_echo(max_range_m)
             for cell in cells[:-1] if has_hit else cells:
                 frees[cell] = max(frees.get(cell, 0.0), weight)
             if has_hit:
@@ -276,7 +282,7 @@ class OccupancyGrid:
         return field
 
     def known_area_m2(self) -> float:
-        known = sum(1 for value in self.log_odds if abs(value) >= 2)
+        known = sum(1 for value in self.log_odds if value <= -2 or value >= 4)
         return known * self.resolution_m * self.resolution_m
 
     def occupied_cells(self) -> list[tuple[int, int]]:
@@ -361,9 +367,7 @@ class OccupancyGrid:
                 continue
             for dx, dy, step_cost in GRID_STEPS:
                 neighbor = current[0] + dx, current[1] + dy
-                if not self.in_bounds(*neighbor) or neighbor in blocked:
-                    continue
-                if neighbor != goal and self.state(*neighbor) != self.FREE:
+                if not self._step_allowed(current, neighbor, blocked, goal):
                     continue
                 new_cost = current_cost + step_cost
                 if new_cost >= cost_so_far.get(neighbor, math.inf):
@@ -373,6 +377,28 @@ class OccupancyGrid:
                 heuristic = math.hypot(goal[0] - neighbor[0], goal[1] - neighbor[1])
                 heapq.heappush(frontier, (new_cost + heuristic, new_cost, neighbor))
         return self.path_from_tree(came_from, goal)
+
+    def _step_allowed(
+        self,
+        current: tuple[int, int],
+        neighbor: tuple[int, int],
+        blocked: set[tuple[int, int]],
+        goal: tuple[int, int] | None = None,
+    ) -> bool:
+        if not self.in_bounds(*neighbor) or neighbor in blocked:
+            return False
+        if neighbor != goal and self.state(*neighbor) != self.FREE:
+            return False
+        dx = neighbor[0] - current[0]
+        dy = neighbor[1] - current[1]
+        if abs(dx) == 1 and abs(dy) == 1:
+            side_a = current[0] + dx, current[1]
+            side_b = current[0], current[1] + dy
+            for side in (side_a, side_b):
+                if (not self.in_bounds(*side) or side in blocked
+                        or self.state(*side) != self.FREE):
+                    return False
+        return True
 
     def reachable_tree(
         self,
@@ -390,9 +416,7 @@ class OccupancyGrid:
                 continue
             for dx, dy, step in GRID_STEPS:
                 neighbor = current[0] + dx, current[1] + dy
-                if not self.in_bounds(*neighbor) or neighbor in blocked:
-                    continue
-                if self.state(*neighbor) != self.FREE:
+                if not self._step_allowed(current, neighbor, blocked):
                     continue
                 new_distance = current_distance + step
                 if new_distance >= distances.get(neighbor, math.inf):
@@ -556,10 +580,16 @@ class NavigationEngine:
         grid: OccupancyGrid | None = None,
         max_range_m: float = 3.0,
         robot_radius_m: float = 0.16,
+        sensor_offset_x_m: float = 0.0,
+        sensor_offset_y_m: float = 0.0,
+        sensor_offset_yaw_rad: float = 0.0,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
         self.robot_radius_m = robot_radius_m
+        self.sensor_offset_x_m = sensor_offset_x_m
+        self.sensor_offset_y_m = sensor_offset_y_m
+        self.sensor_offset_yaw_rad = sensor_offset_yaw_rad
         self.pose = Pose2D()
         self.start_pose = Pose2D()
         self.matcher = CorrelativeScanMatcher()
@@ -572,6 +602,7 @@ class NavigationEngine:
         self.frontier_count = 0
         self.reachable_frontier_count = 0
         self.completed_scans = 0
+        self.local_map_updates = 0
         self.match_score = 0.0
         self.match_failures = 0
         self.rejected_scans = 0
@@ -580,6 +611,9 @@ class NavigationEngine:
         self._predicted_strafe_m = 0.0
         self._map_initialized = self.grid.update_count >= self.BOOTSTRAP_SCANS and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS
         self._empty_frontier_scans = 0
+        self._terminal_evidence_scans = 0
+        self._terminal_signature: tuple[float, ...] | None = None
+        self._no_route_turns = 0
         self._parking_goal: tuple[int, int] | None = None
         self.last_progress_angle_world = 0.0
         self.trajectory: list[tuple[float, float]] = [(0.0, 0.0)]
@@ -596,6 +630,7 @@ class NavigationEngine:
         self.frontier_count = 0
         self.reachable_frontier_count = 0
         self.completed_scans = 0
+        self.local_map_updates = 0
         self.match_score = 0.0
         self.match_failures = 0
         self.rejected_scans = 0
@@ -604,6 +639,9 @@ class NavigationEngine:
         self._predicted_strafe_m = 0.0
         self._map_initialized = False
         self._empty_frontier_scans = 0
+        self._terminal_evidence_scans = 0
+        self._terminal_signature = None
+        self._no_route_turns = 0
         self._parking_goal = None
         self.last_progress_angle_world = 0.0
         self.trajectory = [(0.0, 0.0)]
@@ -664,7 +702,7 @@ class NavigationEngine:
             self.detail = f"已接收 {self.completed_scans} 圈"
             return VelocityCommand()
 
-        matching_points = [p for p in valid if p.distance_m < self.max_range_m - 1e-6]
+        matching_points = [p for p in valid if p.has_echo(self.max_range_m)]
         sectors = {int((p.angle_rad % math.tau) / (math.tau / 8)) for p in matching_points}
         if len(matching_points) < self.matcher.MIN_HIT_POINTS or len(sectors) < 3:
             return self._reject_scan(0.0, "有效障碍回波不足，等待重扫")
@@ -694,6 +732,43 @@ class NavigationEngine:
 
         return self._plan_next_command()
 
+    def process_local_scan(
+        self,
+        points: Sequence[ScanPoint],
+        min_range_m: float = 0.08,
+        scan_confidence: float = 0.7,
+    ) -> VelocityCommand:
+        valid = []
+        unique = {}
+        for point in points:
+            if (math.isfinite(point.distance_m) and math.isfinite(point.angle_rad)
+                    and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
+                    and min_range_m <= point.distance_m <= self.max_range_m
+                    and point.has_echo(self.max_range_m)):
+                key = round(point.angle_rad % math.tau, 6)
+                previous = unique.get(key)
+                if previous is None or (point.quality, -point.distance_m) > (previous.quality, -previous.distance_m):
+                    unique[key] = point
+        valid = list(unique.values())
+        self.latest_scan = valid
+        if not valid:
+            self.state = "本圈无有效回波"
+            self.detail = "未收到可用于局部建图的回波"
+            return VelocityCommand()
+        before = self.grid.update_count
+        sensor_pose = self._sensor_pose()
+        self.grid.update_scan(sensor_pose, valid, self.max_range_m, min_range_m=min_range_m,
+                              scan_confidence=scan_confidence)
+        if self.grid.update_count > before:
+            self.local_map_updates += 1
+            self.state = "本圈局部回波"
+            self.detail = f"已写入 {len(valid)} 个固定姿态回波"
+        return VelocityCommand()
+
+    def _sensor_pose(self) -> Pose2D:
+        x, y = self.pose.local_to_world(self.sensor_offset_x_m, self.sensor_offset_y_m)
+        return Pose2D(x, y, wrap_angle(self.pose.yaw + self.sensor_offset_yaw_rad))
+
     def _reject_scan(self, score: float, detail: str) -> VelocityCommand:
         self.match_score = score if math.isfinite(score) else 0.0
         self.match_failures += 1
@@ -718,7 +793,7 @@ class NavigationEngine:
             reachable, parents = self.grid.reachable_tree(start, blocked)
             route_distances, _ = self.grid.reachable_tree(route_start, blocked)
             current_progress = route_distances.get(start, 0.0)
-            for cluster in clusters[:8]:
+            for cluster in clusters:
                 goal = self._reachable_frontier_goal(cluster, blocked, set(reachable))
                 if goal is None:
                     continue
@@ -734,6 +809,9 @@ class NavigationEngine:
                     best = score, path, goal
             if best is not None:
                 self._empty_frontier_scans = 0
+                self._terminal_evidence_scans = 0
+                self._terminal_signature = None
+                self._no_route_turns = 0
                 self._parking_goal = None
                 _, self.path_cells, self.target_cell = best
                 self.state = "探索中"
@@ -743,6 +821,9 @@ class NavigationEngine:
         probe = self._corridor_probe_command()
         if not probe.stopped:
             self._empty_frontier_scans = 0
+            self._terminal_evidence_scans = 0
+            self._terminal_signature = None
+            self._no_route_turns = 0
             self.path_cells.clear()
             self.target_cell = None
             self.state = "通过转弯"
@@ -750,9 +831,19 @@ class NavigationEngine:
             return probe
 
         self._empty_frontier_scans += 1
-        if self._empty_frontier_scans < 3:
+        if self._terminal_geometry_confirmed():
+            self._terminal_evidence_scans += 1
+        else:
+            self._terminal_evidence_scans = 0
+            self._terminal_signature = None
+        if self._empty_frontier_scans < 3 or self._terminal_evidence_scans < 3:
+            if self._empty_frontier_scans % 2 == 0:
+                self._no_route_turns += 1
+                self.state = "搜索可达通道"
+                self.detail = "当前无可达前沿，原地改变观测方向后复测"
+                return VelocityCommand(yaw_rps=0.8, duration_s=1.2)
             self.state = "终点确认"
-            self.detail = "停车复测端墙与剩余可通行区域"
+            self.detail = "等待端墙、两侧封闭和来路开口连续复测"
             return VelocityCommand()
 
         self._parking_goal = start
@@ -761,6 +852,33 @@ class NavigationEngine:
         self.state = "泊车完成"
         self.detail = "已确认到达单向通道另一端"
         return VelocityCommand()
+
+    def _terminal_geometry_confirmed(self) -> bool:
+        if self.match_score < 0.55 or len(self.latest_scan) < 12:
+            return False
+        sectors = []
+        for center in (0.0, math.pi / 2, -math.pi / 2, math.pi):
+            distances = [
+                point.distance_m
+                for point in self.latest_scan
+                if abs(wrap_angle(point.angle_rad - center)) <= math.radians(35)
+            ]
+            if len(distances) < 2:
+                return False
+            sectors.append(min(distances))
+        front, right, left, rear = sectors
+        closed_limit = max(0.75, self.robot_radius_m + 0.45)
+        if not (front <= closed_limit and right <= closed_limit and left <= closed_limit
+                and rear >= closed_limit + 0.15):
+            return False
+        signature = tuple(sectors)
+        if self._terminal_signature is not None and max(
+                abs(a - b) for a, b in zip(signature, self._terminal_signature)) > 0.15:
+            self._terminal_signature = signature
+            self._terminal_evidence_scans = 0
+            return False
+        self._terminal_signature = signature
+        return True
 
     def _corridor_probe_command(self) -> VelocityCommand:
         if not self.latest_scan:
@@ -916,11 +1034,7 @@ class NavigationEngine:
             travel = min(distance, self.MAX_MOTION_SEGMENT_M)
             while travel > speed * 0.38 + 0.01:
                 candidate = VelocityCommand(forward, right, 0.0, travel / speed)
-                target = self.pose.local_to_world(right * candidate.duration_s, forward * candidate.duration_s)
-                cells = self.grid._line_cells(self.grid.world_to_cell(self.pose.x, self.pose.y),
-                                              self.grid.world_to_cell(*target))
-                if (all(self.grid.state(*cell) == self.grid.FREE and cell not in blocked for cell in cells)
-                        and self._command_has_clearance(candidate)):
+                if self._grid_segment_is_clear(candidate, blocked) and self._command_has_clearance(candidate):
                     command = candidate
                     break
                 travel *= 0.7
@@ -951,11 +1065,25 @@ class NavigationEngine:
     def _collision_guard(self, command: VelocityCommand) -> VelocityCommand:
         if command.stopped:
             return command
-        if not self._command_has_clearance(command):
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
+        if not self._grid_segment_is_clear(command, blocked) or not self._command_has_clearance(command):
             self.state = "避障重规划"
             self.detail = "车体扫过区域距离不足，停车更新障碍边界"
             return VelocityCommand()
         return command
+
+    def _grid_segment_is_clear(self, command: VelocityCommand, blocked: set[tuple[int, int]]) -> bool:
+        if command.stopped:
+            return True
+        target = self.pose.local_to_world(
+            command.right_mps * command.duration_s,
+            command.forward_mps * command.duration_s,
+        )
+        cells = self.grid._line_cells(
+            self.grid.world_to_cell(self.pose.x, self.pose.y),
+            self.grid.world_to_cell(*target),
+        )
+        return all(self.grid.state(*cell) == self.grid.FREE and cell not in blocked for cell in cells)
 
 class HiddenWorld:
     def __init__(

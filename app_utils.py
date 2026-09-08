@@ -42,7 +42,7 @@ def save_json(path: Path, data: dict, *, trailing_newline: bool = False) -> None
     temporary.replace(path)
 
 
-def capture_window(root, path: Path, delay_ms: int) -> None:
+def capture_window(root, path: Path, delay_ms: int, cleanup=None) -> None:
     def capture() -> None:
         root.deiconify()
         root.lift()
@@ -61,6 +61,12 @@ def capture_window(root, path: Path, delay_ms: int) -> None:
             ).save(path)
         finally:
             root.attributes("-topmost", False)
-            root.after(80, root.destroy)
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+            else:
+                root.after(80, root.destroy)
 
     root.after(max(200, delay_ms), capture)

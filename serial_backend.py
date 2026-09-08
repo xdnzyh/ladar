@@ -63,11 +63,15 @@ class SerialEndpoint:
         self._reader_thread: threading.Thread | None = None
         self._writer_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._faulted = threading.Event()
+        self._transport_lock = threading.Lock()
         self._write_queue: queue.Queue = queue.Queue()
 
     @property
     def is_open(self) -> bool:
-        return self._transport is not None and self._transport.is_open
+        with self._transport_lock:
+            transport = self._transport
+        return not self._faulted.is_set() and transport is not None and transport.is_open
 
     def open(self, port: str, baudrate: int = 115200) -> None:
         if self.is_open:
@@ -75,8 +79,11 @@ class SerialEndpoint:
         self.port = port
         self.baudrate = baudrate
         self._stop.clear()
+        self._faulted.clear()
         self._write_queue = queue.Queue()
-        self._transport = _open_transport(port, baudrate)
+        transport = _open_transport(port, baudrate)
+        with self._transport_lock:
+            self._transport = transport
         self._reader_thread = threading.Thread(target=self._read_loop, name=f"{self.name}-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name=f"{self.name}-writer", daemon=True)
         self._reader_thread.start()
@@ -84,8 +91,10 @@ class SerialEndpoint:
 
     def close(self) -> None:
         self._stop.set()
+        self.cancel_pending()
         self._write_queue.put(None)
-        transport, self._transport = self._transport, None
+        with self._transport_lock:
+            transport, self._transport = self._transport, None
         if transport is not None:
             try:
                 transport.close()
@@ -96,22 +105,91 @@ class SerialEndpoint:
                 thread.join(timeout=0.4)
         self._reader_thread = None
         self._writer_thread = None
+        self._faulted.clear()
 
-    def write(self, data: bytes | str, on_sent: Callable[[float], None] | None = None) -> bool:
+    def write(
+        self,
+        data: bytes | str,
+        on_sent: Callable[[float], None] | None = None,
+        on_written: Callable[[float], None] | None = None,
+        priority: bool = False,
+    ) -> bool:
         if not self.is_open:
             return False
         if isinstance(data, str):
             data = data.encode("ascii", "ignore")
-        self._write_queue.put((bytes(data), on_sent))
+        item = (bytes(data), on_sent, on_written)
+        if priority:
+            pending = []
+            while True:
+                try:
+                    pending.append(self._write_queue.get_nowait())
+                except queue.Empty:
+                    break
+            for old_item in pending:
+                if old_item is not None:
+                    self._write_queue.task_done()
+            self._write_queue.put(item)
+            for old_item in pending:
+                if old_item is not None:
+                    self._write_queue.put(old_item)
+        else:
+            self._write_queue.put(item)
         return True
 
-    def write_line(self, text: str, on_sent: Callable[[float], None] | None = None) -> bool:
-        return self.write(text.rstrip("\r\n") + "\r\n", on_sent)
+    def write_line(
+        self,
+        text: str,
+        on_sent: Callable[[float], None] | None = None,
+        on_written: Callable[[float], None] | None = None,
+        priority: bool = False,
+    ) -> bool:
+        return self.write(text.rstrip("\r\n") + "\r\n", on_sent, on_written, priority)
+
+    def cancel_pending(self) -> int:
+        cancelled = 0
+        while True:
+            try:
+                item = self._write_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                self._write_queue.task_done()
+                cancelled += 1
+        return cancelled
+
+    def flush(self, timeout: float = 0.5) -> bool:
+        if timeout < 0:
+            raise ValueError("发送等待时间不能为负数")
+        deadline = time.perf_counter() + timeout
+        while self._write_queue.unfinished_tasks:
+            if time.perf_counter() >= deadline:
+                return False
+            time.sleep(min(0.01, max(0.0, deadline - time.perf_counter())))
+        return self.is_open
+
+    def stop_and_flush(self, lines: list[str], timeout: float = 0.5) -> bool:
+        self.cancel_pending()
+        for line in lines:
+            if not self.write_line(line):
+                return False
+        return self.flush(timeout)
+
+    def _mark_faulted(self) -> None:
+        self._faulted.set()
+        with self._transport_lock:
+            transport, self._transport = self._transport, None
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass
 
     def _read_loop(self) -> None:
         try:
             while not self._stop.is_set():
-                transport = self._transport
+                with self._transport_lock:
+                    transport = self._transport
                 if transport is None:
                     break
                 data = transport.read(4096)
@@ -119,6 +197,7 @@ class SerialEndpoint:
                     self.on_data(data, time.perf_counter())
         except Exception as exc:
             if not self._stop.is_set():
+                self._mark_faulted()
                 self.on_error(f"{self.name}读取失败：{exc}")
         finally:
             self._stop.set()
@@ -131,16 +210,23 @@ class SerialEndpoint:
                 except queue.Empty:
                     continue
                 if data is None:
+                    self._write_queue.task_done()
                     break
-                transport = self._transport
+                with self._transport_lock:
+                    transport = self._transport
                 if transport is None:
+                    self._write_queue.task_done()
                     break
-                payload, on_sent = data
+                payload, on_sent, on_written = data
                 if on_sent is not None:
                     on_sent(time.perf_counter())
                 transport.write(payload)
+                if on_written is not None:
+                    on_written(time.perf_counter())
+                self._write_queue.task_done()
         except Exception as exc:
             if not self._stop.is_set():
+                self._mark_faulted()
                 self.on_error(f"{self.name}发送失败：{exc}")
         finally:
             self._stop.set()

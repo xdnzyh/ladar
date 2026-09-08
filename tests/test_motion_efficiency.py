@@ -34,7 +34,7 @@ class MotionSegmentTests(unittest.TestCase):
     def test_inflated_obstacle_prevents_long_segment(self):
         navigator = self.navigator()
         navigator.grid._add(*navigator.grid.world_to_cell(0.12, 0.16), 20)
-        self.assertAlmostEqual(navigator._command_along_path().duration_s, 0.38)
+        self.assertTrue(navigator._command_along_path().stopped)
 
     def test_fresh_obstacle_stops_motion(self):
         navigator = self.navigator()

@@ -1,3 +1,6 @@
+# 历史兼容脚本：当前设备基准见 firmware_baseline/rotation_main_ROTATION_SYNC_MP_V2.py。
+# 本文件仅保留供旧实验回放使用，不得作为当前设备的默认烧录对象。
+
 import micropython
 import utime
 from machine import Pin, UART

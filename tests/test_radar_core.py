@@ -50,6 +50,11 @@ class ParserTests(unittest.TestCase):
         line = b"SLIDE_REPORT WINDOW=1 CYCLE[12-12] TIME_S=2.50 AVG_RPS=0.400\r\n"
         self.assertEqual(parser.feed(line), [line.decode().strip()])
 
+    def test_non_ascii_frame_is_dropped_without_repairing_the_payload(self):
+        parser = MotorLineParser()
+        self.assertEqual(parser.feed(b"PIX session 1 10\xff00 20 800\n"), [])
+        self.assertEqual(parser.invalid_frames, 1)
+
 
 class RotationTests(unittest.TestCase):
     def test_completed_revolution_uses_actual_period(self):

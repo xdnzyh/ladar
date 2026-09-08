@@ -1,6 +1,7 @@
 import importlib.util
 import math
 from pathlib import Path
+import queue
 import sys
 import types
 import unittest
@@ -26,6 +27,18 @@ class Endpoint:
             return False
         if on_sent:
             on_sent(self.now)
+        return True
+
+
+class CallbackEndpoint(Endpoint):
+    def __init__(self):
+        super().__init__()
+        self.callbacks = []
+
+    def write_line(self, line, on_sent=None):
+        self.messages.append(line)
+        if on_sent:
+            self.callbacks.append(on_sent)
         return True
 
 
@@ -208,6 +221,8 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(a.state, 'running')
         self.assertTrue(any(message.startswith('START ') for message in endpoints[0].messages))
         self.assertTrue(any(message.startswith('ROT ') for message in endpoints[1].messages))
+        self.assertTrue(any('测距 8/8' in str(value) and '旋转 8/8' in str(value)
+                            for kind, value, _ in output if kind == 'sync_status'))
 
     def test_rotation_waits_for_delayed_measurements(self):
         a, _, output = self.running()
@@ -238,12 +253,130 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(a.builder.anchor, (0, 0, 1))
         self.assertEqual(len(a.builder.samples), 1)
 
-    def test_restart_aborts_scan(self):
+    def test_ready_status_does_not_abort_scan_but_data_gap_stops(self):
         a, _, output = self.running()
         a.feed('rotation', b'READY ROTATION_SYNC_V1\n', 1)
         a.poll(1)
+        self.assertEqual(a.state, 'running')
+        a.poll(2.1)
         self.assertEqual(a.state, 'stopped')
         self.assertTrue(any(item[0] == 'sync_error' for item in output))
+
+    def test_error_command_and_foreign_protocol_do_not_abort_valid_capture(self):
+        a, _, _ = self.running()
+        session = a.session
+        a.feed('rotation', b'ERROR COMMAND\nERROR COMMAND_ENCODING\nERR,node=MOTOR01,status=BUSY\nSTATUS MOTOR=1\n', 0.2)
+        a.feed('measurement', f'PIX {session} 1 1000000 1000000 800\n'.encode(), 0.2)
+        a.poll(0.2)
+        self.assertEqual(a.state, 'running')
+        self.assertGreaterEqual(a.sync_stats['rotation']['ignored'], 4)
+        self.assertGreaterEqual(a.sync_stats['measurement']['success'], 0)
+        self.assertTrue(any(reason == '外来协议消息' for _, _, reason, _ in a.recent_anomalies))
+
+    def test_start_drains_previous_error_before_new_session(self):
+        a, _, output = self.make()
+        a.feed('rotation', b'ERROR COMMAND\n', 0.5)
+        a.start(2.0)
+        a.feed('rotation', b'ERROR COMMAND\nERR,node=MOTOR01,status=BUSY\n', 2.05)
+        a.poll(2.0)
+        self.assertEqual(a.state, 'syncing')
+        a.poll(2.05)
+        self.assertEqual(a.state, 'syncing')
+        self.assertFalse(any(kind == 'sync_error' for kind, _, _ in output))
+        self.assertEqual(a.sync_stats['rotation']['ignored'], 2)
+
+    def test_late_old_session_range_and_trigger_do_not_enter_new_run(self):
+        a, _, _ = self.running()
+        a.feed('measurement', b'PIX old-session 1 1000000 1000000 800\n', 0.2)
+        a.feed('rotation', b'TRIG old-session 1 1000000\n', 0.2)
+        a.poll(0.2)
+        self.assertEqual(a.state, 'running')
+        self.assertEqual(a.pending, [])
+
+    def test_old_send_callback_cannot_populate_new_session(self):
+        endpoints = [CallbackEndpoint(), CallbackEndpoint()]
+        a = SynchronizedAcquisition(*endpoints, CalibrationModel(p0=700, k=100),
+            {'clock_drift_bound_ppm': 0}, lambda *args: None)
+        a.start(0.0)
+        a.poll(0.1)
+        old_callback = endpoints[0].callbacks[0]
+        a.start(1.0)
+        old_callback(1.01)
+        a.poll(1.01)
+        self.assertEqual(a.sent_times, {})
+        self.assertEqual(a.state, 'syncing')
+
+    def test_stop_reports_written_and_received_confirmation_separately(self):
+        a, endpoints, _ = self.make()
+        a.stop()
+        self.assertTrue(a.stop_status['measurement']['written'])
+        self.assertFalse(a.stop_status['measurement']['confirmed'])
+        a.feed('measurement', b'OK STOP\n', 1.0)
+        a.feed('rotation', b'OK OFF\n', 1.0)
+        a.poll(1.0)
+        self.assertTrue(a.stop_status['measurement']['confirmed'])
+        self.assertTrue(a.stop_status['rotation']['confirmed'])
+        self.assertEqual(endpoints[0].messages[-2:], ['STOP', 'LASER 0'])
+
+    def test_only_noise_or_no_return_still_times_out(self):
+        a, _, _ = self.running()
+        session = a.session
+        for timestamp in (0.5, 1.0, 1.5, 1.9):
+            a.feed('measurement', b'noise\xff\nERR,node=MOTOR01\n', timestamp)
+            a.feed('measurement', f'PIX {session} {int(timestamp * 100)} 1000000 1000000 -1\n'.encode(), timestamp)
+            a.poll(timestamp)
+            self.assertEqual(a.state, 'running')
+        a.poll(2.1)
+        self.assertEqual(a.state, 'stopped')
+        self.assertGreater(a.sync_stats['measurement']['format_error'], 0)
+
+    def test_explicit_watchdog_fault_stops_capture(self):
+        a, _, output = self.running()
+        a.feed('rotation', b'ERROR WATCHDOG\n', 0.5)
+        a.poll(0.5)
+        self.assertEqual(a.state, 'stopped')
+        self.assertTrue(any('WATCHDOG' in str(value) for kind, value, _ in output if kind == 'sync_error'))
+
+    def test_current_start_argument_error_stops_startup(self):
+        a, endpoints, output = self.make()
+        self.finish_clock_sync(a, endpoints)
+        a.feed('measurement', b'ERROR START_ARGUMENTS\n', 1.0)
+        a.poll(1.0)
+        self.assertEqual(a.state, 'stopped')
+        self.assertTrue(any('START_ARGUMENTS' in str(value) for kind, value, _ in output if kind == 'sync_error'))
+
+    def test_ten_start_stop_cycles_keep_sessions_isolated(self):
+        endpoints = [Endpoint(), Endpoint()]
+        output = []
+        a = SynchronizedAcquisition(*endpoints, CalibrationModel(p0=700, k=100),
+            {'clock_drift_bound_ppm': 0, 'irq_timestamp_uncertainty_ms': 0},
+            lambda *args: output.append(args))
+        sessions = []
+        for _ in range(10):
+            a.start(0.0)
+            self.finish_clock_sync(a, endpoints)
+            sessions.append(a.session)
+            a.feed('measurement', f'OK START {a.session}\n'.encode(), 1.0)
+            a.poll(1.0)
+            a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
+            a.poll(1.1)
+            self.assertEqual(a.state, 'running')
+            a.stop()
+            self.assertEqual(a.state, 'stopped')
+        self.assertEqual(len(set(sessions)), 10)
+        self.assertFalse(any(kind == 'sync_error' for kind, _, _ in output))
+
+    def test_old_radar_sync_error_event_is_ignored_after_restart(self):
+        from radar_app import RadarApp
+        app = object.__new__(RadarApp)
+        app.demo = True
+        app.scanning = False
+        app.events = queue.Queue()
+        app.sync = types.SimpleNamespace(generation=2)
+        app.root = Mock()
+        app.events.put(('sync_error', (1, 'old failure'), 0.0))
+        app._poll()
+        self.assertFalse(app.scanning)
 
     def test_full_scan_with_different_clocks_and_delayed_radio_stream(self):
         a, _, output = self.running()
@@ -315,9 +448,10 @@ class ConfigurationTests(unittest.TestCase):
             config = navigation_app.load_configuration()
         self.assertEqual(config['calibration']['k'], 100)
         self.assertEqual(config['measurement_mode'], 'raw2')
-        self.assertEqual(config['exposure_index'], 4)
+        self.assertEqual(config['exposure_index'], 3)
 
 
+@unittest.skip("历史 MEASUREMENT_SYNC_V2 回归；当前设备基准由 test_firmware_baseline.py 校验")
 class MeasurementFirmwareTests(unittest.TestCase):
     def setUp(self):
         self.tick = 0

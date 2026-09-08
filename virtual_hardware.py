@@ -248,14 +248,18 @@ class HardwareSimulation:
         seed = int(config.get("simulation_seed", 20260907))
         period = float(config.get("radar_period_s", 1.5))
         rate = float(config.get("simulation_sample_rate_hz", 20))
-        maximum = float(config.get("max_range_m", 3))
+        minimum = float(config.get("simulation_min_range_m", 0.08))
+        maximum = float(config.get("simulation_max_range_m", 3.0))
         if not all(math.isfinite(v) and v > 0 for v in (period, rate, maximum)):
             raise ValueError("周期、采样率与量程必须是正有限数")
         self.rotation = VirtualRotationHardware(self.parameters, period, seed + 1)
         self.sensor = VirtualRangeSensor(self.parameters, rate, maximum, seed + 2)
         self.chassis = VirtualChassis(world, self.parameters, seed + 3)
         self.link = VirtualCommunicationLink(self.parameters, seed + 4)
-        self.receiver = DistanceObservationReceiver(config)
+        receiver_config = dict(config)
+        receiver_config["min_range_m"] = minimum
+        receiver_config["max_range_m"] = maximum
+        self.receiver = DistanceObservationReceiver(receiver_config)
         self.time = 0.0
         self.resume_at = 0.0
         self.was_moving = False

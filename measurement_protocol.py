@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import math
 
 from scan_acquisition import HardwareObservation
+from radar_core import CCD_PIXEL_MAX, CCD_PIXEL_MIN
 
 
 @dataclass(frozen=True)
@@ -13,11 +14,12 @@ class DeviceObservation:
     distance: float | None = None
     pixel: int = 0
     status: str = "ok"
+    is_echo: bool = True
 
     def normalize(self, clock, arrival):
         timestamp, error = clock.map(self.timestamp_us, arrival)
         return HardwareObservation(self.source, self.sequence, timestamp, self.distance,
-                                   self.status, error + self.uncertainty_s, self.pixel)
+                                   self.status, error + self.uncertainty_s, self.pixel, self.is_echo)
 
 
 def parse_observation(source, line, session, calibration, config):
@@ -28,11 +30,23 @@ def parse_observation(source, line, session, calibration, config):
         sequence, begin, end, pixel = map(int, parts[2:])
         if begin < 0 or end < begin or end - begin > 250000:
             raise ValueError("无效采集区间")
-        distance = calibration.distance(pixel) if 0 <= pixel <= 1499 else None
-        if distance is not None and not math.isfinite(distance):
-            distance = None
+        pixel_min = int(config.get("pixel_min", CCD_PIXEL_MIN))
+        pixel_max = int(config.get("pixel_max", CCD_PIXEL_MAX))
+        if pixel == -1:
+            return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
+                                     None, pixel, "no_return", False)
+        if not pixel_min <= pixel <= pixel_max:
+            return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
+                                     None, pixel, "invalid_pixel", False)
+        distance = calibration.distance(pixel)
+        if distance is None or not math.isfinite(distance):
+            return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
+                                     None, pixel, "calibration_outside", False)
+        minimum = float(config.get("min_range_m", 0.08))
+        maximum = float(config.get("max_range_m", 3.0))
+        status = "ok" if minimum <= distance <= maximum else "out_of_range"
         return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
-                                 distance, pixel, "ok" if distance is not None else "no_return")
+                                 distance, pixel, status, status == "ok")
     if source == "rotation" and parts[0] == "TRIG" and len(parts) == 4:
         sequence, tick = map(int, parts[2:])
         if tick < 0:

@@ -1,3 +1,6 @@
+# 历史兼容脚本：当前设备基准见 firmware_baseline/measurement_main_MEASUREMENT_SYNC_CAL_V3.py。
+# 本文件仅保留供旧实验回放使用，不得作为当前设备的默认烧录对象。
+
 import utime
 from machine import Pin, UART
 

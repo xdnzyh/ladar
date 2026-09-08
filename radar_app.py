@@ -15,9 +15,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from app_utils import capture_window, load_json_config, save_json
-from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
+from radar_core import CCD_PIXEL_MAX, CCD_PIXEL_MIN, CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
 from serial_backend import SerialEndpoint, list_serial_ports
 from data_fusion import DeviceClock, parse_trigger
+from synchronized_acquisition import SynchronizedAcquisition
 
 
 APP_NAME = "TriScan 雷达控制台"
@@ -47,7 +48,11 @@ DEFAULT_CONFIG = {
     "baudrate": 115200,
     "ccd_command": "@c0071#@",
     "ccd_parser": "fffe",
-    "exposure_index": 8,
+    "exposure_index": 3,
+    "actual_exposure_index": 3,
+    "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
+    "pixel_min": CCD_PIXEL_MIN,
+    "pixel_max": CCD_PIXEL_MAX,
     "sample_rate_hz": 20.0,
     "max_range_m": 3.0,
     "min_range_m": 0.08,
@@ -60,7 +65,14 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    return load_json_config(CONFIG_PATH, DEFAULT_CONFIG)
+    config = load_json_config(CONFIG_PATH, DEFAULT_CONFIG)
+    config["exposure_index"] = 3
+    config["actual_exposure_index"] = 3
+    config["pixel_min"] = CCD_PIXEL_MIN
+    config["pixel_max"] = CCD_PIXEL_MAX
+    if config.get("ccd_parser") not in {"fffe", "raw2", "ascii"}:
+        config["ccd_parser"] = "fffe"
+    return config
 
 
 def save_config(config: dict) -> None:
@@ -275,9 +287,17 @@ class RadarApp:
         self.log_rows = 0
         self.simulator = Simulator(self.events)
         self.status_history: deque[str] = deque(maxlen=80)
+        self.sync_points = []
 
         self.measure_endpoint = SerialEndpoint("测距串口", self._measurement_data, self._serial_error)
         self.motor_endpoint = SerialEndpoint("传动串口", self._motor_data, self._serial_error)
+        self.sync = SynchronizedAcquisition(
+            self.measure_endpoint,
+            self.motor_endpoint,
+            self.calibration,
+            self._sync_config(),
+            self._receive_sync_event,
+        )
 
         self._build_window()
         self._build_styles()
@@ -414,7 +434,7 @@ class RadarApp:
         parser_values = list(CCDFrameParser.MODES.values())
         parser_combo = self._labeled_combo(proto, 1, "返回帧格式", self.parser_var, parser_values)
         parser_combo.configure(state="readonly")
-        self._labeled_combo(proto, 2, "曝光档位", self.exposure_var, [str(i) for i in range(14)]).configure(state="readonly")
+        self._labeled_combo(proto, 2, "实际曝光", self.exposure_var, ["3"]).configure(state="readonly")
         self._labeled_entry(proto, 3, "采样频率 / Hz", self.sample_rate_var)
 
         ttk.Separator(parent).pack(fill="x", pady=16)
@@ -516,7 +536,7 @@ class RadarApp:
         self.command_var.set(str(self.config.get("ccd_command", "@c0071#@")))
         parser_mode = str(self.config.get("ccd_parser", "fffe"))
         self.parser_var.set(CCDFrameParser.MODES.get(parser_mode, CCDFrameParser.MODES["fffe"]))
-        self.exposure_var.set(int(self.config.get("exposure_index", 8)))
+        self.exposure_var.set(3)
         self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 20.0)))
         self.min_range_var.set(float(self.config.get("min_range_m", 0.08)))
         self.max_range_var.set(float(self.config.get("max_range_m", 3.0)))
@@ -533,7 +553,11 @@ class RadarApp:
             "baudrate": 115200,
             "ccd_command": self.command_var.get().strip() or "@c0071#@",
             "ccd_parser": parser_mode,
-            "exposure_index": int(self.exposure_var.get()),
+            "exposure_index": 3,
+            "actual_exposure_index": 3,
+            "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
+            "pixel_min": CCD_PIXEL_MIN,
+            "pixel_max": CCD_PIXEL_MAX,
             "sample_rate_hz": float(self.sample_rate_var.get()),
             "min_range_m": float(self.min_range_var.get()),
             "max_range_m": float(self.max_range_var.get()),
@@ -544,6 +568,16 @@ class RadarApp:
             "calibration": self.calibration.to_dict(),
         }
         return result
+
+    def _sync_config(self) -> dict:
+        config = dict(self.config)
+        config["measurement_mode"] = config.get("ccd_parser", "fffe")
+        config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 20.0))
+        config["exposure_index"] = 3
+        config["actual_exposure_index"] = 3
+        config["pixel_min"] = CCD_PIXEL_MIN
+        config["pixel_max"] = CCD_PIXEL_MAX
+        return config
 
     def _apply_live_settings(self) -> None:
         try:
@@ -638,35 +672,38 @@ class RadarApp:
         try:
             exposure = int(self.exposure_var.get())
             sample_rate = float(self.sample_rate_var.get())
-            if not 0 <= exposure <= 13:
-                raise ValueError("曝光档位应为 0～13")
+            if exposure != 3:
+                raise ValueError("当前测距固件实际曝光固定为 3")
             if not 0.5 <= sample_rate <= 200:
                 raise ValueError("采样频率应为 0.5～200 Hz")
         except ValueError as exc:
             messagebox.showerror("参数错误", str(exc))
             return
+        self.config = self._collect_config()
+        self.sync.config = self._sync_config()
+        self.sync.calibration = self.calibration
+        self.sync.start()
         self.rotation.reset()
         self.motor_clock = DeviceClock()
         self.calibration_pending = False
         self.calibration_session = ''
         self.ccd_parser.reset()
         self.motor_parser.reset()
-        self.measure_endpoint.write_line(f"@c{exposure:04d}#@")
-        self.measure_endpoint.write_line("LASER 1")
         self.laser_on = True
         self.laser_button.configure(text="关闭激光")
-        self.send_motor("ROT 1")
         self.scanning = True
         self.last_request_time = 0.0
         self.scan_button.configure(text="停止扫描")
-        self._log(f"扫描启动：曝光 {exposure}，请求频率 {sample_rate:g} Hz")
+        self.sync_points = []
+        self._log(f"同步扫描启动：实际曝光 3，请求频率 {sample_rate:g} Hz")
 
     def stop_scan(self) -> None:
         if self.demo:
             self.simulator.stop()
-        if self.motor_endpoint.is_open:
-            self.send_motor("OFF")
+        elif hasattr(self, "sync") and self.sync.state != "stopped":
+            self.sync.stop()
         self.scanning = False
+        self.sync_points = []
         self.scan_button.configure(text="开始扫描")
         self._log("扫描已停止")
 
@@ -701,10 +738,13 @@ class RadarApp:
 
     def emergency_stop(self) -> None:
         self.simulator.stop()
-        if self.motor_endpoint.is_open:
-            self.motor_endpoint.write_line("OFF")
-        if self.measure_endpoint.is_open:
-            self.measure_endpoint.write_line("LASER 0")
+        if hasattr(self, "sync") and self.sync.state != "stopped":
+            self.sync.stop()
+        else:
+            if self.motor_endpoint.is_open:
+                self.motor_endpoint.stop_and_flush(["OFF"])
+            if self.measure_endpoint.is_open:
+                self.measure_endpoint.stop_and_flush(["LASER 0"])
         self.scanning = False
         self.laser_on = False
         self.scan_button.configure(text="开始扫描")
@@ -719,6 +759,9 @@ class RadarApp:
             self._log(f"TX MOTOR  {command}")
 
     def _measurement_data(self, data: bytes, timestamp: float) -> None:
+        if getattr(self, "sync", None) is not None and self.sync.state != "stopped":
+            self.sync.feed("measurement", data, timestamp)
+            return
         # Once CAL is used, its ASCII replies must never enter the raw CCD
         # parser, including delayed/duplicate packets received after timeout.
         if self.calibration_session:
@@ -736,7 +779,7 @@ class RadarApp:
                     if sequence != 1 or begin < 0 or not 0 <= end - begin <= 250000:
                         continue
                     self.calibration_pending = False
-                    if 0 <= pixel <= 1499:
+                    if CCD_PIXEL_MIN <= pixel <= CCD_PIXEL_MAX:
                         self.events.put(("calibration_pixel", (parts[1], pixel), timestamp))
                     else:
                         self.events.put(("error", "未检测到有效中心像素", timestamp))
@@ -748,17 +791,38 @@ class RadarApp:
             self.events.put(("ccd_pixel", pixel, timestamp))
 
     def _motor_data(self, data: bytes, timestamp: float) -> None:
+        if getattr(self, "sync", None) is not None and self.sync.state != "stopped":
+            self.sync.feed("rotation", data, timestamp)
+            return
         for line in self.motor_parser.feed(data):
             self.events.put(("motor_line", line, timestamp))
 
+    def _receive_sync_event(self, kind, value, timestamp):
+        if kind in {"sync_status", "sync_error", "sync_diagnostic"}:
+            value = (self.sync.generation, value)
+        self.events.put((kind, value, timestamp))
+
     def _serial_error(self, message: str) -> None:
-        self.events.put(("error", message, time.perf_counter()))
+        self.events.put(("error", (self.sync.generation, message), time.perf_counter()))
 
     def _poll(self) -> None:
         now = time.perf_counter()
+        sync = getattr(self, "sync", None)
+        if sync is not None and not self.demo and (self.scanning and sync.state != "stopped" or sync.stop_pending):
+            sync.poll(now)
         try:
             while True:
                 kind, value, timestamp = self.events.get_nowait()
+                if kind in {"sync_status", "sync_error", "sync_diagnostic"}:
+                    if not (isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], int)):
+                        continue
+                    generation, value = value
+                    if generation != self.sync.generation:
+                        continue
+                elif kind == "error" and isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], int):
+                    generation, value = value
+                    if generation != self.sync.generation:
+                        continue
                 if kind == "ccd_pixel":
                     self._handle_pixel(int(value), float(timestamp))
                 elif kind == "calibration_pixel":
@@ -769,6 +833,25 @@ class RadarApp:
                     self._handle_motor_line(str(value), float(timestamp))
                 elif kind == "error":
                     self._log(str(value))
+                elif kind == "sync_status":
+                    self._log(str(value))
+                elif kind == "sync_diagnostic":
+                    self._log(str(value))
+                elif kind == "sync_error":
+                    self._log(str(value))
+                    self.stop_scan()
+                elif kind == "sync_sweep":
+                    session, _sequence, points, period = value
+                    if self.scanning and session == self.sync.session and points:
+                        self.sync_points = list(points)
+                        self.latest_distance = min(point.distance_m for point in points)
+                        self.latest_angle_deg = math.degrees(min(points, key=lambda point: point.distance_m).angle_rad) % 360
+                        self.rotation.period_s = period
+                        self.rotation.period_history.append(period)
+                elif kind == "sync_period":
+                    _session, period = value
+                    self.rotation.period_s = period
+                    self.rotation.period_history.append(period)
         except queue.Empty:
             pass
 
@@ -778,7 +861,8 @@ class RadarApp:
             except (ValueError, tk.TclError):
                 pass
 
-        if self.scanning and not self.demo and self.measure_endpoint.is_open:
+        if (self.scanning and not self.demo and self.measure_endpoint.is_open
+                and self.sync.state == "stopped"):
             try:
                 interval = 1.0 / max(0.5, float(self.sample_rate_var.get()))
             except (ValueError, tk.TclError):
@@ -855,7 +939,10 @@ class RadarApp:
             self._log("标定读取超时，请确认已烧录配套测距固件并选择正确的中心像素协议")
 
     def _draw(self) -> None:
-        points = [(point.x, point.y, alpha) for point, alpha in self.rotation.all_points()]
+        if self.sync_points:
+            points = [(point.x, point.y, 1.0) for point in self.sync_points]
+        else:
+            points = [(point.x, point.y, alpha) for point, alpha in self.rotation.all_points()]
         waiting = "" if self.rotation.last_trigger is not None else ("等待光电零位" if self.scanning else "")
         try:
             max_range = float(self.max_range_var.get())
@@ -914,6 +1001,11 @@ class RadarApp:
             return
         self.calibration.clear()
         self._refresh_calibration_view()
+        try:
+            self.config = self._collect_config()
+            save_config(self.config)
+        except (OSError, ValueError, tk.TclError):
+            pass
 
     def _refresh_calibration_view(self) -> None:
         for item in self.cal_tree.get_children():
@@ -1021,9 +1113,9 @@ def main() -> None:
     args = parser.parse_args()
 
     root = tk.Tk()
-    RadarApp(root, demo=args.demo)
+    app = RadarApp(root, demo=args.demo)
     if args.screenshot:
-        capture_window(root, args.screenshot.resolve(), args.screenshot_delay)
+        capture_window(root, args.screenshot.resolve(), args.screenshot_delay, app.on_close)
     root.mainloop()
 
 

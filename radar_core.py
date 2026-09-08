@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections import deque
+import csv
 from dataclasses import dataclass, field
 import math
 import re
 import time
 from typing import Deque, Iterable
+
+
+CCD_PIXEL_MIN = 0
+CCD_PIXEL_MAX = 1500
 
 
 @dataclass
@@ -16,17 +21,24 @@ class CalibrationModel:
     k: float | None = None
     points: list[tuple[float, float]] = field(default_factory=list)
     rmse: float | None = None
+    model: str = "inverse"
+    table_points: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def ready(self) -> bool:
+        if self.model == "table":
+            return len(self.table_points) >= 2
         return self.p0 is not None and self.k is not None and abs(self.k) > 1e-9
 
     def add_point(self, pixel: float, distance_m: float) -> None:
-        if not (0 <= pixel <= 4095):
-            raise ValueError("像素坐标超出有效范围")
+        if not (CCD_PIXEL_MIN <= pixel <= CCD_PIXEL_MAX):
+            raise ValueError(f"像素坐标超出有效范围（{CCD_PIXEL_MIN}～{CCD_PIXEL_MAX}）")
         if not (0.02 <= distance_m <= 100):
             raise ValueError("标定距离应在 0.02～100 m 之间")
         self.points.append((float(pixel), float(distance_m)))
+        self.p0 = None
+        self.k = None
+        self.rmse = None
 
     def clear(self) -> None:
         self.points.clear()
@@ -62,6 +74,19 @@ class CalibrationModel:
         return p0, k, rmse
 
     def distance(self, pixel: float) -> float | None:
+        if self.model == "table":
+            if not math.isfinite(float(pixel)) or not self.table_points:
+                return None
+            first_pixel = self.table_points[0][1]
+            last_pixel = self.table_points[-1][1]
+            if not last_pixel <= pixel <= first_pixel:
+                return None
+            for (d1, x1), (d2, x2) in zip(self.table_points, self.table_points[1:]):
+                if x2 <= pixel <= x1:
+                    distance_cm = d1 + (x1 - pixel) / (x1 - x2) * (d2 - d1)
+                    distance_m = distance_cm / 100.0
+                    return distance_m if math.isfinite(distance_m) and distance_m > 0 else None
+            return None
         if not self.ready:
             return None
         denominator = float(pixel) - float(self.p0)
@@ -74,10 +99,12 @@ class CalibrationModel:
 
     def to_dict(self) -> dict:
         return {
+            "model": self.model,
             "p0": self.p0,
             "k": self.k,
             "rmse": self.rmse,
             "points": [[pixel, distance] for pixel, distance in self.points],
+            "table_points": [[distance_cm, pixel] for distance_cm, pixel in self.table_points],
         }
 
     @classmethod
@@ -86,13 +113,71 @@ class CalibrationModel:
         points = []
         for item in data.get("points", []):
             if isinstance(item, (list, tuple)) and len(item) == 2:
-                points.append((float(item[0]), float(item[1])))
+                try:
+                    pixel, distance = float(item[0]), float(item[1])
+                except (TypeError, ValueError):
+                    continue
+                if (math.isfinite(pixel) and math.isfinite(distance)
+                        and CCD_PIXEL_MIN <= pixel <= CCD_PIXEL_MAX
+                        and 0.02 <= distance <= 100):
+                    points.append((pixel, distance))
+        table_points = []
+        for item in data.get("table_points", []):
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                distance_cm, pixel = _optional_float(item[0]), _optional_float(item[1])
+                if distance_cm is not None and pixel is not None:
+                    table_points.append((distance_cm, pixel))
+        try:
+            table_points = _validate_table_points(table_points)
+        except ValueError:
+            table_points = []
+        model = str(data.get("model", "inverse"))
+        if model == "table" and not table_points:
+            model = "inverse"
         return cls(
             p0=_optional_float(data.get("p0")),
             k=_optional_float(data.get("k")),
             points=points,
             rmse=_optional_float(data.get("rmse")),
+            model=model,
+            table_points=table_points,
         )
+
+    @classmethod
+    def from_csv(cls, path) -> "CalibrationModel":
+        with open(path, "r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            fields = set(reader.fieldnames or ())
+            if not {"distance_cm", "ccd_x"}.issubset(fields):
+                raise ValueError("标定表表头必须包含 distance_cm,ccd_x")
+            rows = []
+            for index, row in enumerate(reader, start=2):
+                if index > 1001:
+                    raise ValueError("标定表最多支持 1000 个点")
+                try:
+                    distance_cm = float(str(row["distance_cm"]).strip())
+                    pixel = float(str(row["ccd_x"]).strip())
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"标定表第 {index} 行不是有限数值") from exc
+                rows.append((distance_cm, pixel))
+        return cls(model="table", table_points=_validate_table_points(rows))
+
+    @classmethod
+    def from_table(cls, points: list[tuple[float, float]]) -> "CalibrationModel":
+        return cls(model="table", table_points=_validate_table_points(points))
+
+
+def _validate_table_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    rows = [(float(distance_cm), float(pixel)) for distance_cm, pixel in points]
+    if len(rows) < 2:
+        raise ValueError("标定表至少需要两个点")
+    if any(not math.isfinite(value) for row in rows for value in row):
+        raise ValueError("标定值必须是有限数值")
+    if any(distance_cm <= 0 or not CCD_PIXEL_MIN <= pixel <= CCD_PIXEL_MAX for distance_cm, pixel in rows):
+        raise ValueError(f"标定距离必须大于 0，像素必须在 {CCD_PIXEL_MIN}～{CCD_PIXEL_MAX} 内")
+    if any(d1 >= d2 or x1 <= x2 for (d1, x1), (d2, x2) in zip(rows, rows[1:])):
+        raise ValueError("标定距离必须严格递增、像素必须严格递减，不能有重复值")
+    return rows
 
 
 def _optional_float(value: object) -> float | None:
@@ -147,7 +232,7 @@ class CCDFrameParser:
                 break
             value = (self.buffer[2] << 8) | self.buffer[3]
             del self.buffer[:4]
-            if 0 <= value <= 4095:
+            if CCD_PIXEL_MIN <= value <= CCD_PIXEL_MAX:
                 values.append(value)
         return values
 
@@ -156,7 +241,7 @@ class CCDFrameParser:
         while len(self.buffer) >= 2:
             value = (self.buffer[0] << 8) | self.buffer[1]
             del self.buffer[:2]
-            if 0 <= value <= 4095:
+            if CCD_PIXEL_MIN <= value <= CCD_PIXEL_MAX:
                 values.append(value)
         return values
 
@@ -181,7 +266,7 @@ class CCDFrameParser:
             numbers = re.findall(rb"\d+", line)
             if numbers:
                 candidate = int(numbers[-1])
-                if 0 <= candidate <= 4095:
+                if CCD_PIXEL_MIN <= candidate <= CCD_PIXEL_MAX:
                     values.append(candidate)
         return values
 
@@ -189,9 +274,11 @@ class CCDFrameParser:
 class MotorLineParser:
     def __init__(self) -> None:
         self.buffer = bytearray()
+        self.invalid_frames = 0
 
     def reset(self) -> None:
         self.buffer.clear()
+        self.invalid_frames = 0
 
     def feed(self, data: bytes) -> list[str]:
         if not data:
@@ -203,13 +290,18 @@ class MotorLineParser:
             if not positions:
                 if len(self.buffer) > 4096:
                     del self.buffer[:-2048]
+                    self.invalid_frames += 1
                 break
             position = min(positions)
             raw = bytes(self.buffer[:position])
             del self.buffer[: position + 1]
             while self.buffer and self.buffer[0] in (10, 13):
                 del self.buffer[0]
-            text = raw.decode("utf-8", "ignore").strip()
+            try:
+                text = raw.decode("ascii").strip()
+            except UnicodeDecodeError:
+                self.invalid_frames += 1
+                continue
             if text:
                 lines.append(text)
         return lines
@@ -221,6 +313,7 @@ class PolarPoint:
     angle_rad: float
     timestamp: float
     pixel: int
+    is_echo: bool = True
 
     @property
     def x(self) -> float:

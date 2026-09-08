@@ -63,6 +63,7 @@ class MapEditor:
         self.thickness_var = tk.StringVar(value="0.06")
         self.mode_buttons: dict[str, tk.Button] = {}
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         if self.map_path.exists():
             self.load_map(self.map_path, quiet=True)
         self.root.after_idle(self.redraw)
@@ -534,36 +535,68 @@ class MapEditor:
     def load_map(self, path: Path, quiet: bool = False) -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("地图根节点必须是对象")
             bounds = data["bounds"]
             start = data["start"]
             finish = data["finish"]
             obstacles = data["obstacles"]
-            self.min_x = float(bounds["min_x"])
-            self.max_x = float(bounds["max_x"])
-            self.min_y = float(bounds["min_y"])
-            self.max_y = float(bounds["max_y"])
-            self.wall_thickness_m = float(data.get("wall_thickness_m", 0.06))
-            self.start = (float(start["x"]), float(start["y"]))
-            self.start_yaw_deg = float(start.get("yaw_deg", 0.0))
-            self.finish = (float(finish["x"]), float(finish["y"]))
-            self.obstacles = [
+            min_x = float(bounds["min_x"])
+            max_x = float(bounds["max_x"])
+            min_y = float(bounds["min_y"])
+            max_y = float(bounds["max_y"])
+            wall_thickness_m = float(data.get("wall_thickness_m", 0.06))
+            start_point = (float(start["x"]), float(start["y"]))
+            start_yaw_deg = float(start.get("yaw_deg", 0.0))
+            finish_point = (float(finish["x"]), float(finish["y"]))
+            obstacle_list = [
                 (float(item["x1"]), float(item["y1"]), float(item["x2"]), float(item["y2"]))
                 for item in obstacles
             ]
-            if self.max_x <= self.min_x or self.max_y <= self.min_y:
+            numbers = (min_x, max_x, min_y, max_y, wall_thickness_m, *start_point, start_yaw_deg, *finish_point)
+            if not all(math.isfinite(value) for value in numbers):
+                raise ValueError("地图包含非有限数值")
+            if max_x <= min_x or max_y <= min_y:
                 raise ValueError("场地边界无效")
+            if not 0.01 <= wall_thickness_m <= 0.30:
+                raise ValueError("障碍线宽必须在 0.01 m 到 0.30 m 之间")
+            if not (min_x <= start_point[0] <= max_x and min_y <= start_point[1] <= max_y
+                    and min_x <= finish_point[0] <= max_x and min_y <= finish_point[1] <= max_y):
+                raise ValueError("起点或终点超出场地边界")
+            if any(
+                not all(math.isfinite(value) for value in segment)
+                for segment in obstacle_list
+            ):
+                raise ValueError("障碍坐标无效")
+            if any(
+                not (min_x <= x1 <= max_x and min_x <= x2 <= max_x
+                     and min_y <= y1 <= max_y and min_y <= y2 <= max_y)
+                for x1, y1, x2, y2 in obstacle_list
+            ):
+                raise ValueError("障碍超出场地边界")
         except (OSError, ValueError, TypeError, KeyError) as exc:
             if not quiet:
                 messagebox.showerror("地图无法打开", str(exc), parent=self.root)
             return
+        self.min_x, self.max_x = min_x, max_x
+        self.min_y, self.max_y = min_y, max_y
+        self.wall_thickness_m = wall_thickness_m
+        self.start = start_point
+        self.start_yaw_deg = start_yaw_deg
+        self.finish = finish_point
+        self.obstacles = obstacle_list
         self.map_path = path
-        self.width_var.set(f"{self.max_x - self.min_x:g}")
-        self.height_var.set(f"{self.max_y - self.min_y:g}")
-        self.thickness_var.set(f"{self.wall_thickness_m:g}")
+        self.width_var.set(f"{max_x - min_x:g}")
+        self.height_var.set(f"{max_y - min_y:g}")
+        self.thickness_var.set(f"{wall_thickness_m:g}")
         self.file_text.set(str(path))
         self.history.clear()
         self.status.set(f"已打开：{path.name}")
         self.redraw()
+
+    def on_close(self) -> None:
+        self.cancel_drag()
+        self.root.destroy()
 
     def new_map(self) -> None:
         self.min_x, self.max_x = -3.0, 3.0
@@ -590,9 +623,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--screenshot-delay", type=int, default=1200)
     arguments = parser.parse_args(argv)
     root = tk.Tk()
-    MapEditor(root, arguments.map.resolve())
+    app = MapEditor(root, arguments.map.resolve())
     if arguments.screenshot:
-        capture_window(root, arguments.screenshot.resolve(), arguments.screenshot_delay)
+        capture_window(root, arguments.screenshot.resolve(), arguments.screenshot_delay, app.on_close)
     root.mainloop()
 
 
