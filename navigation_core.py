@@ -573,6 +573,30 @@ class NavigationEngine:
     LOST_AFTER_FAILURES = 3
     BOOTSTRAP_SCANS = 3
     MAX_MOTION_SEGMENT_M = 0.16
+
+    def __init__(
+        self,
+        grid: OccupancyGrid | None = None,
+        max_range_m: float = 3.0,
+        robot_radius_m: float = 0.16,
+    ) -> None:
+        self.grid = grid or OccupancyGrid()
+        self.max_range_m = max_range_m
+        self.robot_radius_m = robot_radius_m
+        self.pose = Pose2D()
+        self.start_pose = Pose2D()
+        self.matcher = CorrelativeScanMatcher()
+        self.auto_enabled = False
+        self.state = "待机"
+        self.detail = "等待完整扫描"
+        self.latest_scan: list[ScanPoint] = []
+        self.path_cells: list[tuple[int, int]] = []
+        self.target_cell: tuple[int, int] | None = None
+        self.frontier_count = 0
+        self.reachable_frontier_count = 0
+        self.completed_scans = 0
+        self.match_score = 0.0
+        self.match_failures = 0
         self.rejected_scans = 0
         self.mapping_attempts = 0
         self._predicted_travel_m = 0.0
