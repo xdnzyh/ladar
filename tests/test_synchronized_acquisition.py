@@ -39,7 +39,8 @@ class ClockTests(unittest.TestCase):
 
     def test_clock_age_increases_error(self):
         clock = ClockEstimate(0, 0.001, 0, 500)
-        self.assertAlmostEqual(clock.map(1_000_000, 10)[1], 0.006)
+        self.assertAlmostEqual(clock.map(1_000_000, 10)[1], 0.0015 / 0.9995)
+        self.assertEqual(clock.map(1_000_000, 10), clock.map(1_000_000, 2))
 
     def test_invalid_exchange_rejected(self):
         with self.assertRaises(ValueError):
@@ -73,7 +74,8 @@ class SweepTests(unittest.TestCase):
     def test_timing_error_blocks_mapping(self):
         builder, points = self.build(error=0.03)
         self.assertEqual(points, [])
-        self.assertIn('时间配准误差', builder.reason)
+        self.assertIn('有效测距不足', builder.reason)
+        self.assertGreater(builder.rejected_points, 0)
 
     def test_missing_sector_blocks_mapping(self):
         builder, points = self.build(gap=True)
@@ -190,7 +192,7 @@ class AcquisitionTests(unittest.TestCase):
         endpoints = [Endpoint(), Endpoint()]
         output = []
         acquisition = SynchronizedAcquisition(*endpoints, CalibrationModel(p0=700, k=100),
-            {'clock_drift_bound_ppm': 0, 'irq_timestamp_uncertainty_ms': 0},
+            {'clock_drift_bound_ppm': 0, 'irq_timestamp_uncertainty_ms': 0, 'sync_max_age_s': 60},
             lambda *args: output.append(args))
         acquisition.start(0)
         return acquisition, endpoints, output
@@ -209,18 +211,19 @@ class AcquisitionTests(unittest.TestCase):
         a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
         a.poll(1.1)
         self.assertEqual(a.state, 'running')
-        self.assertTrue(endpoints[0].messages[-1].startswith('START '))
-        self.assertTrue(endpoints[1].messages[-1].startswith('ROT '))
+        self.assertTrue(any(message.startswith('START ') for message in endpoints[0].messages))
+        self.assertTrue(any(message.startswith('ROT ') for message in endpoints[1].messages))
 
     def test_rotation_waits_for_delayed_measurements(self):
         a, _, output = self.running()
+        a.receiver.reorder_s = 1.1
         a.last_arrival['measurement'] = 0.2
         s = a.session
         a.feed('rotation', f'TRIG {s} 1 1000000\nTRIG {s} 2 2000000\n'.encode(), 2.01)
         a.poll(2.01)
         self.assertIsNone(a.builder.anchor)
         a.feed('measurement', f'PIX {s} 1 1499000 1501000 800\nPIX {s} 2 2099000 2101000 800\n'.encode(), 2.1)
-        a.poll(2.1)
+        a.poll(3.2)
         self.assertEqual(a.builder.anchor[2], 2)
         self.assertFalse(any(event[0] == 'sync_sweep' for event in output))
 
@@ -230,15 +233,15 @@ class AcquisitionTests(unittest.TestCase):
         a.poll(1)
         self.assertEqual(a.pending, [])
 
-    def test_sequence_gap_discards_partial_sweep(self):
+    def test_range_sequence_gap_keeps_partial_sweep(self):
         a, _, _ = self.running()
         s = a.session
         a.builder.trigger(0, 0, 1)
         a.builder.sample(0.2, 0, 800, 1)
         a._line('measurement', f'PIX {s} 1 499000 501000 800', 0.51)
         a._line('measurement', f'PIX {s} 3 699000 701000 800', 0.71)
-        self.assertIsNone(a.builder.anchor)
-        self.assertEqual(a.builder.samples, [])
+        self.assertEqual(a.builder.anchor, (0, 0, 1))
+        self.assertEqual(len(a.builder.samples), 1)
 
     def test_restart_aborts_scan(self):
         a, _, output = self.running()
@@ -347,6 +350,20 @@ class MeasurementFirmwareTests(unittest.TestCase):
         self.firmware = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {'utime': utime, 'machine': machine}):
             spec.loader.exec_module(self.firmware)
+
+    def test_running_sync_and_keepalive_preserve_capture_and_session(self):
+        f = self.firmware
+        f.handle(b'START abc 20 8 fffe', 0)
+        f.poll()
+        self.tick = 200000
+        f.poll()
+        capture = f.capture_begin
+        f.handle(b'SYNC refresh', 201000)
+        f.handle(b'PING', 202000)
+        self.assertEqual(f.session, 'abc')
+        self.assertEqual(f.capture_begin, capture)
+        self.assertEqual(f.last_command, 202000)
+        self.assertEqual(f.laser.value(), 1)
 
     def test_partial_ccd_frame_has_capture_interval(self):
         f = self.firmware

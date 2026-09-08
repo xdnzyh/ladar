@@ -4,28 +4,54 @@ from collections import deque
 from dataclasses import dataclass
 import heapq
 import math
+from statistics import median
 
 from radar_core import PolarPoint
+
+
+def scan_complete(points, config):
+    if len(points) < int(config.get("min_scan_points", 12)):
+        return False, "本圈有效测距不足"
+    angles = sorted({p.angle_rad % math.tau for p in points})
+    if len(angles) < int(config.get("min_scan_points", 12)):
+        return False, "本圈有效方位不足"
+    gaps = [b - a for a, b in zip(angles, angles[1:] + [angles[0] + math.tau])]
+    normal = median(gaps)
+    limit = min(math.radians(float(config.get("scan_gap_hard_limit_deg", 45))),
+                max(math.radians(float(config.get("max_scan_gap_deg", 25))),
+                    normal * float(config.get("scan_gap_factor", 2.5))))
+    if max(gaps) > limit + 1e-9:
+        return False, "扫描存在过大的角度空缺，本圈丢弃"
+    return True, "完整扫描"
 
 
 class TimedSweepBuilder:
     def __init__(self, config: dict):
         self.config = config
+        self.collect_after = -math.inf
         self.reset()
 
     def reset(self):
         self.anchor = None
         self.samples = []
         self.previous_period = None
+        self.periods = deque(maxlen=5)
         self.stable_periods = 0
         self.reason = "等待光电零位"
         self.period_s = None
+        self.rejected_points = 0
 
-    def sample(self, timestamp: float, uncertainty: float, pixel: int, distance: float):
-        if self.anchor is not None and timestamp >= self.anchor[0]:
+    def begin_after(self, timestamp):
+        self.samples.clear()
+        self.collect_after = timestamp
+        self.reason = "等待停车后完整零位圈"
+
+    def sample(self, timestamp, uncertainty, pixel, distance):
+        if (self.anchor is not None and self.anchor[0] - self.anchor[1] >= self.collect_after
+                and timestamp >= self.anchor[0]):
             self.samples.append((timestamp, uncertainty, pixel, distance))
 
-    def trigger(self, timestamp: float, uncertainty: float, count: int) -> list[PolarPoint]:
+    def trigger(self, timestamp, uncertainty, count):
         anchor, samples = self.anchor, self.samples
         self.anchor = (timestamp, uncertainty, count)
         self.samples = []
@@ -34,18 +60,24 @@ class TimedSweepBuilder:
         start, start_error, previous_count = anchor
         period = timestamp - start
         if count != previous_count + 1 or not 0.1 <= period <= 60:
-            self.previous_period = None
-            self.stable_periods = 0
+            self.reset()
+            self.anchor = (timestamp, uncertainty, count)
             self.reason = "零位不连续，本圈丢弃"
             return []
-        self.period_s = period
-        previous_period, self.previous_period = self.previous_period, period
-        if previous_period is None or abs(period / previous_period - 1) > float(self.config.get("period_tolerance", 0.05)):
+        previous = self.previous_period
+        self.previous_period = self.period_s = period
+        if previous is not None and abs(period / previous - 1) > float(self.config.get("period_tolerance", 0.05)):
+            self.periods.clear()
             self.stable_periods = 0
-        else:
-            self.stable_periods += 1
+            self.reason = "零位或转速异常，重新估计"
+            return []
+        self.periods.append(period)
+        self.stable_periods = self.stable_periods + 1 if previous is not None else 0
         if self.stable_periods < 2:
             self.reason = "等待连续稳定转动"
+            return []
+        if start - start_error < self.collect_after:
+            self.reason = "等待停车后完整零位圈"
             return []
         lower_period = period - start_error - uncertainty
         if lower_period <= 0:
@@ -55,25 +87,19 @@ class TimedSweepBuilder:
         direction = 1 if self.config.get("clockwise", True) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         error_limit = float(self.config.get("max_timing_position_error_m", 0.04))
-        for sample_time, sample_error, pixel, distance in samples:
-            if sample_time - sample_error < start + start_error or sample_time + sample_error >= timestamp - uncertainty:
+        for stamp, error, pixel, distance in samples:
+            if (not all(math.isfinite(v) for v in (stamp, error, distance)) or error < 0
+                    or stamp - error < start + start_error or stamp + error >= timestamp - uncertainty):
+                self.rejected_points += 1
                 continue
-            phase = (sample_time - start) / period
-            angular_error = math.tau * (sample_error + start_error + uncertainty) / lower_period
+            phase = (stamp - start) / period
+            angular_error = math.tau * (error + (1 - phase) * start_error + phase * uncertainty) / lower_period
             if distance * angular_error > error_limit:
-                self.reason = f"时间配准误差超过 {error_limit * 100:g} cm，本圈丢弃"
-                return []
-            result.append(PolarPoint(distance, offset + direction * math.tau * phase, sample_time, pixel))
-        if len(result) < 12:
-            self.reason = "本圈有效测距不足 12 点"
-            return []
-        angles = sorted(point.angle_rad % math.tau for point in result)
-        gaps = [b - a for a, b in zip(angles, angles[1:] + [angles[0] + math.tau])]
-        if max(gaps) > math.radians(float(self.config.get("max_scan_gap_deg", 25))):
-            self.reason = "扫描存在过大的角度空缺，本圈丢弃"
-            return []
-        self.reason = "完整扫描"
-        return result
+                self.rejected_points += 1
+                continue
+            result.append(PolarPoint(distance, (offset + direction * math.tau * phase) % math.tau, stamp, pixel))
+        valid, self.reason = scan_complete(result, self.config)
+        return result if valid else []
 
 
 class EstimatedSweepBuilder:
@@ -144,24 +170,16 @@ class EstimatedSweepBuilder:
         direction = 1 if self.config.get("clockwise", True) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         for stamp, error, pixel, distance in samples:
-            if not start <= stamp < end:
+            if not start <= stamp < end or not math.isfinite(error) or error < 0:
                 continue
             phase = (stamp - anchor[0]) / period
             angular_error = math.tau * ((error + anchor[1]) / period + abs(phase) * spread / period)
             if distance * angular_error > float(self.config.get("max_timing_position_error_m", 0.04)):
-                self.reason = "角度估计误差过大，本圈丢弃"
-                return self.sequence, [], period
+                continue
             points.append(PolarPoint(distance, (offset + direction * math.tau * phase) % math.tau, stamp, pixel))
-        if len(points) < 12:
-            self.reason = "本圈有效测距不足 12 点"
-            return self.sequence, [], period
-        angles = sorted(p.angle_rad for p in points)
-        gaps = [b - a for a, b in zip(angles, angles[1:] + [angles[0] + math.tau])]
-        if max(gaps) > math.radians(float(self.config.get("max_scan_gap_deg", 25))):
-            self.reason = "扫描存在过大的角度空缺，本圈丢弃"
-            return self.sequence, [], period
-        self.reason = "完整扫描"
-        return self.sequence, points, period
+        valid, self.reason = scan_complete(points, self.config)
+        return self.sequence, points if valid else [], period
+
 
 
 @dataclass(frozen=True)
@@ -184,12 +202,13 @@ class ReceivedObservation:
 class DistanceObservationReceiver:
     def __init__(self, config: dict):
         self.config = config
-        self.builder = EstimatedSweepBuilder(config) if config.get("arbitrary_phase_scans", False) else TimedSweepBuilder(config)
+        self.builder = TimedSweepBuilder(config)
         self.reorder_s = float(config.get("observation_reorder_s", config.get("simulation_reorder_s", 0.3)))
         if not math.isfinite(self.reorder_s) or self.reorder_s < 0:
             raise ValueError("重排等待时间必须是非负有限数")
         self.pending = []
         self.seen = {}
+        self.progress = {}
         self.counter = 0
         self.watermark = -math.inf
         self.accepted = self.discarded = self.late = self.duplicates = 0
@@ -198,84 +217,89 @@ class DistanceObservationReceiver:
         self.preview_points = ()
 
     def reset(self, now: float):
-        if isinstance(self.builder, EstimatedSweepBuilder):
-            self.builder.begin_after(now)
-            return
-        previous_period = self.builder.previous_period
-        stable_periods = self.builder.stable_periods
+        self.builder.begin_after(now)
+
+    def invalidate(self, reason):
+        self.discarded += bool(self.builder.samples)
         self.builder.reset()
-        self.builder.previous_period = previous_period
-        self.builder.stable_periods = stable_periods
+        self.builder.reason = reason
         self.pending.clear()
-        self.seen.clear()
-        self.watermark = now
+        self._preview.clear()
+        self.preview_points = ()
+
+    def estimate_angle(self, packet):
+        anchor = self.builder.anchor
+        periods = self.builder.periods
+        if anchor is None or not periods or self.builder.stable_periods < 1:
+            return None
+        period = sum(periods) / len(periods)
+        age = packet.device_timestamp - anchor[0]
+        if not 0 <= age <= period * 1.5:
+            return None
+        direction = 1 if self.config.get("clockwise", True) else -1
+        angle = math.radians(float(self.config.get("angle_offset_deg", 0))) + direction * math.tau * age / period
+        error = math.tau * ((packet.uncertainty + anchor[1]) / period
+                           + abs(age / period) * (max(periods) - min(periods)) / period)
+        return angle % math.tau, error
 
     def feed(self, received: ReceivedObservation):
         packet = received.observation
         timestamp = packet.device_timestamp
+        if (packet.source not in {"range", "rotation"} or not math.isfinite(timestamp)
+                or not math.isfinite(packet.uncertainty) or packet.uncertainty < 0):
+            return False
         key = packet.source, packet.sequence
         if key in self.seen:
             self.duplicates += 1
-            return
-        if not math.isfinite(timestamp) or timestamp <= self.watermark:
+            return False
+        previous = self.progress.get(packet.source)
+        if previous is not None:
+            seq, stamp = previous
+            if (packet.sequence > seq and timestamp < stamp) or (packet.sequence < seq and timestamp > stamp):
+                self.invalidate("设备时间倒退，等待新的角度基准")
+                return False
+        if timestamp <= self.watermark:
             self.late += 1
-            return
+            if packet.source == "rotation" and (previous is None or packet.sequence > previous[0]):
+                self.invalidate("零位超过重排窗口，当前扫描失效")
+            return False
+        if previous is None or packet.sequence > previous[0]:
+            self.progress[packet.source] = packet.sequence, timestamp
         self.seen[key] = timestamp
         self.counter += 1
         heapq.heappush(self.pending, (timestamp, 0 if packet.source == "rotation" else 1, self.counter, packet))
+        return True
 
     def poll(self, now: float):
         cutoff = max(self.watermark, now - self.reorder_s)
         results = []
-        def finish_window(timestamp):
-            if isinstance(self.builder, EstimatedSweepBuilder):
-                result = self.builder.poll(timestamp)
-                if result is not None:
-                    if result[1]:
-                        self.accepted += 1
-                        results.append(result)
-                    else:
-                        self.discarded += 1
         while self.pending and self.pending[0][0] <= cutoff:
             timestamp, _, _, packet = heapq.heappop(self.pending)
-            finish_window(timestamp)
             if packet.source == "range":
                 distance = packet.distance
-                if packet.status in {"ok", "over_range"} and distance is not None and math.isfinite(distance):
-                    if float(self.config.get("min_range_m", 0.08)) <= distance <= float(self.config.get("max_range_m", 3.0)):
-                        self.builder.sample(timestamp, packet.uncertainty, packet.pixel, distance)
-                        if (isinstance(self.builder, EstimatedSweepBuilder) and self.builder.anchor is not None
-                                and self.builder.stable_periods >= 2 and self.builder.period_s is not None
-                                and 0 <= timestamp - self.builder.anchor[0] <= self.builder.period_s * 1.5):
-                            direction = 1 if self.config.get("clockwise", True) else -1
-                            angle = math.radians(float(self.config.get("angle_offset_deg", 0))) + direction * math.tau * (timestamp - self.builder.anchor[0]) / self.builder.period_s
-                            self._preview.append((timestamp, angle % math.tau, distance))
-            elif packet.source == "rotation":
-                if isinstance(self.builder, EstimatedSweepBuilder):
-                    before = self.builder.invalidated
-                    self.builder.trigger(timestamp, packet.uncertainty, packet.sequence)
-                    self.discarded += self.builder.invalidated - before
-                    if self.builder.stable_periods < 2:
-                        self.warmup += 1
-                    continue
+                if (packet.status in {"ok", "over_range"} and distance is not None and math.isfinite(distance)
+                        and float(self.config.get("min_range_m", 0.08)) <= distance <= float(self.config.get("max_range_m", 3.0))):
+                    self.builder.sample(timestamp, packet.uncertainty, packet.pixel, distance)
+                    estimate = self.estimate_angle(packet)
+                    if estimate is not None:
+                        self._preview.append((timestamp, estimate[0], distance))
+            else:
                 had_anchor = self.builder.anchor is not None
                 points = self.builder.trigger(timestamp, packet.uncertainty, packet.sequence)
                 if points:
                     self.accepted += 1
-                    results.append((packet.sequence, points, self.builder.period_s))
+                    results.append((packet.sequence - 1, points, self.builder.period_s))
                 elif had_anchor:
-                    if self.builder.reason == "等待连续稳定转动":
+                    if self.builder.reason in {"等待连续稳定转动", "等待停车后完整零位圈"}:
                         self.warmup += 1
                     else:
                         self.discarded += 1
-        finish_window(cutoff)
         period = self.builder.period_s or float(self.config.get("radar_period_s", 1.5))
+        if self.builder.anchor is not None and cutoff - self.builder.anchor[0] > period * 1.5:
+            self.invalidate("零位更新超时，当前扫描失效")
         while self._preview and self._preview[0][0] < cutoff - period:
             self._preview.popleft()
         self.preview_points = tuple(self._preview)
         self.watermark = cutoff
         self.seen = {key: timestamp for key, timestamp in self.seen.items() if timestamp > cutoff}
         return results
-
-
-

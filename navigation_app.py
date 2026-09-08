@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from data_fusion import DeviceClock, SequenceMonitor, parse_chassis_state, parse_timestamped_distance, parse_trigger
+from motion_safety import MotionSafetyGuard
 from navigation_core import (
     HiddenWorld,
     NavigationEngine,
@@ -47,17 +48,24 @@ NAV_CONFIG_PATH = APP_DIR / "navigation_config.json"
 
 DEFAULT_CONFIG = {
     "synchronized_acquisition": True,
-    "arbitrary_phase_scans": True,
     "observation_reorder_s": 0.3,
     "hardware_settle_s": 0.2,
+    "safety_clearance_m": 0.12,
+    "safety_max_observation_age_s": 0.5,
+    "safety_blind_timeout_s": 0.75,
+    "safety_max_angle_error_deg": 15,
     "hardware_sample_rate_hz": 20.0,
     "exposure_index": 8,
     "max_timing_position_error_m": 0.04,
     "clock_drift_bound_ppm": 500,
     "irq_timestamp_uncertainty_ms": 2.0,
-    "sync_scan_duration_s": 30,
+    "sync_interval_s": 0.5,
+    "sync_max_age_s": 8.0,
+    "keepalive_interval_s": 5.0,
     "period_tolerance": 0.05,
     "max_scan_gap_deg": 25,
+    "scan_gap_factor": 2.5,
+    "scan_gap_hard_limit_deg": 45,
     "measurement_port": "",
     "rotation_port": "",
     "chassis_port": "",
@@ -329,6 +337,8 @@ class NavigationApp:
         if simulation_profile is not None:
             self.config["simulation_profile"] = simulation_profile
         self.events: queue.Queue = queue.Queue()
+        self.safety_events: queue.Queue = queue.Queue()
+        self.motion_safety = MotionSafetyGuard(self.config)
         self.pending_events: list[tuple[float, int, str, object]] = []
         self.event_counter = 0
         self.sequence_monitor = SequenceMonitor()
@@ -377,7 +387,7 @@ class NavigationApp:
         self.chassis_endpoint = SerialEndpoint("底盘串口", self._chassis_data, self._serial_error)
         self.sync = SynchronizedAcquisition(
             self.measure_endpoint, self.rotation_endpoint, self.calibration, self.config,
-            lambda kind, value, timestamp: self.events.put((kind, value, timestamp)),
+            self._receive_sync_event,
         )
 
         self._build_window()
@@ -645,6 +655,11 @@ class NavigationApp:
 
     def start(self) -> None:
         if self.source == "hardware":
+            try:
+                self._settle_duration()
+            except (ValueError, TypeError) as exc:
+                messagebox.showwarning("停车参数无效", str(exc))
+                return
             if not self.connected:
                 messagebox.showwarning("设备未连接", "请先连接对应串口。")
                 return
@@ -653,6 +668,9 @@ class NavigationApp:
                 messagebox.showwarning("尚未标定", "当前测距格式需要先在原雷达程序中完成距离标定。")
                 return
             if self.view_mode.get() == "navigation":
+                if not self.config.get("synchronized_acquisition", True):
+                    messagebox.showwarning("采集模式不支持导航", "自动导航需要同步观测和实时安全检测；旧协议仅支持雷达查看。")
+                    return
                 if not self.chassis_endpoint.is_open:
                     messagebox.showwarning("底盘未连接", "自动导航需要连接底盘串口。")
                     return
@@ -670,6 +688,7 @@ class NavigationApp:
         self._log("开始自动导航" if self.view_mode.get() == "navigation" else "开始雷达扫描")
 
     def stop(self) -> None:
+        self.motion_safety.clear()
         self.motion_generation += 1
         if self.simulation:
             self.simulation.stop()
@@ -774,10 +793,36 @@ class NavigationApp:
         self.event_counter += 1
         heapq.heappush(self.pending_events, (timestamp, self.event_counter, kind, value))
 
+    def _receive_sync_event(self, kind, value, timestamp):
+        target = self.safety_events if kind == "sync_observation" else self.events
+        target.put((kind, value, timestamp))
+
+    def _check_motion_safety(self, now):
+        while not self.safety_events.empty():
+            _, (session, packet), _ = self.safety_events.get_nowait()
+            if not self.running or not self.moving or session != self.sync.session:
+                continue
+            reason = self.motion_safety.observe(packet, self.sync.receiver.estimate_angle(packet), now)
+            if reason:
+                self._safety_stop(reason)
+                return
+        if self.running and self.moving:
+            reason = self.motion_safety.poll(now)
+            if reason:
+                self._safety_stop(reason)
+
+    def _safety_stop(self, reason):
+        self._send_chassis_stop()
+        self.emergency_stop()
+        self.navigator.state = "安全停车"
+        self.navigator.detail = reason
+        self._log(reason)
+
     def _poll(self) -> None:
         now = time.perf_counter()
         if self.source == "hardware" and self.config.get("synchronized_acquisition", True):
             self.sync.poll(now)
+            self._check_motion_safety(now)
         event_limit = 2 if self.source == "simulation" else 64
         for _ in range(event_limit):
             try:
@@ -862,6 +907,7 @@ class NavigationApp:
         elif kind == "motion_sent":
             generation, command = value
             if self.running and self.moving and generation == self.motion_generation:
+                self.motion_safety.start(command, timestamp)
                 self.navigator.predict_motion(command)
                 remaining = timestamp + command.duration_s - time.perf_counter()
                 self.root.after(max(1, round(remaining * 1000)),
@@ -869,7 +915,8 @@ class NavigationApp:
         elif kind == "motion_stopped":
             generation = value
             if self.running and self.moving and generation == self.motion_generation:
-                self.scan_collect_after = timestamp + float(self.config.get("hardware_settle_s", 0.2))
+                self.motion_safety.clear()
+                self.scan_collect_after = timestamp + self._settle_duration()
                 self.sync.begin_after(self.scan_collect_after)
                 remaining = self.scan_collect_after - time.perf_counter()
                 self.root.after(max(1, round(remaining * 1000)),
@@ -939,6 +986,7 @@ class NavigationApp:
         self.motion_generation += 1
         generation = self.motion_generation
         self.scan_collect_after = math.inf
+        self.motion_safety.start(command, time.perf_counter())
         if self.config.get("synchronized_acquisition", True):
             if self.sync.receiver is not None:
                 self.sync.begin_after(math.inf)
@@ -959,6 +1007,12 @@ class NavigationApp:
                 command, lambda stamp: self.events.put(("motion_stopped", generation, stamp))):
             self.stop()
             self._log("底盘停止指令发送失败")
+
+    def _settle_duration(self):
+        duration = float(self.config.get("hardware_settle_s", 0.2))
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("停车等待时间必须是非负有限数")
+        return duration
 
     def _restart_hardware_scan(self, generation: int) -> None:
         if not self.running or generation != self.motion_generation:

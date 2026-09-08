@@ -3,6 +3,7 @@ import queue
 import unittest
 from unittest.mock import Mock
 
+from motion_safety import MotionSafetyGuard
 from navigation_app import NavigationApp
 from navigation_core import VelocityCommand
 from radar_core import CalibrationModel
@@ -24,7 +25,7 @@ class Endpoint:
 class SharedAcquisitionTests(unittest.TestCase):
     def replay(self, uncertainty=0.0, move=False):
         config = {"arbitrary_phase_scans": True, "clock_drift_bound_ppm": 0,
-                  "irq_timestamp_uncertainty_ms": 0}
+                  "irq_timestamp_uncertainty_ms": 0, "sync_max_age_s": 60}
         output = []
         acquisition = SynchronizedAcquisition(Endpoint(), Endpoint(), CalibrationModel(p0=700, k=100),
                                               config, lambda *event: output.append(event))
@@ -86,7 +87,8 @@ class SharedAcquisitionTests(unittest.TestCase):
         for _, points, _ in actual:
             self.assertTrue(points[-1].timestamp < 6.2 or points[0].timestamp >= 7.1)
         resumed = next(points for _, points, _ in actual if points[0].timestamp >= 7.1)
-        self.assertLess(resumed[0].timestamp, 7.5)
+        self.assertGreaterEqual(resumed[0].timestamp, 7.5)
+        self.assertLess(resumed[0].timestamp, 7.56)
         self.assertEqual(acquisition.endpoints["rotation"].messages.count("OFF"), 1)
 
     def test_real_clock_uncertainty_rejects_unreliable_sweeps(self):
@@ -101,6 +103,7 @@ class SharedAcquisitionTests(unittest.TestCase):
         app.moving = False
         app.motion_generation = 0
         app.config = {"synchronized_acquisition": True}
+        app.motion_safety = MotionSafetyGuard(app.config)
         app.protocol_var = Mock(get=lambda: "MOVE {fl} {fr} {rl} {rr} {duration_ms}")
         app.stop_command_var = Mock(get=lambda: "STOP")
         app.chassis_endpoint = Endpoint()
