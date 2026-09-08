@@ -255,7 +255,7 @@ class HardwareSimulation:
         self.sensor = VirtualRangeSensor(self.parameters, rate, maximum, seed + 2)
         self.chassis = VirtualChassis(world, self.parameters, seed + 3)
         self.link = VirtualCommunicationLink(self.parameters, seed + 4)
-        self.receiver = DistanceObservationReceiver({**config, "arbitrary_phase_scans": True})
+        self.receiver = DistanceObservationReceiver(config)
         self.time = 0.0
         self.resume_at = 0.0
         self.was_moving = False

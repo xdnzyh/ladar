@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import heapq
 import math
 import queue
 import secrets
 import time
 
+from measurement_protocol import parse_observation
 from radar_core import MotorLineParser
 from scan_acquisition import (TimedSweepBuilder, EstimatedSweepBuilder, DistanceObservationReceiver,
-                              HardwareObservation, ReceivedObservation)
+                              ReceivedObservation)
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,11 @@ class ClockEstimate:
     uncertainty: float
     observed_at: float
     drift_ppm: float = 500.0
+
+    def __post_init__(self):
+        if (not all(math.isfinite(v) for v in (self.offset, self.uncertainty, self.observed_at, self.drift_ppm))
+                or self.uncertainty < 0 or not 0 <= self.drift_ppm < 1000000):
+            raise ValueError("无效时钟误差预算")
 
     @classmethod
     def exchange(cls, t1: float, t2_us: int, t3_us: int, t4: float, drift_ppm: float = 500.0):
@@ -31,8 +36,22 @@ class ClockEstimate:
         return cls(((t2 - t1) + (t3 - t4)) / 2, uncertainty, t4, drift_ppm)
 
     def map(self, device_us: float, now: float) -> tuple[float, float]:
-        error = self.uncertainty + abs(now - self.observed_at) * self.drift_ppm * 1e-6
-        return device_us * 1e-6 - self.offset, error
+        timestamp = device_us * 1e-6 - self.offset
+        drift = self.drift_ppm * 1e-6
+        error = (self.uncertainty + abs(timestamp - self.observed_at) * drift) / (1 - drift)
+        return timestamp, error
+
+    def updated(self, measurement):
+        age = abs(measurement.observed_at - self.observed_at)
+        radius = self.uncertainty + age * self.drift_ppm * 1e-6
+        low = max(self.offset - radius, measurement.offset - measurement.uncertainty)
+        high = min(self.offset + radius, measurement.offset + measurement.uncertainty)
+        if low > high:
+            raise ValueError("连续校时区间不相容")
+        offset = (low + high) / 2
+        return ClockEstimate(offset, max(offset - low, high - offset),
+                             measurement.observed_at, self.drift_ppm)
+
 
 
 class SynchronizedAcquisition:
@@ -43,11 +62,11 @@ class SynchronizedAcquisition:
         self.emit = emit
         self.incoming = queue.Queue()
         self.parsers = {name: MotorLineParser() for name in self.endpoints}
-        self.receiver = DistanceObservationReceiver(config) if config.get("arbitrary_phase_scans", False) else None
-        self.builder = self.receiver.builder if self.receiver else TimedSweepBuilder(config)
+        self.receiver = DistanceObservationReceiver(config)
+        self.builder = self.receiver.builder
         self.state = "stopped"
         self.session = ""
-        self.pending = []
+        self.pending = self.receiver.pending
         self.clocks = {}
         self.sent_times = {}
         self.last_report = ""
@@ -62,21 +81,18 @@ class SynchronizedAcquisition:
         self.state = "syncing"
         self.started_at = now
         self.sync_started_at = now
-        if self.receiver is not None:
-            self.receiver = DistanceObservationReceiver(self.config)
-            self.builder = self.receiver.builder
-        else:
-            self.builder.reset()
+        self.receiver = DistanceObservationReceiver(self.config)
+        self.builder = self.receiver.builder
+        self.pending = self.receiver.pending
+        self.raw_progress = {}
+        self.last_keepalive = now
         self.clocks = {}
         self.exchanges = {source: [] for source in self.endpoints}
         self.outstanding = {}
         self.sent_times = {}
         self.attempts = {source: 0 for source in self.endpoints}
         self.next_probe = {source: now + 0.1 for source in self.endpoints}
-        self.latest = {source: -math.inf for source in self.endpoints}
         self.last_sequence = {}
-        self.last_processed = -math.inf
-        self.event_number = 0
         self.last_report = ""
         for parser in self.parsers.values():
             parser.reset()
@@ -91,8 +107,7 @@ class SynchronizedAcquisition:
         self.endpoints["rotation"].write_line("OFF")
 
     def begin_after(self, timestamp: float):
-        if self.receiver is not None:
-            self.receiver.reset(timestamp)
+        self.receiver.reset(timestamp)
 
     def _status(self, message):
         if message != self.last_report:
@@ -121,39 +136,43 @@ class SynchronizedAcquisition:
             if now >= self.start_deadline:
                 self._fail("设备启动确认超时，请检查两端固件和无线链路")
         elif self.state == "running":
-            if self.receiver is not None:
-                for sequence, points, period in self.receiver.poll(now):
-                    self.emit("sync_sweep", (self.session, sequence, points, period), points[-1].timestamp)
-                if self.builder.period_s is not None:
-                    self.emit("sync_period", (self.session, self.builder.period_s), now)
-                self._status(self.builder.reason)
-            watermark = min(self.latest.values())
-            while self.pending and self.pending[0][0] <= watermark:
-                timestamp, _, kind, payload = heapq.heappop(self.pending)
-                if timestamp < self.last_processed:
-                    self.builder.reset()
-                    self._status("收到迟到数据，本圈丢弃")
-                    continue
-                self.last_processed = timestamp
-                if kind == "pixel":
-                    uncertainty, pixel = payload
-                    distance = self.calibration.distance(pixel) if 0 <= pixel <= 1499 else None
-                    if distance is not None and float(self.config.get("min_range_m", 0.08)) <= distance <= float(self.config.get("max_range_m", 3)):
-                        self.builder.sample(timestamp, uncertainty, pixel, distance)
-                        self.emit("sync_range", (self.session, distance), timestamp)
-                else:
-                    uncertainty, count = payload
-                    points = self.builder.trigger(timestamp, uncertainty, count)
-                    if self.builder.period_s is not None:
-                        self.emit("sync_period", (self.session, self.builder.period_s), timestamp)
-                    self._status(self.builder.reason)
-                    if points:
-                        self.emit("sync_sweep", (self.session, count - 1, points, self.builder.period_s), timestamp)
-            if now - self.started_at > float(self.config.get("sync_scan_duration_s", 30)):
-                self.stop()
-                self.emit("sync_expired", None, now)
-            elif len(self.pending) > 10000 or now - self.last_arrival["measurement"] > 2 or now - self.last_arrival["rotation"] > 10:
+            self._running_sync_poll(now)
+            if self.state != "running":
+                return
+            for sequence, points, period in self.receiver.poll(now):
+                self.emit("sync_sweep", (self.session, sequence, points, period), points[-1].timestamp)
+            if self.builder.period_s is not None:
+                self.emit("sync_period", (self.session, self.builder.period_s), now)
+            self._status(self.builder.reason)
+            if len(self.pending) > 10000 or now - self.last_arrival["measurement"] > 2 or now - self.last_arrival["rotation"] > 10:
                 self._fail("测距或零位数据中断，请检查光电开关、CCD 和无线链路")
+
+    def _running_sync_poll(self, now):
+        if now - self.last_keepalive >= float(self.config.get("keepalive_interval_s", 5)):
+            for endpoint in self.endpoints.values():
+                if not endpoint.write_line("PING"):
+                    self._fail("保活指令发送失败")
+                    return
+            self.last_keepalive = now
+        for source, endpoint in self.endpoints.items():
+            if now - self.clocks[source].observed_at > float(self.config.get("sync_max_age_s", 8)):
+                self._fail("持续校时超时，停止采集与运动")
+                return
+            if source in self.outstanding:
+                token, queued_at = self.outstanding[source]
+                if now - queued_at < 1:
+                    continue
+                self.sent_times.pop((source, token), None)
+                del self.outstanding[source]
+            if now < self.next_probe[source]:
+                continue
+            self.attempts[source] += 1
+            token = f"{self.session}-{self.attempts[source]}"
+            self.outstanding[source] = token, now
+            self.next_probe[source] = now + float(self.config.get("sync_interval_s", 0.5))
+            if not endpoint.write_line(f"SYNC {token}", lambda t, s=source, k=token: self.incoming.put(("sent", (s, k), t))):
+                self._fail("持续校时发送失败")
+                return
 
     def _sync_poll(self, now):
         if now - self.sync_started_at > 20:
@@ -208,7 +227,7 @@ class SynchronizedAcquisition:
         parts = line.split()
         if not parts or self.state == "stopped":
             return
-        if parts[0] == "SYNC" and len(parts) == 4 and self.state == "syncing":
+        if parts[0] == "SYNC" and len(parts) == 4 and self.state in {"syncing", "running"}:
             token = parts[1]
             if self.outstanding.get(source, (None,))[0] != token:
                 return
@@ -217,11 +236,19 @@ class SynchronizedAcquisition:
                 return
             try:
                 estimate = ClockEstimate.exchange(t1, int(parts[2]), int(parts[3]), arrival, float(self.config.get("clock_drift_bound_ppm", 500)))
-            except ValueError:
+            except (ValueError, OverflowError):
                 return
-            self.exchanges[source].append(estimate)
+            if self.state == "running":
+                try:
+                    self.clocks[source] = self.clocks[source].updated(estimate)
+                except ValueError:
+                    self._fail("连续校时时钟跳变，请检查设备时钟与无线链路")
+                    return
+                self.next_probe[source] = arrival + float(self.config.get("sync_interval_s", 0.5))
+            else:
+                self.exchanges[source].append(estimate)
+                self.next_probe[source] = arrival + 0.03
             del self.outstanding[source]
-            self.next_probe[source] = arrival + 0.03
             return
         if parts[0] == "ERROR":
             self._fail(f"{source}: {line}")
@@ -249,56 +276,29 @@ class SynchronizedAcquisition:
         if self.state not in {"running", "starting_rotation"} or len(parts) < 2 or parts[1] != self.session:
             return
         try:
-            if source == "measurement" and parts[0] == "PIX" and len(parts) == 6:
-                sequence, begin, end, pixel = map(int, parts[2:])
-                if end < begin or begin < 0 or end - begin > 250000:
-                    raise ValueError
-                timestamp, uncertainty = self.clocks[source].map((begin + end) / 2, arrival)
-                uncertainty += (end - begin) * 0.5e-6
-                kind, payload = "pixel", (uncertainty, pixel)
-            elif source == "rotation" and parts[0] == "TRIG" and len(parts) == 4:
-                sequence, tick = map(int, parts[2:])
-                if tick < 0:
-                    raise ValueError
-                timestamp, uncertainty = self.clocks[source].map(tick, arrival)
-                uncertainty += float(self.config.get("irq_timestamp_uncertainty_ms", 2.0)) / 1000
-                kind, payload = "trigger", (uncertainty, sequence)
-            else:
+            raw = parse_observation(source, line, self.session, self.calibration, self.config)
+        except (ValueError, OverflowError):
+            if source == "rotation":
+                self.receiver.invalidate("零位时间数据无效")
+            return
+        if raw is None:
+            return
+        if raw.sequence < 1:
+            if source == "rotation":
+                self.receiver.invalidate("零位帧序号无效")
+            return
+        previous = self.raw_progress.get(source)
+        if previous is not None:
+            seq, tick = previous
+            if (raw.sequence > seq and raw.timestamp_us < tick or
+                    raw.sequence < seq and raw.timestamp_us > tick):
+                self._fail(f"{source} 设备时间倒退")
                 return
-        except ValueError:
-            self._fail(f"{source} 时间戳数据无效")
-            return
-        if self.receiver is not None:
-            if sequence < 1:
-                self._fail(f"{source} 帧序号无效")
-                return
-            distance = None
-            pixel = 0
-            if kind == "pixel":
-                uncertainty, pixel = payload
-                distance = self.calibration.distance(pixel) if 0 <= pixel <= 1499 else None
-            self.receiver.feed(ReceivedObservation(HardwareObservation(
-                "range" if kind == "pixel" else "rotation", sequence, timestamp,
-                distance, "ok" if distance is not None or kind == "trigger" else "no_return",
-                uncertainty, pixel), arrival))
-            self.last_arrival[source] = arrival
-            return
-        previous = self.last_sequence.get(source)
-        if sequence < 1:
-            self._fail(f"{source} 帧序号无效")
-            return
-        if previous is not None and sequence <= previous:
-            return
-        if previous is not None and sequence != previous + 1:
-            self.pending.clear()
-            self.builder.reset()
-            self._status(f"{source} 数据丢帧，本圈丢弃")
-        if timestamp < self.latest[source]:
-            self._fail(f"{source} 设备时间倒退")
-            return
-        self.last_sequence[source] = sequence
-        self.latest[source] = timestamp
+        if previous is None or raw.sequence > previous[0]:
+            self.raw_progress[source] = raw.sequence, raw.timestamp_us
+        packet = raw.normalize(self.clocks[source], arrival)
+        self.receiver.feed(ReceivedObservation(packet, arrival))
+        if packet.source == "range" and (previous is None or raw.sequence > previous[0]):
+            self.emit("sync_observation", (self.session, packet), arrival)
         self.last_arrival[source] = arrival
-        self.event_number += 1
-        heapq.heappush(self.pending, (timestamp, self.event_number, kind, payload))
-
+        self.last_sequence[source] = raw.sequence
