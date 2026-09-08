@@ -2,7 +2,7 @@ import math
 import unittest
 
 from navigation_core import HiddenWorld, VelocityCommand
-from synchronized_acquisition import EstimatedSweepBuilder
+from scan_acquisition import EstimatedSweepBuilder
 from virtual_hardware import HardwareSimulation, DistanceObservationReceiver, HardwareObservation, ReceivedObservation
 
 

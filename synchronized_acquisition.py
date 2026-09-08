@@ -8,8 +8,7 @@ import time
 
 from measurement_protocol import parse_observation
 from radar_core import MotorLineParser
-from scan_acquisition import (TimedSweepBuilder, EstimatedSweepBuilder, DistanceObservationReceiver,
-                              ReceivedObservation)
+from scan_acquisition import DistanceObservationReceiver, ReceivedObservation
 
 
 @dataclass(frozen=True)

@@ -215,24 +215,6 @@ class MotorLineParser:
         return lines
 
 
-class DeviceClockMapper:
-    def __init__(self, keep: int = 9) -> None:
-        self.offsets: Deque[float] = deque(maxlen=max(3, keep))
-
-    def reset(self) -> None:
-        self.offsets.clear()
-
-    def observe(self, device_us: int, host_timestamp: float) -> None:
-        offset = host_timestamp - float(device_us) / 1_000_000.0
-        self.offsets.append(offset)
-
-    def to_device_time(self, host_timestamp: float) -> float:
-        if not self.offsets:
-            return host_timestamp
-        values = sorted(self.offsets)
-        return host_timestamp - values[len(values) // 2]
-
-
 @dataclass
 class PolarPoint:
     distance_m: float

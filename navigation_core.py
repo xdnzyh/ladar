@@ -7,7 +7,20 @@ import json
 import math
 from pathlib import Path
 import random
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
+
+
+CARDINAL_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+GRID_STEPS = (
+    (1, 0, 1.0),
+    (-1, 0, 1.0),
+    (0, 1, 1.0),
+    (0, -1, 1.0),
+    (1, 1, math.sqrt(2)),
+    (1, -1, math.sqrt(2)),
+    (-1, 1, math.sqrt(2)),
+    (-1, -1, math.sqrt(2)),
+)
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -262,10 +275,6 @@ class OccupancyGrid:
         self._field_cache[key] = (self._revision, field)
         return field
 
-    def known_ratio(self) -> float:
-        known = sum(1 for value in self.log_odds if abs(value) >= 2)
-        return known / len(self.log_odds)
-
     def known_area_m2(self) -> float:
         known = sum(1 for value in self.log_odds if abs(value) >= 2)
         return known * self.resolution_m * self.resolution_m
@@ -302,7 +311,7 @@ class OccupancyGrid:
                     continue
                 if any(
                     self.state(col + dx, row + dy) == self.UNKNOWN
-                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    for dx, dy in CARDINAL_STEPS
                 ):
                     frontier.add((col, row))
 
@@ -313,7 +322,7 @@ class OccupancyGrid:
             pending = [seed]
             while pending:
                 col, row = pending.pop()
-                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for dx, dy in CARDINAL_STEPS:
                     neighbor = col + dx, row + dy
                     if neighbor in frontier:
                         frontier.remove(neighbor)
@@ -344,23 +353,13 @@ class OccupancyGrid:
         frontier: list[tuple[float, float, tuple[int, int]]] = [(0.0, 0.0, start)]
         came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
         cost_so_far = {start: 0.0}
-        directions = (
-            (1, 0, 1.0),
-            (-1, 0, 1.0),
-            (0, 1, 1.0),
-            (0, -1, 1.0),
-            (1, 1, math.sqrt(2)),
-            (1, -1, math.sqrt(2)),
-            (-1, 1, math.sqrt(2)),
-            (-1, -1, math.sqrt(2)),
-        )
         while frontier:
             _, current_cost, current = heapq.heappop(frontier)
             if current == goal:
                 break
             if current_cost > cost_so_far.get(current, math.inf) + 1e-9:
                 continue
-            for dx, dy, step_cost in directions:
+            for dx, dy, step_cost in GRID_STEPS:
                 neighbor = current[0] + dx, current[1] + dy
                 if not self.in_bounds(*neighbor) or neighbor in blocked:
                     continue
@@ -373,15 +372,7 @@ class OccupancyGrid:
                 came_from[neighbor] = current
                 heuristic = math.hypot(goal[0] - neighbor[0], goal[1] - neighbor[1])
                 heapq.heappush(frontier, (new_cost + heuristic, new_cost, neighbor))
-        if goal not in came_from:
-            return []
-        path = []
-        current: tuple[int, int] | None = goal
-        while current is not None:
-            path.append(current)
-            current = came_from[current]
-        path.reverse()
-        return path
+        return self.path_from_tree(came_from, goal)
 
     def reachable_tree(
         self,
@@ -393,16 +384,11 @@ class OccupancyGrid:
         pending: list[tuple[float, tuple[int, int]]] = [(0.0, start)]
         distances = {start: 0.0}
         parents: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-        directions = (
-            (1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
-            (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)),
-            (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2)),
-        )
         while pending:
             current_distance, current = heapq.heappop(pending)
             if current_distance > distances.get(current, math.inf) + 1e-9:
                 continue
-            for dx, dy, step in directions:
+            for dx, dy, step in GRID_STEPS:
                 neighbor = current[0] + dx, current[1] + dy
                 if not self.in_bounds(*neighbor) or neighbor in blocked:
                     continue
@@ -558,15 +544,6 @@ class CorrelativeScanMatcher:
                      + (1 - fx) * fy * field[index + width] + fx * fy * field[index + width + 1])
             total += weight * value
         return total / max(weight_sum, 1e-9)
-
-    @staticmethod
-    def _score(grid: OccupancyGrid, pose: Pose2D, points: Sequence[ScanPoint]) -> float:
-        sine, cosine = math.sin(pose.yaw), math.cos(pose.yaw)
-        endpoints = [(p.x * cosine + p.y * sine, -p.x * sine + p.y * cosine, min(1.0, p.quality))
-                     for p in points if math.isfinite(p.quality) and p.quality >= grid.MIN_QUALITY]
-        return CorrelativeScanMatcher._field_score(
-            grid, grid.likelihood_field(CorrelativeScanMatcher.LIKELIHOOD_SIGMA_M), pose.x, pose.y, endpoints)
-
 
 class NavigationEngine:
     MAP_UPDATE_MIN_CONFIDENCE = 0.55
@@ -727,34 +704,6 @@ class NavigationEngine:
         self.target_cell = None
         return VelocityCommand()
 
-    @staticmethod
-    def _densify_for_mapping(points: Sequence[ScanPoint]) -> list[ScanPoint]:
-        if len(points) < 2:
-            return list(points)
-        ordered = sorted(points, key=lambda point: point.angle_rad % math.tau)
-        dense: list[ScanPoint] = []
-        for index, first in enumerate(ordered):
-            second = ordered[(index + 1) % len(ordered)]
-            first_angle = first.angle_rad % math.tau
-            second_angle = second.angle_rad % math.tau
-            if index == len(ordered) - 1:
-                second_angle += math.tau
-            dense.append(first)
-            gap = second_angle - first_angle
-            if gap <= math.radians(4) or gap > math.radians(15) or abs(second.distance_m - first.distance_m) > 0.28:
-                continue
-            subdivisions = min(5, max(1, math.ceil(gap / math.radians(4))))
-            for step in range(1, subdivisions):
-                fraction = step / subdivisions
-                dense.append(
-                    ScanPoint(
-                        angle_rad=wrap_angle(first_angle + gap * fraction),
-                        distance_m=first.distance_m + (second.distance_m - first.distance_m) * fraction,
-                        quality=min(first.quality, second.quality) * 0.20,
-                    )
-                )
-        return dense
-
     def _plan_next_command(self) -> VelocityCommand:
         start = self.grid.world_to_cell(self.pose.x, self.pose.y)
         clusters = self.grid.frontier_clusters()
@@ -900,7 +849,7 @@ class NavigationEngine:
         while pending:
             col, row = pending.popleft()
             distance = distances[(col, row)] + 1
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for dx, dy in CARDINAL_STEPS:
                 neighbor = col + dx, row + dy
                 if neighbor in distances or not self.grid.in_bounds(*neighbor):
                     continue
@@ -1007,30 +956,6 @@ class NavigationEngine:
             self.detail = "车体扫过区域距离不足，停车更新障碍边界"
             return VelocityCommand()
         return command
-
-    def _find_terminal_cell(self, current: tuple[int, int]) -> tuple[int, int] | None:
-        start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
-        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.07)
-        blocked.discard(start)
-        pending = deque([start])
-        distance = {start: 0}
-        best: tuple[int, tuple[int, int]] | None = None
-        while pending:
-            cell = pending.popleft()
-            cell_distance = distance[cell]
-            if self.grid.state(*cell) == self.grid.FREE and cell not in blocked:
-                if best is None or cell_distance > best[0]:
-                    best = cell_distance, cell
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                neighbor = cell[0] + dx, cell[1] + dy
-                if neighbor in distance or neighbor in blocked or not self.grid.in_bounds(*neighbor):
-                    continue
-                if self.grid.state(*neighbor) != self.grid.FREE:
-                    continue
-                distance[neighbor] = cell_distance + 1
-                pending.append(neighbor)
-        return None if best is None else best[1]
-
 
 class HiddenWorld:
     def __init__(

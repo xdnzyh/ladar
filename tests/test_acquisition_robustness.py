@@ -1,6 +1,5 @@
 import math
 import unittest
-from dataclasses import replace
 
 from measurement_protocol import DeviceObservation, parse_observation
 from radar_core import CalibrationModel

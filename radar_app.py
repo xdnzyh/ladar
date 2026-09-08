@@ -4,18 +4,17 @@ import argparse
 from collections import deque
 import csv
 from datetime import datetime
-import json
 import math
 from pathlib import Path
 import queue
 import random
-import re
 import secrets
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from app_utils import capture_window, load_json_config, save_json
 from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
 from serial_backend import SerialEndpoint, list_serial_ports
 from data_fusion import DeviceClock, parse_trigger
@@ -61,21 +60,11 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    config = dict(DEFAULT_CONFIG)
-    if CONFIG_PATH.exists():
-        try:
-            stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(stored, dict):
-                config.update(stored)
-        except (OSError, ValueError):
-            pass
-    return config
+    return load_json_config(CONFIG_PATH, DEFAULT_CONFIG)
 
 
 def save_config(config: dict) -> None:
-    temporary = CONFIG_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(CONFIG_PATH)
+    save_json(CONFIG_PATH, config)
 
 
 class RadarCanvas(tk.Canvas):
@@ -1022,31 +1011,6 @@ class RadarApp:
             except (OSError, ValueError, tk.TclError):
                 pass
         self.root.destroy()
-
-
-def capture_window(root: tk.Tk, output_path: Path, delay_ms: int = 1800) -> None:
-    def grab() -> None:
-        root.deiconify()
-        root.lift()
-        root.attributes("-topmost", True)
-        root.focus_force()
-        root.update_idletasks()
-        root.update()
-        try:
-            from PIL import ImageGrab
-
-            x = root.winfo_rootx()
-            y = root.winfo_rooty()
-            width = root.winfo_width()
-            height = root.winfo_height()
-            image = ImageGrab.grab(bbox=(x, y, x + width, y + height), all_screens=True)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(output_path)
-        finally:
-            root.attributes("-topmost", False)
-            root.after(100, root.destroy)
-
-    root.after(delay_ms, grab)
 
 
 def main() -> None:

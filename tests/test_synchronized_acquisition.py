@@ -9,9 +9,9 @@ from unittest.mock import Mock, patch
 
 from data_fusion import parse_trigger
 from radar_core import CalibrationModel, RotationTracker
+from scan_acquisition import TimedSweepBuilder
 from serial_backend import _PySerialTransport
-from synchronized_acquisition import ClockEstimate, SynchronizedAcquisition, TimedSweepBuilder
-from navigation_core import NavigationEngine, ScanPoint
+from synchronized_acquisition import ClockEstimate, SynchronizedAcquisition
 
 
 class Endpoint:
@@ -95,11 +95,6 @@ class SweepTests(unittest.TestCase):
         tracker.add_sample(1, 800, 0.5)
         tracker.trigger(0.1, 1)
         self.assertEqual(len(tracker.trigger(1, 2)), 1)
-
-    def test_densification_does_not_invent_large_missing_sector(self):
-        points = [ScanPoint(0, 1), ScanPoint(math.pi, 1)]
-        self.assertEqual(NavigationEngine._densify_for_mapping(points), points)
-
 
 class AcquisitionTests(unittest.TestCase):
     def finish_clock_sync(self, acquisition, endpoints):

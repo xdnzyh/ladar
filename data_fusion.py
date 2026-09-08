@@ -1,18 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 import math
 import re
-
-
-@dataclass(frozen=True)
-class TimedRecord:
-    source: str
-    sequence: int | None
-    host_time: float
-    device_time_us: int | None
-    payload: object
 
 
 class DeviceClock:

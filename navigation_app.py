@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-import ctypes
 from datetime import datetime
 import heapq
-import json
 import math
 from pathlib import Path
 import queue
-import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app_utils import capture_window, enable_windows_dpi_awareness, load_json_config, save_json
 from data_fusion import DeviceClock, SequenceMonitor, parse_chassis_state, parse_timestamped_distance, parse_trigger
 from motion_safety import MotionSafetyGuard
 from navigation_core import (
@@ -32,14 +30,7 @@ from synchronized_acquisition import SynchronizedAcquisition
 from virtual_hardware import HardwareSimulation
 
 
-if sys.platform == "win32":
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
+enable_windows_dpi_awareness()
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -99,14 +90,7 @@ DEFAULT_CONFIG = {
 
 def load_configuration() -> dict:
     config = dict(DEFAULT_CONFIG)
-    radar_config: dict = {}
-    if RADAR_CONFIG_PATH.exists():
-        try:
-            loaded = json.loads(RADAR_CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                radar_config = loaded
-        except (OSError, ValueError):
-            pass
+    radar_config = load_json_config(RADAR_CONFIG_PATH, {})
     for key in (
         "measurement_port",
         "baudrate",
@@ -126,24 +110,16 @@ def load_configuration() -> dict:
         config["measurement_mode"] = radar_config["ccd_parser"]
     config["calibration"] = radar_config.get("calibration", {})
 
-    if NAV_CONFIG_PATH.exists():
-        try:
-            loaded = json.loads(NAV_CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                config.update(loaded)
-                if CalibrationModel.from_dict(radar_config.get("calibration")).ready:
-                    config["calibration"] = radar_config.get("calibration", {})
-                    config["measurement_mode"] = radar_config.get("ccd_parser", config["measurement_mode"])
-                    config["exposure_index"] = radar_config.get("exposure_index", config["exposure_index"])
-        except (OSError, ValueError):
-            pass
+    config = load_json_config(NAV_CONFIG_PATH, config)
+    if CalibrationModel.from_dict(radar_config.get("calibration")).ready:
+        config["calibration"] = radar_config.get("calibration", {})
+        config["measurement_mode"] = radar_config.get("ccd_parser", config["measurement_mode"])
+        config["exposure_index"] = radar_config.get("exposure_index", config["exposure_index"])
     return config
 
 
 def save_configuration(config: dict) -> None:
-    temporary = NAV_CONFIG_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(NAV_CONFIG_PATH)
+    save_json(NAV_CONFIG_PATH, config)
 
 
 class MapCanvas(tk.Canvas):
@@ -1109,31 +1085,6 @@ class NavigationApp:
             except (OSError, ValueError, tk.TclError):
                 pass
         self.root.destroy()
-
-
-def capture_window(root: tk.Tk, path: Path, delay_ms: int) -> None:
-    def grab() -> None:
-        root.deiconify()
-        root.lift()
-        root.attributes("-topmost", True)
-        root.update_idletasks()
-        root.update()
-        try:
-            from PIL import ImageGrab
-
-            x = root.winfo_rootx()
-            y = root.winfo_rooty()
-            image = ImageGrab.grab(
-                bbox=(x, y, x + root.winfo_width(), y + root.winfo_height()),
-                all_screens=True,
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(path)
-        finally:
-            root.attributes("-topmost", False)
-            root.after(80, root.destroy)
-
-    root.after(delay_ms, grab)
 
 
 def run_app(source: str, argv: list[str] | None = None) -> None:

@@ -1,23 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import math
 from pathlib import Path
-import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from app_utils import capture_window, enable_windows_dpi_awareness, save_json
 
-if sys.platform == "win32":
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
+enable_windows_dpi_awareness()
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -509,9 +501,7 @@ class MapEditor:
         if not self._validate_positions():
             return
         try:
-            temporary = self.map_path.with_suffix(self.map_path.suffix + ".tmp")
-            temporary.write_text(json.dumps(self._map_data(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(self.map_path)
+            save_json(self.map_path, self._map_data(), trailing_newline=True)
         except OSError as exc:
             messagebox.showerror("保存失败", str(exc), parent=self.root)
             return
@@ -591,22 +581,6 @@ class MapEditor:
         self.file_text.set(str(self.map_path))
         self.status.set("已新建空白地图")
         self.redraw()
-
-
-def capture_window(root: tk.Tk, path: Path, delay_ms: int) -> None:
-    def capture() -> None:
-        try:
-            from PIL import ImageGrab
-
-            root.update_idletasks()
-            x, y = root.winfo_rootx(), root.winfo_rooty()
-            width, height = root.winfo_width(), root.winfo_height()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            ImageGrab.grab(bbox=(x, y, x + width, y + height), all_screens=True).save(path)
-        finally:
-            root.destroy()
-
-    root.after(max(200, delay_ms), capture)
 
 
 def main(argv: list[str] | None = None) -> None:
