@@ -34,10 +34,12 @@ class ClockEstimate:
     uncertainty: float
     observed_at: float
     drift_ppm: float = 500.0
+    version: int = 0
 
     def __post_init__(self):
         if (not all(math.isfinite(v) for v in (self.offset, self.uncertainty, self.observed_at, self.drift_ppm))
-                or self.uncertainty < 0 or not 0 <= self.drift_ppm < 1000000):
+                or self.uncertainty < 0 or not 0 <= self.drift_ppm < 1000000
+                or not isinstance(self.version, int) or self.version < 0):
             raise ValueError("无效时钟误差预算")
 
     @classmethod
@@ -66,7 +68,7 @@ class ClockEstimate:
             raise ValueError("连续校时区间不相容")
         offset = (low + high) / 2
         return ClockEstimate(offset, max(offset - low, high - offset),
-                             measurement.observed_at, self.drift_ppm)
+                             measurement.observed_at, self.drift_ppm, self.version + 1)
 
 
 
@@ -189,7 +191,11 @@ class SynchronizedAcquisition:
             cancel_pending()
         sent = True
         for line in lines:
-            sent = bool(endpoint.write_line(line)) and sent
+            try:
+                written = endpoint.write_line(line, priority=True)
+            except TypeError:
+                written = endpoint.write_line(line)
+            sent = bool(written) and sent
         flush = getattr(endpoint, "flush", None)
         if callable(flush):
             sent = bool(flush(timeout)) and sent
@@ -254,7 +260,16 @@ class SynchronizedAcquisition:
             pending = [self._endpoint_label(source) for source in self.stop_pending]
             self._diagnostic(f"停止确认超时：{','.join(pending)}已写入停止命令但未收到确认", force=True)
             self.stop_pending.clear()
-        for _ in range(4096):
+        if self.incoming.qsize() > int(self.config.get("raw_input_queue_limit", 10000)):
+            self._fail("采集失败：原始输入队列过载，当前会话已停止")
+            return
+        budget_ms = float(self.config.get("poll_budget_ms", 4.0))
+        if not math.isfinite(budget_ms) or budget_ms <= 0:
+            budget_ms = 4.0
+        deadline = time.perf_counter() + budget_ms / 1000.0
+        processed = 0
+        while processed < 512 and time.perf_counter() < deadline:
+            processed += 1
             try:
                 source, data, arrival = self.incoming.get_nowait()
             except queue.Empty:
@@ -291,12 +306,14 @@ class SynchronizedAcquisition:
             self._running_sync_poll(now)
             if self.state != "running":
                 return
-            for sequence, points, period in self.receiver.poll(now):
+            poll_result = self.receiver.poll(now)
+            for sequence, points, period in poll_result.formal_scans:
                 self.emit("sync_sweep", (self.session, sequence, points, period), points[-1].timestamp)
-            for sequence, points, period in self.receiver.local_results:
+            for sequence, points, period in poll_result.local_scans:
                 if points:
                     self.emit("sync_local_sweep", (self.session, sequence, points, period), points[-1].timestamp)
-            self.receiver.local_results.clear()
+            for diagnostic in poll_result.diagnostics:
+                self._diagnostic(f"扫描诊断：{diagnostic}", timestamp=now)
             if self.builder.period_s is not None:
                 self.emit("sync_period", (self.session, self.builder.period_s), now)
             self._status(self.builder.reason)
@@ -379,7 +396,7 @@ class SynchronizedAcquisition:
                 self._fail("同步采集支持 fffe 或 raw2 中心像素协议")
                 return
             try:
-                rate = float(self.config.get("hardware_sample_rate_hz", 50))
+                rate = float(self.config.get("hardware_sample_rate_hz", 80))
                 exposure = int(self.config.get("actual_exposure_index", self.config.get("exposure_index", 3)))
                 if not 1 <= rate <= 100 or not 0 <= exposure <= 13:
                     raise ValueError

@@ -62,6 +62,14 @@ class ScanPoint:
     distance_m: float
     quality: float = 1.0
     is_echo: bool | None = None
+    timestamp_s: float | None = None
+    time_error_s: float | None = None
+    angle_error_rad: float | None = None
+    distance_error_m: float | None = None
+    pixel: int | None = None
+    calibration_version: str | None = None
+    source: str | None = None
+    session: str | None = None
 
     @property
     def x(self) -> float:
@@ -75,6 +83,16 @@ class ScanPoint:
         if self.is_echo is not None:
             return bool(self.is_echo)
         return self.distance_m < max_range_m - 1e-6
+
+    def evidence_weight(self, resolution_m: float) -> float:
+        weight = min(1.0, max(0.0, self.quality))
+        if self.angle_error_rad is not None and math.isfinite(self.angle_error_rad):
+            scale = max(resolution_m, 1e-9)
+            weight *= 1.0 / (1.0 + (self.distance_m * max(0.0, self.angle_error_rad) / scale) ** 2)
+        if self.distance_error_m is not None and math.isfinite(self.distance_error_m):
+            scale = max(resolution_m, 1e-9)
+            weight *= 1.0 / (1.0 + (max(0.0, self.distance_error_m) / scale) ** 2)
+        return weight
 
 
 @dataclass(frozen=True)
@@ -91,6 +109,39 @@ class VelocityCommand:
             and abs(self.right_mps) < 1e-9
             and abs(self.yaw_rps) < 1e-9
         )
+
+
+@dataclass(frozen=True)
+class MapUpdateSummary:
+    changed_cells: tuple[tuple[int, int], ...] = ()
+    state_changed_cells: tuple[tuple[int, int], ...] = ()
+    out_of_bounds_points: int = 0
+    known_cells: int = 0
+    map_revision: int = 0
+
+
+@dataclass
+class ScanMatchResult:
+    corrected_sensor_pose: Pose2D
+    data_score: float
+    prior_penalty: float = 0.0
+    predicted_position_score: float = 0.0
+    best_candidate_score: float = 0.0
+    second_candidate_score: float | None = None
+    inlier_count: int = 0
+    valid_direction_count: int = 0
+    known_overlap: float = 0.0
+    touched_search_boundary: bool = False
+    degenerate: bool = False
+    rejection_reason: str = ""
+
+    @property
+    def confidence(self) -> float:
+        return self.data_score
+
+    def __iter__(self):
+        yield self.corrected_sensor_pose
+        yield self.data_score
 
 
 class OccupancyGrid:
@@ -110,16 +161,24 @@ class OccupancyGrid:
         self.height = int(height)
         self.resolution_m = float(resolution_m)
         self.origin_col = self.width // 2
-        self.origin_row = round(self.height * 0.84)
+        self.origin_row = self.height // 2 if self.height >= 80 else round(self.height * 0.84)
         self.log_odds = [0] * (self.width * self.height)
         self.update_count = 0
         self._revision = 0
+        self._known_count = 0
+        self._observed_cells: set[tuple[int, int]] = set()
+        self._occupied_cache: tuple[int, list[tuple[int, int]]] | None = None
+        self._inflated_cache: dict[tuple[int, float], set[tuple[int, int]]] = {}
         self._field_cache = {}
 
     def clear(self) -> None:
         self.log_odds[:] = [0] * len(self.log_odds)
         self.update_count = 0
         self._revision += 1
+        self._known_count = 0
+        self._observed_cells.clear()
+        self._occupied_cache = None
+        self._inflated_cache.clear()
         self._field_cache.clear()
 
     def _index(self, col: int, row: int) -> int:
@@ -152,12 +211,26 @@ class OccupancyGrid:
             return self.FREE
         return self.UNKNOWN
 
-    def _add(self, col: int, row: int, amount: float) -> None:
+    def _add(self, col: int, row: int, amount: float) -> bool:
         if not self.in_bounds(col, row):
-            return
+            return False
         index = self._index(col, row)
-        self.log_odds[index] = max(-20, min(20, self.log_odds[index] + amount))
+        before = self.log_odds[index]
+        before_known = before <= -2 or before >= 4
+        after = max(-20, min(20, before + amount))
+        if after == before:
+            if before != 0:
+                self._observed_cells.add((col, row))
+            return False
+        self.log_odds[index] = after
+        self._observed_cells.add((col, row))
+        after_known = after <= -2 or after >= 4
+        self._known_count += int(after_known) - int(before_known)
         self._revision += 1
+        self._occupied_cache = None
+        self._inflated_cache.clear()
+        self._field_cache.clear()
+        return True
 
     @staticmethod
     def _line_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
@@ -189,19 +262,24 @@ class OccupancyGrid:
         max_range_m: float,
         min_range_m: float = 0.08,
         scan_confidence: float = 1.0,
-    ) -> None:
+    ) -> MapUpdateSummary:
         if not math.isfinite(scan_confidence) or scan_confidence < self.MIN_SCAN_CONFIDENCE:
-            return
+            return MapUpdateSummary(known_cells=self._known_count, map_revision=self._revision)
         confidence = min(1.0, scan_confidence)
         start = self.world_to_cell(pose.x, pose.y)
         hits = {}
         frees = {}
+        out_of_bounds = 0
+        valid_points = 0
         for point in points:
             if (not math.isfinite(point.angle_rad) or not math.isfinite(point.quality)
                     or point.quality < self.MIN_QUALITY
                     or not min_range_m <= point.distance_m <= max_range_m):
                 continue
-            weight = min(1.0, point.quality) * confidence / (1 + 0.1 * (point.distance_m / max_range_m) ** 2)
+            valid_points += 1
+            weight = point.evidence_weight(self.resolution_m) * confidence / (1 + 0.1 * (point.distance_m / max_range_m) ** 2)
+            if weight <= 0:
+                continue
             endpoint = pose.local_to_world(point.x, point.y)
             end = self.world_to_cell(*endpoint)
             cells = self._line_cells(start, end)
@@ -209,22 +287,36 @@ class OccupancyGrid:
             for cell in cells[:-1] if has_hit else cells:
                 frees[cell] = max(frees.get(cell, 0.0), weight)
             if has_hit:
-                sigma = self.resolution_m * self.ENDPOINT_SIGMA_CELLS
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        cell = end[0] + dx, end[1] + dy
-                        cx, cy = self.cell_to_world(*cell)
-                        squared = (cx - endpoint[0]) ** 2 + (cy - endpoint[1]) ** 2
-                        spatial_weight = math.exp(-squared / (2 * sigma ** 2))
-                        hits[cell] = max(hits.get(cell, 0.0), weight * spatial_weight)
+                hits[end] = max(hits.get(end, 0.0), weight)
+            if not self.in_bounds(*end):
+                out_of_bounds += 1
         if not hits and not frees:
-            return
+            return MapUpdateSummary(out_of_bounds_points=out_of_bounds, known_cells=self._known_count,
+                                    map_revision=self._revision)
+        changed = set()
+        state_changed = set()
         for cell, weight in frees.items():
             if cell not in hits:
-                self._add(*cell, -self.FREE_LOG_ODDS * weight)
+                before = self.state(*cell)
+                if self._add(*cell, -self.FREE_LOG_ODDS * weight):
+                    changed.add(cell)
+                    if self.state(*cell) != before:
+                        state_changed.add(cell)
         for cell, weight in hits.items():
-            self._add(*cell, self.HIT_LOG_ODDS * weight)
-        self.update_count += 1
+            before = self.state(*cell)
+            if self._add(*cell, self.HIT_LOG_ODDS * weight):
+                changed.add(cell)
+                if self.state(*cell) != before:
+                    state_changed.add(cell)
+        if valid_points:
+            self.update_count += 1
+        return MapUpdateSummary(
+            changed_cells=tuple(sorted(changed)),
+            state_changed_cells=tuple(sorted(state_changed)),
+            out_of_bounds_points=out_of_bounds,
+            known_cells=self._known_count,
+            map_revision=self._revision,
+        )
 
     @staticmethod
     def _squared_distance_transform(values: Sequence[float]) -> list[float]:
@@ -282,19 +374,24 @@ class OccupancyGrid:
         return field
 
     def known_area_m2(self) -> float:
-        known = sum(1 for value in self.log_odds if value <= -2 or value >= 4)
-        return known * self.resolution_m * self.resolution_m
+        return len(self._observed_cells) * self.resolution_m * self.resolution_m
 
     def occupied_cells(self) -> list[tuple[int, int]]:
-        result = []
-        for row in range(self.height):
-            for col in range(self.width):
-                if self.state(col, row) == self.OCCUPIED:
-                    result.append((col, row))
-        return result
+        if self._occupied_cache is None or self._occupied_cache[0] != self._revision:
+            result = []
+            for row in range(self.height):
+                for col in range(self.width):
+                    if self.state(col, row) == self.OCCUPIED:
+                        result.append((col, row))
+            self._occupied_cache = (self._revision, result)
+        return list(self._occupied_cache[1])
 
     def inflated_obstacles(self, radius_m: float) -> set[tuple[int, int]]:
         radius = max(0, math.ceil(radius_m / self.resolution_m))
+        cache_key = (self._revision, float(radius_m))
+        cached = self._inflated_cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
         offsets = [
             (dx, dy)
             for dy in range(-radius, radius + 1)
@@ -307,6 +404,7 @@ class OccupancyGrid:
                 candidate = col + dx, row + dy
                 if self.in_bounds(*candidate):
                     blocked.add(candidate)
+        self._inflated_cache[cache_key] = set(blocked)
         return blocked
 
     def frontier_clusters(self, min_cells: int = 4) -> list[list[tuple[int, int]]]:
@@ -350,12 +448,16 @@ class OccupancyGrid:
         goal: tuple[int, int],
         clearance_m: float,
         blocked: set[tuple[int, int]] | None = None,
+        turn_penalty: float = 0.0,
+        initial_step: tuple[int, int] | None = None,
     ) -> list[tuple[int, int]]:
         if not self.in_bounds(*start) or not self.in_bounds(*goal):
             return []
         blocked = blocked if blocked is not None else self.inflated_obstacles(clearance_m)
         if goal in blocked:
             return []
+        if turn_penalty > 0:
+            return self._heading_aware_astar(start, goal, blocked, turn_penalty, initial_step)
         frontier: list[tuple[float, float, tuple[int, int]]] = [(0.0, 0.0, start)]
         came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
         cost_so_far = {start: 0.0}
@@ -377,6 +479,67 @@ class OccupancyGrid:
                 heuristic = math.hypot(goal[0] - neighbor[0], goal[1] - neighbor[1])
                 heapq.heappush(frontier, (new_cost + heuristic, new_cost, neighbor))
         return self.path_from_tree(came_from, goal)
+
+    def _heading_aware_astar(
+        self,
+        start: tuple[int, int],
+        goal: tuple[int, int],
+        blocked: set[tuple[int, int]],
+        turn_penalty: float,
+        initial_step: tuple[int, int] | None,
+    ) -> list[tuple[int, int]]:
+        initial_direction = next(
+            (index for index, (dx, dy, _) in enumerate(GRID_STEPS) if (dx, dy) == initial_step),
+            -1,
+        )
+        start_state = start[0], start[1], initial_direction
+        frontier = [(0.0, 0.0, start_state)]
+        came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {start_state: None}
+        cost_so_far = {start_state: 0.0}
+        goal_state: tuple[int, int, int] | None = None
+        while frontier:
+            _, current_cost, current = heapq.heappop(frontier)
+            if current_cost > cost_so_far.get(current, math.inf) + 1e-9:
+                continue
+            current_cell = current[0], current[1]
+            if current_cell == goal:
+                goal_state = current
+                break
+            for direction, (dx, dy, step_cost) in enumerate(GRID_STEPS):
+                neighbor = current[0] + dx, current[1] + dy
+                if not self._step_allowed(current_cell, neighbor, blocked, goal):
+                    continue
+                bend = self._direction_change(current[2], direction)
+                new_cost = current_cost + step_cost + turn_penalty * bend
+                neighbor_state = neighbor[0], neighbor[1], direction
+                if new_cost >= cost_so_far.get(neighbor_state, math.inf):
+                    continue
+                cost_so_far[neighbor_state] = new_cost
+                came_from[neighbor_state] = current
+                heuristic = math.hypot(goal[0] - neighbor[0], goal[1] - neighbor[1])
+                heapq.heappush(frontier, (new_cost + heuristic, new_cost, neighbor_state))
+        if goal_state is None:
+            return []
+        path = []
+        current_state: tuple[int, int, int] | None = goal_state
+        while current_state is not None:
+            path.append((current_state[0], current_state[1]))
+            current_state = came_from[current_state]
+        path.reverse()
+        return path
+
+    @staticmethod
+    def _direction_change(previous: int, current: int) -> float:
+        if previous < 0 or previous == current:
+            return 0.0
+        previous_dx, previous_dy, previous_length = GRID_STEPS[previous]
+        current_dx, current_dy, current_length = GRID_STEPS[current]
+        cosine = clamp(
+            (previous_dx * current_dx + previous_dy * current_dy) / (previous_length * current_length),
+            -1.0,
+            1.0,
+        )
+        return math.acos(cosine) / (math.pi / 4)
 
     def _step_allowed(
         self,
@@ -464,23 +627,25 @@ class CorrelativeScanMatcher:
         *,
         window_scale: float = 1.0,
         minimum_evidence: float = 4.0,
-    ) -> tuple[Pose2D, float]:
+    ) -> ScanMatchResult:
         if not math.isfinite(window_scale) or window_scale < 0:
             raise ValueError("搜索窗口倍率必须为非负有限数")
         valid = [p for p in points if math.isfinite(p.angle_rad) and math.isfinite(p.distance_m)
                  and math.isfinite(p.quality) and p.quality >= grid.MIN_QUALITY and p.distance_m > 0]
         if len(valid) < self.MIN_HIT_POINTS or sum(v >= minimum_evidence for v in grid.log_odds) < self.MIN_HIT_POINTS:
-            return Pose2D(predicted.x, predicted.y, predicted.yaw), 0.0
+            return ScanMatchResult(Pose2D(predicted.x, predicted.y, predicted.yaw), 0.0,
+                                   rejection_reason="有效观测或地图证据不足")
         ordered = sorted(valid, key=lambda p: p.angle_rad % math.tau)
         if len(ordered) > 64:
             ordered = [ordered[index * len(ordered) // 64] for index in range(64)]
-        sampled = [(p.x, p.y, min(1.0, p.quality)) for p in ordered]
+        sampled = [(p.x, p.y, p.evidence_weight(grid.resolution_m)) for p in ordered]
         translation = min(self.MAX_TRANSLATION_WINDOW_M, self.translation_window_m * window_scale)
         rotation = min(self.MAX_ROTATION_WINDOW_RAD, self.rotation_window_rad * window_scale)
         levels = ((translation, rotation, 0.05, math.radians(2.5), 0.12),
                   (0.05, math.radians(2.5), 0.02, math.radians(1), 0.08),
                   (0.015, math.radians(0.8), 0.005, math.radians(0.2), self.LIKELIHOOD_SIGMA_M))
         centers = [Pose2D(predicted.x, predicted.y, predicted.yaw)]
+        last_candidates = []
         for level, (xy_window, yaw_window, xy_step, yaw_step, sigma) in enumerate(levels):
             field = grid.likelihood_field(sigma, minimum_evidence)
             candidates = []
@@ -504,12 +669,13 @@ class CorrelativeScanMatcher:
                                        + 0.05 * abs(wrap_angle(yaw - predicted.yaw)) / max(rotation, 1e-9))
                             candidates.append((score - penalty, x, y, yaw))
             candidates.sort(reverse=True)
+            last_candidates = candidates
             centers = []
             for _, x, y, yaw in candidates:
                 if not centers or all(math.hypot(x - p.x, y - p.y) >= 0.04
                                       or abs(wrap_angle(yaw - p.yaw)) >= math.radians(2) for p in centers):
                     centers.append(Pose2D(x, y, yaw))
-                    if len(centers) >= (3 if level == 0 else 1):
+                    if len(centers) >= (5 if level < 2 else 3):
                         break
         best = centers[0]
         field = grid.likelihood_field(self.LIKELIHOOD_SIGMA_M, minimum_evidence)
@@ -517,10 +683,14 @@ class CorrelativeScanMatcher:
             sine, cosine = math.sin(pose.yaw), math.cos(pose.yaw)
             endpoints = [(x * cosine + y * sine, -x * sine + y * cosine, weight) for x, y, weight in sampled]
             return self._field_score(grid, field, pose.x, pose.y, endpoints)
-        if pose_score(best) - pose_score(predicted) < self.MIN_SCORE_GAIN:
+        best_raw_score = pose_score(best)
+        predicted_score = pose_score(predicted)
+        if best_raw_score - predicted_score < self.MIN_SCORE_GAIN:
             best = Pose2D(predicted.x, predicted.y, predicted.yaw)
+            best_raw_score = predicted_score
         sine, cosine = math.sin(best.yaw), math.cos(best.yaw)
-        endpoints = [(p.x * cosine + p.y * sine, -p.x * sine + p.y * cosine, min(1.0, p.quality)) for p in valid]
+        endpoints = [(p.x * cosine + p.y * sine, -p.x * sine + p.y * cosine,
+                     p.evidence_weight(grid.resolution_m)) for p in valid]
         weighted_score = observed_weight = total_weight = inlier_weight = 0.0
         inliers = 0
         sectors = set()
@@ -540,7 +710,41 @@ class CorrelativeScanMatcher:
                          inlier_weight / max(0.5 * total_weight, 1e-9), 1.0)
         if inliers < self.MIN_HIT_POINTS or len(sectors) < 3:
             confidence = 0.0
-        return best, confidence
+        candidate_scores = []
+        for candidate in centers:
+            score = pose_score(candidate)
+            separation = math.hypot(candidate.x - best.x, candidate.y - best.y)
+            yaw_separation = abs(wrap_angle(candidate.yaw - best.yaw))
+            if separation >= 2 * grid.resolution_m or yaw_separation >= math.radians(2):
+                candidate_scores.append(score)
+        second_score = max(candidate_scores) if candidate_scores else None
+        boundary = (
+            abs(best.x - predicted.x) >= max(translation - grid.resolution_m * 0.5, 0.0)
+            or abs(best.y - predicted.y) >= max(translation - grid.resolution_m * 0.5, 0.0)
+            or abs(wrap_angle(best.yaw - predicted.yaw)) >= max(rotation - math.radians(0.3), 0.0)
+        )
+        separated_ambiguity = confidence >= 0.75 and second_score is not None and abs(best_raw_score - second_score) < 0.025
+        local_probe_scores = [
+            pose_score(Pose2D(best.x + dx * grid.resolution_m, best.y + dy * grid.resolution_m,
+                              wrap_angle(best.yaw + yaw)))
+            for dx, dy, yaw in ((-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0),
+                                (0, 0, -math.radians(1)), (0, 0, math.radians(1)))
+        ]
+        flat_platform = confidence >= 0.75 and max(local_probe_scores) - min(local_probe_scores) < 0.008
+        return ScanMatchResult(
+            corrected_sensor_pose=best,
+            data_score=confidence,
+            prior_penalty=max(0.0, best_raw_score - confidence),
+            predicted_position_score=predicted_score,
+            best_candidate_score=best_raw_score,
+            second_candidate_score=second_score,
+            inlier_count=inliers,
+            valid_direction_count=len(sectors),
+            known_overlap=observed_weight / max(total_weight, 1e-9),
+            touched_search_boundary=boundary,
+            degenerate=separated_ambiguity or flat_platform,
+            rejection_reason="几何支持不足或存在近似等分候选" if separated_ambiguity or flat_platform else "",
+        )
 
     @staticmethod
     def _steps(window: float, step: float) -> list[float]:
@@ -573,7 +777,17 @@ class NavigationEngine:
     MAP_UPDATE_MIN_CONFIDENCE = 0.55
     LOST_AFTER_FAILURES = 3
     BOOTSTRAP_SCANS = 3
-    MAX_MOTION_SEGMENT_M = 0.16
+    MAX_MOTION_SEGMENT_M = 0.24
+    DIAGONAL_MOTION_SPEED_MPS = 0.11
+    MAX_DIAGONAL_SEGMENT_M = 0.10
+    DIAGONAL_PROBE_SEGMENT_M = 0.08
+    DIAGONAL_RECOVERY_SEGMENT_M = 0.02
+    DIAGONAL_DIRECTION_RATIO = 0.72
+    DIAGONAL_POSE_UNCERTAINTY_M = 0.04
+    PATH_TURN_PENALTY = 0.75
+    PARKING_SEARCH_STEP_M = 0.10
+    PARKING_SEARCH_SPEED_MPS = 0.10
+    PARKING_SEARCH_MAX_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -583,13 +797,17 @@ class NavigationEngine:
         sensor_offset_x_m: float = 0.0,
         sensor_offset_y_m: float = 0.0,
         sensor_offset_yaw_rad: float = 0.0,
+        min_range_m: float = 0.08,
+        path_turn_penalty: float = PATH_TURN_PENALTY,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
+        self.min_range_m = min_range_m
         self.robot_radius_m = robot_radius_m
         self.sensor_offset_x_m = sensor_offset_x_m
         self.sensor_offset_y_m = sensor_offset_y_m
         self.sensor_offset_yaw_rad = sensor_offset_yaw_rad
+        self.path_turn_penalty = max(0.0, float(path_turn_penalty))
         self.pose = Pose2D()
         self.start_pose = Pose2D()
         self.matcher = CorrelativeScanMatcher()
@@ -604,16 +822,26 @@ class NavigationEngine:
         self.completed_scans = 0
         self.local_map_updates = 0
         self.match_score = 0.0
+        self.last_match_result: ScanMatchResult | None = None
         self.match_failures = 0
         self.rejected_scans = 0
+        self.rejection_reason_counts: dict[str, int] = {}
         self.mapping_attempts = 0
         self._predicted_travel_m = 0.0
         self._predicted_strafe_m = 0.0
+        self._predicted_motion_uncertainty_m = 0.0
+        self._diagonal_motion_since_last_scan = False
+        self._last_scan_had_diagonal_motion = False
+        self._motion_since_last_scan = False
+        self._last_scan_had_motion = False
+        self._translation_since_last_scan = False
+        self._last_scan_had_translation = False
         self._map_initialized = self.grid.update_count >= self.BOOTSTRAP_SCANS and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS
         self._empty_frontier_scans = 0
         self._terminal_evidence_scans = 0
         self._terminal_signature: tuple[float, ...] | None = None
         self._no_route_turns = 0
+        self._parking_search_attempts = 0
         self._parking_goal: tuple[int, int] | None = None
         self.last_progress_angle_world = 0.0
         self.trajectory: list[tuple[float, float]] = [(0.0, 0.0)]
@@ -632,16 +860,26 @@ class NavigationEngine:
         self.completed_scans = 0
         self.local_map_updates = 0
         self.match_score = 0.0
+        self.last_match_result = None
         self.match_failures = 0
         self.rejected_scans = 0
+        self.rejection_reason_counts = {}
         self.mapping_attempts = 0
         self._predicted_travel_m = 0.0
         self._predicted_strafe_m = 0.0
+        self._predicted_motion_uncertainty_m = 0.0
+        self._diagonal_motion_since_last_scan = False
+        self._last_scan_had_diagonal_motion = False
+        self._motion_since_last_scan = False
+        self._last_scan_had_motion = False
+        self._translation_since_last_scan = False
+        self._last_scan_had_translation = False
         self._map_initialized = False
         self._empty_frontier_scans = 0
         self._terminal_evidence_scans = 0
         self._terminal_signature = None
         self._no_route_turns = 0
+        self._parking_search_attempts = 0
         self._parking_goal = None
         self.last_progress_angle_world = 0.0
         self.trajectory = [(0.0, 0.0)]
@@ -660,8 +898,14 @@ class NavigationEngine:
     def predict_motion(self, command: VelocityCommand) -> None:
         if command.stopped or command.duration_s <= 0:
             return
+        self._motion_since_last_scan = True
         local_x = command.right_mps * command.duration_s
         local_y = command.forward_mps * command.duration_s
+        diagonal = abs(local_x) > 1e-6 and abs(local_y) > 1e-6
+        self._diagonal_motion_since_last_scan = self._diagonal_motion_since_last_scan or diagonal
+        if diagonal:
+            self._predicted_motion_uncertainty_m += self.DIAGONAL_POSE_UNCERTAINTY_M
+        self._translation_since_last_scan = self._translation_since_last_scan or math.hypot(local_x, local_y) > 1e-6
         self._predicted_travel_m += math.hypot(local_x, local_y)
         self._predicted_strafe_m += abs(local_x)
         world_x, world_y = self.pose.local_to_world(local_x, local_y)
@@ -671,7 +915,41 @@ class NavigationEngine:
         if math.hypot(self.pose.x - self.trajectory[-1][0], self.pose.y - self.trajectory[-1][1]) >= 0.04:
             self.trajectory.append((self.pose.x, self.pose.y))
 
+    def apply_execution_delta(
+        self,
+        local_x_m: float,
+        local_y_m: float,
+        yaw_rad: float = 0.0,
+        uncertainty_m: float = 0.0,
+    ) -> None:
+        """Apply one calibrated hardware execution result as a scan-match prior."""
+        values = (local_x_m, local_y_m, yaw_rad, uncertainty_m)
+        if not all(math.isfinite(float(value)) for value in values) or uncertainty_m < 0:
+            raise ValueError("执行位姿先验必须是有限数值")
+        translation = math.hypot(local_x_m, local_y_m)
+        if translation <= 1e-9 and abs(yaw_rad) <= 1e-9:
+            return
+        self._motion_since_last_scan = True
+        diagonal = abs(local_x_m) > 1e-6 and abs(local_y_m) > 1e-6
+        self._diagonal_motion_since_last_scan = self._diagonal_motion_since_last_scan or diagonal
+        self._translation_since_last_scan = self._translation_since_last_scan or translation > 1e-6
+        self._predicted_travel_m += translation
+        self._predicted_strafe_m += abs(local_x_m)
+        self._predicted_motion_uncertainty_m += max(0.0, uncertainty_m)
+        world_x, world_y = self.pose.local_to_world(local_x_m, local_y_m)
+        self.pose.x = world_x
+        self.pose.y = world_y
+        self.pose.yaw = wrap_angle(self.pose.yaw + yaw_rad)
+        if math.hypot(self.pose.x - self.trajectory[-1][0], self.pose.y - self.trajectory[-1][1]) >= 0.04:
+            self.trajectory.append((self.pose.x, self.pose.y))
+
     def process_scan(self, points: Sequence[ScanPoint]) -> VelocityCommand:
+        self._last_scan_had_motion = self._motion_since_last_scan
+        self._motion_since_last_scan = False
+        self._last_scan_had_diagonal_motion = self._diagonal_motion_since_last_scan
+        self._diagonal_motion_since_last_scan = False
+        self._last_scan_had_translation = self._translation_since_last_scan
+        self._translation_since_last_scan = False
         if self.auto_enabled:
             self.mapping_attempts += 1
         valid = [
@@ -679,7 +957,7 @@ class NavigationEngine:
             for point in points
             if math.isfinite(point.distance_m) and math.isfinite(point.angle_rad)
             and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
-            and 0.08 <= point.distance_m <= self.max_range_m
+            and self.min_range_m <= point.distance_m <= self.max_range_m
         ]
         unique = {}
         for point in valid:
@@ -708,20 +986,47 @@ class NavigationEngine:
             return self._reject_scan(0.0, "有效障碍回波不足，等待重扫")
         initializing = not self._map_initialized
         if self.grid.update_count == 0:
-            corrected, score = Pose2D(self.pose.x, self.pose.y, self.pose.yaw), 1.0
+            corrected_sensor = self._sensor_pose()
+            match_result = ScanMatchResult(corrected_sensor, 1.0, inlier_count=len(matching_points),
+                                           valid_direction_count=len(sectors), known_overlap=1.0)
+            corrected, score = self._body_pose_from_sensor(corrected_sensor), 1.0
         else:
+            predicted_sensor = self._sensor_pose()
             scale = min(1.5, 0.6 + self._predicted_travel_m * 2 + self._predicted_strafe_m * 3
+                        + self._predicted_motion_uncertainty_m * 6
                         + max(0.0, 0.85 - self.match_score) + self.match_failures * 0.15)
-            corrected, score = self.matcher.match(
-                self.grid, self.pose, matching_points, window_scale=0.0 if initializing else scale,
+            match_result = self.matcher.match(
+                self.grid, predicted_sensor, matching_points, window_scale=0.0 if initializing else scale,
                 minimum_evidence=0.25 if initializing else 4.0)
+            if isinstance(match_result, ScanMatchResult):
+                corrected_sensor, score = match_result.corrected_sensor_pose, match_result.data_score
+            else:
+                corrected_sensor, score = match_result
+                match_result = ScanMatchResult(corrected_sensor, score)
+            self.last_match_result = match_result
             if not math.isfinite(score) or score < self.MAP_UPDATE_MIN_CONFIDENCE:
                 return self._reject_scan(score, "本圈未写入地图，停车重扫")
+            correction_distance = math.hypot(
+                corrected_sensor.x - predicted_sensor.x,
+                corrected_sensor.y - predicted_sensor.y,
+            )
+            correction_yaw = abs(wrap_angle(corrected_sensor.yaw - predicted_sensor.yaw))
+            prior_aligned = (
+                correction_distance <= max(2.0 * self.grid.resolution_m, 0.05) + self._predicted_motion_uncertainty_m
+                and correction_yaw <= math.radians(3.0)
+            )
+            if not initializing and match_result.degenerate and not prior_aligned:
+                return self._reject_scan(score, match_result.rejection_reason or "本圈几何定位不充分，停车重扫")
+            corrected = self._body_pose_from_sensor(corrected_sensor)
+        self.last_match_result = match_result
         self.pose = corrected
         self.match_score = score
         self.match_failures = 0
         self._predicted_travel_m = self._predicted_strafe_m = 0.0
-        self.grid.update_scan(self.pose, valid, self.max_range_m, scan_confidence=score)
+        self._predicted_motion_uncertainty_m = 0.0
+        summary = self.grid.update_scan(self._sensor_pose(), valid, self.max_range_m, scan_confidence=score)
+        if summary.out_of_bounds_points:
+            self.detail = f"本圈有 {summary.out_of_bounds_points} 个回波超出地图范围"
         if initializing:
             self._map_initialized = (self.grid.update_count >= self.BOOTSTRAP_SCANS
                                      and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS)
@@ -757,22 +1062,41 @@ class NavigationEngine:
             return VelocityCommand()
         before = self.grid.update_count
         sensor_pose = self._sensor_pose()
-        self.grid.update_scan(sensor_pose, valid, self.max_range_m, min_range_m=min_range_m,
-                              scan_confidence=scan_confidence)
+        summary = self.grid.update_scan(sensor_pose, valid, self.max_range_m, min_range_m=min_range_m,
+                                       scan_confidence=scan_confidence)
         if self.grid.update_count > before:
             self.local_map_updates += 1
             self.state = "本圈局部回波"
-            self.detail = f"已写入 {len(valid)} 个固定姿态回波"
+            detail = f"已写入 {len(valid)} 个固定姿态回波"
+            if summary.out_of_bounds_points:
+                detail += f"，{summary.out_of_bounds_points} 个点超出地图"
+            self.detail = detail
         return VelocityCommand()
 
     def _sensor_pose(self) -> Pose2D:
         x, y = self.pose.local_to_world(self.sensor_offset_x_m, self.sensor_offset_y_m)
         return Pose2D(x, y, wrap_angle(self.pose.yaw + self.sensor_offset_yaw_rad))
 
+    def _body_pose_from_sensor(self, sensor_pose: Pose2D) -> Pose2D:
+        body_yaw = wrap_angle(sensor_pose.yaw - self.sensor_offset_yaw_rad)
+        cosine = math.cos(body_yaw)
+        sine = math.sin(body_yaw)
+        offset_x = self.sensor_offset_x_m * cosine + self.sensor_offset_y_m * sine
+        offset_y = -self.sensor_offset_x_m * sine + self.sensor_offset_y_m * cosine
+        return Pose2D(sensor_pose.x - offset_x, sensor_pose.y - offset_y, body_yaw)
+
+    def _sensor_to_body(self, local_x: float, local_y: float) -> tuple[float, float]:
+        yaw = self.sensor_offset_yaw_rad
+        cosine = math.cos(yaw)
+        sine = math.sin(yaw)
+        body_x = local_x * cosine + local_y * sine
+        body_y = -local_x * sine + local_y * cosine
+        return body_x + self.sensor_offset_x_m, body_y + self.sensor_offset_y_m
     def _reject_scan(self, score: float, detail: str) -> VelocityCommand:
         self.match_score = score if math.isfinite(score) else 0.0
         self.match_failures += 1
         self.rejected_scans += 1
+        self.rejection_reason_counts[detail] = self.rejection_reason_counts.get(detail, 0) + 1
         self.state = "定位丢失" if self.match_failures >= self.LOST_AFTER_FAILURES else "定位不可信"
         self.detail = detail
         self.path_cells.clear()
@@ -812,8 +1136,20 @@ class NavigationEngine:
                 self._terminal_evidence_scans = 0
                 self._terminal_signature = None
                 self._no_route_turns = 0
+                self._parking_search_attempts = 0
                 self._parking_goal = None
-                _, self.path_cells, self.target_cell = best
+                _, path, self.target_cell = best
+                straight_path = self.grid.astar(
+                    start,
+                    self.target_cell,
+                    clearance,
+                    blocked=blocked,
+                    turn_penalty=self.path_turn_penalty,
+                    initial_step=self._preferred_grid_step(),
+                )
+                if straight_path and self._is_forward_path(straight_path, route_distances, current_progress):
+                    path = straight_path
+                self.path_cells = self._compress_straight_runs(path)
                 self.state = "探索中"
                 self.detail = f"沿单向通道前进，可达前沿 {self.reachable_frontier_count} 个"
                 return self._command_along_path()
@@ -824,11 +1160,25 @@ class NavigationEngine:
             self._terminal_evidence_scans = 0
             self._terminal_signature = None
             self._no_route_turns = 0
+            self._parking_search_attempts = 0
             self.path_cells.clear()
             self.target_cell = None
             self.state = "通过转弯"
             self.detail = "地图前沿暂时遮挡，沿雷达开口继续探索"
             return probe
+
+        if self._parking_search_attempts < self.PARKING_SEARCH_MAX_ATTEMPTS:
+            search = self._parking_search_command()
+            if not search.stopped:
+                self._parking_search_attempts += 1
+                self._empty_frontier_scans = 0
+                self._terminal_evidence_scans = 0
+                self._terminal_signature = None
+                self.path_cells.clear()
+                self.target_cell = None
+                self.state = "终点确认"
+                self.detail = "向停车位内侧微移后复测"
+                return search
 
         self._empty_frontier_scans += 1
         if self._terminal_geometry_confirmed():
@@ -837,13 +1187,8 @@ class NavigationEngine:
             self._terminal_evidence_scans = 0
             self._terminal_signature = None
         if self._empty_frontier_scans < 3 or self._terminal_evidence_scans < 3:
-            if self._empty_frontier_scans % 2 == 0:
-                self._no_route_turns += 1
-                self.state = "搜索可达通道"
-                self.detail = "当前无可达前沿，原地改变观测方向后复测"
-                return VelocityCommand(yaw_rps=0.8, duration_s=1.2)
             self.state = "终点确认"
-            self.detail = "等待端墙、两侧封闭和来路开口连续复测"
+            self.detail = "全向雷达固定姿态连续复测"
             return VelocityCommand()
 
         self._parking_goal = start
@@ -853,7 +1198,46 @@ class NavigationEngine:
         self.detail = "已确认到达单向通道另一端"
         return VelocityCommand()
 
+    def _parking_search_command(self) -> VelocityCommand:
+        if self.match_score < 0.55 or len(self.latest_scan) < 12:
+            return VelocityCommand()
+        sectors = []
+        for center in (0.0, math.pi / 2, -math.pi / 2, math.pi):
+            distances = [
+                point.distance_m
+                for point in self.latest_scan
+                if abs(wrap_angle(point.angle_rad - center)) <= math.radians(35)
+            ]
+            if len(distances) < 2:
+                return VelocityCommand()
+            sectors.append(min(distances))
+        front, right, left, _ = sectors
+        candidates = sorted(
+            (distance, angle)
+            for distance, angle in (
+                (front, 0.0),
+                (right, math.pi / 2),
+                (left, -math.pi / 2),
+            )
+            if distance >= 0.30
+        )
+        if not candidates:
+            return VelocityCommand()
+        distance, angle = candidates[0]
+        travel = min(self.PARKING_SEARCH_STEP_M, max(0.0, distance - 0.28))
+        if travel < 0.02:
+            return VelocityCommand()
+        speed = self.PARKING_SEARCH_SPEED_MPS
+        command = VelocityCommand(
+            forward_mps=speed * math.cos(angle),
+            right_mps=speed * math.sin(angle),
+            duration_s=travel / speed,
+        )
+        return self._collision_guard(command)
+
     def _terminal_geometry_confirmed(self) -> bool:
+        if self._terminal_evidence_scans == 0 and not self._last_scan_had_translation:
+            return False
         if self.match_score < 0.55 or len(self.latest_scan) < 12:
             return False
         sectors = []
@@ -867,9 +1251,9 @@ class NavigationEngine:
                 return False
             sectors.append(min(distances))
         front, right, left, rear = sectors
-        closed_limit = max(0.75, self.robot_radius_m + 0.45)
-        if not (front <= closed_limit and right <= closed_limit and left <= closed_limit
-                and rear >= closed_limit + 0.15):
+        close_side_count = sum(distance < 0.30 for distance in (front, right, left))
+        open_limit = max(0.75, self.robot_radius_m + 0.45)
+        if close_side_count < 2 or rear < open_limit + 0.15:
             return False
         signature = tuple(sectors)
         if self._terminal_signature is not None and max(
@@ -929,17 +1313,36 @@ class NavigationEngine:
         for _, clearance, angle in sorted(candidates, reverse=True):
             if clearance < max(0.55, self.robot_radius_m * 3.2):
                 continue
-            command = VelocityCommand(
-                forward_mps=speed * math.cos(angle),
-                right_mps=speed * math.sin(angle),
-                duration_s=0.42,
-            )
-            if not self._command_has_clearance(command):
-                continue
-            chosen_world = wrap_angle(self.pose.yaw + angle)
-            if abs(wrap_angle(chosen_world - self.last_progress_angle_world)) >= math.radians(60):
-                self.last_progress_angle_world = chosen_world
-            return command
+            forward_hint = speed * math.cos(angle)
+            right_hint = speed * math.sin(angle)
+            commands: list[VelocityCommand] = []
+            if self._is_diagonal_heading(forward_hint, right_hint):
+                diagonal = self._safe_diagonal_command(
+                    forward_hint,
+                    right_hint,
+                    max_distance_m=self.DIAGONAL_PROBE_SEGMENT_M,
+                )
+                if diagonal is not None:
+                    commands.append(diagonal)
+            forward, right = self._cardinal_translation(forward_hint, right_hint, speed)
+            commands.append(VelocityCommand(forward, right, 0.0, 0.42))
+            if not self._is_diagonal_heading(forward_hint, right_hint):
+                diagonal = self._safe_diagonal_command(
+                    forward_hint,
+                    right_hint,
+                    max_distance_m=self.DIAGONAL_PROBE_SEGMENT_M,
+                )
+                if diagonal is not None:
+                    commands.append(diagonal)
+            for command in commands:
+                if not self._command_has_clearance(command):
+                    continue
+                chosen_world = wrap_angle(
+                    self.pose.yaw + math.atan2(command.right_mps, command.forward_mps)
+                )
+                if abs(wrap_angle(chosen_world - self.last_progress_angle_world)) >= math.radians(60):
+                    self.last_progress_angle_world = chosen_world
+                return command
         return VelocityCommand()
 
     @staticmethod
@@ -1019,31 +1422,168 @@ class NavigationEngine:
     def _command_along_path(self) -> VelocityCommand:
         if len(self.path_cells) < 2:
             return VelocityCommand()
-        lookahead_index = min(len(self.path_cells) - 1, 4)
+        lookahead_index = self._straight_run_end(self.path_cells)
         world_x, world_y = self.grid.cell_to_world(*self.path_cells[lookahead_index])
         local_x, local_y = self.pose.world_to_local(world_x, world_y)
         distance = math.hypot(local_x, local_y)
         if distance < 1e-6:
             return VelocityCommand()
         speed = 0.14
-        forward = speed * local_y / distance
-        right = speed * local_x / distance
-        command = VelocityCommand(forward, right, 0.0, 0.38)
+        forward_hint = speed * local_y / distance
+        right_hint = speed * local_x / distance
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
+        if self._is_diagonal_heading(forward_hint, right_hint):
+            diagonal = self._safe_diagonal_command(
+                forward_hint,
+                right_hint,
+                blocked=blocked,
+                max_distance_m=distance,
+            )
+            if diagonal is not None:
+                path_direction = wrap_angle(
+                    self.pose.yaw + math.atan2(diagonal.right_mps, diagonal.forward_mps)
+                )
+                if abs(wrap_angle(path_direction - self.last_progress_angle_world)) >= math.radians(60):
+                    self.last_progress_angle_world = path_direction
+                return diagonal
+        axis_distance = max(abs(local_y), abs(local_x))
+        forward, right = self._cardinal_translation(forward_hint, right_hint, speed)
+        short_travel = min(axis_distance, speed * 0.38)
+        command = VelocityCommand(forward, right, 0.0, short_travel / speed)
         if self.match_score >= 0.75:
-            blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
-            travel = min(distance, self.MAX_MOTION_SEGMENT_M)
-            while travel > speed * 0.38 + 0.01:
+            travel = min(axis_distance, self.MAX_MOTION_SEGMENT_M)
+            while travel > short_travel + 0.01:
                 candidate = VelocityCommand(forward, right, 0.0, travel / speed)
                 if self._grid_segment_is_clear(candidate, blocked) and self._command_has_clearance(candidate):
                     command = candidate
                     break
                 travel *= 0.7
         guarded = self._collision_guard(command)
+        if guarded.stopped:
+            diagonal = self._safe_diagonal_command(forward_hint, right_hint, blocked=blocked)
+            if diagonal is None:
+                diagonal = self._safe_diagonal_command(
+                    forward_hint,
+                    right_hint,
+                    max_distance_m=self.DIAGONAL_RECOVERY_SEGMENT_M,
+                )
+            if diagonal is not None:
+                self.state = "探索中"
+                self.detail = "保守45°平移，下一圈重新定位"
+                guarded = diagonal
         if not guarded.stopped:
-            path_direction = wrap_angle(self.pose.yaw + math.atan2(local_x, local_y))
+            path_direction = wrap_angle(self.pose.yaw + math.atan2(guarded.right_mps, guarded.forward_mps))
             if abs(wrap_angle(path_direction - self.last_progress_angle_world)) >= math.radians(60):
                 self.last_progress_angle_world = path_direction
         return guarded
+
+    @staticmethod
+    def _compress_straight_runs(path: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+        if len(path) < 3:
+            return list(path)
+        result = [path[0]]
+        previous_direction = (
+            path[1][0] - path[0][0],
+            path[1][1] - path[0][1],
+        )
+        for index in range(1, len(path) - 1):
+            direction = (
+                path[index + 1][0] - path[index][0],
+                path[index + 1][1] - path[index][1],
+            )
+            if direction != previous_direction:
+                result.append(path[index])
+                previous_direction = direction
+        result.append(path[-1])
+        return result
+
+    @staticmethod
+    def _straight_run_end(path: Sequence[tuple[int, int]]) -> int:
+        if len(path) < 2:
+            return 0
+        first_dx = path[1][0] - path[0][0]
+        first_dy = path[1][1] - path[0][1]
+        first_direction = (
+            0 if first_dx == 0 else int(math.copysign(1, first_dx)),
+            0 if first_dy == 0 else int(math.copysign(1, first_dy)),
+        )
+        for index in range(2, len(path)):
+            dx = path[index][0] - path[index - 1][0]
+            dy = path[index][1] - path[index - 1][1]
+            direction = (
+                0 if dx == 0 else int(math.copysign(1, dx)),
+                0 if dy == 0 else int(math.copysign(1, dy)),
+            )
+            if direction != first_direction:
+                return index - 1
+        return len(path) - 1
+
+    def _preferred_grid_step(self) -> tuple[int, int]:
+        direction_x = math.sin(self.last_progress_angle_world)
+        direction_y = -math.cos(self.last_progress_angle_world)
+        dx, dy, _ = max(
+            GRID_STEPS,
+            key=lambda step: (step[0] * direction_x + step[1] * direction_y) / step[2],
+        )
+        return dx, dy
+
+    @staticmethod
+    def _cardinal_translation(forward_mps: float, right_mps: float, speed_mps: float) -> tuple[float, float]:
+        if abs(forward_mps) < 1e-9 and abs(right_mps) < 1e-9:
+            return 0.0, 0.0
+        if abs(forward_mps) >= abs(right_mps):
+            return math.copysign(speed_mps, forward_mps), 0.0
+        return 0.0, math.copysign(speed_mps, right_mps)
+
+    @classmethod
+    def _is_diagonal_heading(cls, forward_mps: float, right_mps: float) -> bool:
+        dominant = max(abs(forward_mps), abs(right_mps))
+        minor = min(abs(forward_mps), abs(right_mps))
+        return dominant > 1e-9 and minor / dominant >= cls.DIAGONAL_DIRECTION_RATIO
+
+    def _diagonal_command_candidates(
+        self,
+        forward_hint: float,
+        right_hint: float,
+        max_distance_m: float | None = None,
+    ) -> tuple[VelocityCommand, ...]:
+        if abs(forward_hint) < 1e-9 and abs(right_hint) < 1e-9:
+            return ()
+        ranked: list[tuple[float, int, int]] = []
+        for forward_sign in (-1, 1):
+            for right_sign in (-1, 1):
+                alignment = forward_sign * forward_hint + right_sign * right_hint
+                if alignment > 0:
+                    ranked.append((alignment, forward_sign, right_sign))
+        ranked.sort(reverse=True)
+        speed = self.DIAGONAL_MOTION_SPEED_MPS
+        distance = self.MAX_DIAGONAL_SEGMENT_M if max_distance_m is None else min(
+            self.MAX_DIAGONAL_SEGMENT_M,
+            max_distance_m,
+        )
+        duration = distance / speed
+        component = speed / math.sqrt(2.0)
+        return tuple(
+            VelocityCommand(component * forward_sign, component * right_sign, 0.0, duration)
+            for _, forward_sign, right_sign in ranked
+        )
+
+    def _safe_diagonal_command(
+        self,
+        forward_hint: float,
+        right_hint: float,
+        *,
+        blocked: set[tuple[int, int]] | None = None,
+        max_distance_m: float | None = None,
+    ) -> VelocityCommand | None:
+        if blocked is None and len(self.latest_scan) < 12:
+            return None
+        for command in self._diagonal_command_candidates(forward_hint, right_hint, max_distance_m):
+            if blocked is not None and not self._grid_segment_is_clear(command, blocked):
+                continue
+            if self._command_has_clearance(command):
+                return command
+        return None
 
     def _command_has_clearance(self, command: VelocityCommand) -> bool:
         if command.stopped:
@@ -1055,9 +1595,10 @@ class NavigationEngine:
         travel_distance = speed * command.duration_s
         footprint_radius = self.robot_radius_m + 0.035
         for point in self.latest_scan:
-            difference = wrap_angle(point.angle_rad - travel_angle)
-            along = point.distance_m * math.cos(difference)
-            lateral = abs(point.distance_m * math.sin(difference))
+            sensor_x, sensor_y = point.x, point.y
+            body_x, body_y = self._sensor_to_body(sensor_x, sensor_y)
+            along = body_y * math.cos(travel_angle) + body_x * math.sin(travel_angle)
+            lateral = abs(body_x * math.cos(travel_angle) - body_y * math.sin(travel_angle))
             if 0.0 < along < travel_distance + footprint_radius + 0.035 and lateral < footprint_radius:
                 return False
         return True
@@ -1288,10 +1829,15 @@ class HiddenWorld:
         for index in range(sample_count):
             angle = math.tau * index / sample_count
             true_distance = self.ray_distance(angle, max_range_m)
-            distance = true_distance + self.distance_bias_m + self.random.gauss(0.0, point_noise_m)
-            if self.random.random() < 0.012:
-                distance += self.random.uniform(-0.12, 0.12)
-            points.append(ScanPoint(angle, clamp(distance, 0.08, max_range_m), 1.0))
+            is_echo = true_distance < max_range_m - 1e-9
+            if is_echo:
+                distance = true_distance + self.distance_bias_m + self.random.gauss(0.0, point_noise_m)
+                if self.random.random() < 0.012:
+                    distance += self.random.uniform(-0.12, 0.12)
+                distance = clamp(distance, 0.08, max_range_m)
+            else:
+                distance = max_range_m
+            points.append(ScanPoint(angle, distance, 1.0, is_echo))
         return points
 
     def apply(self, command: VelocityCommand) -> VelocityCommand:

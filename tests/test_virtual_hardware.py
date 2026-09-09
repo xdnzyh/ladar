@@ -3,6 +3,8 @@ import unittest
 from dataclasses import replace
 
 from navigation_core import HiddenWorld, VelocityCommand
+from runtime_config import build_navigation_engine, resolve_runtime_config
+from scan_acquisition import scan_points_from_polar
 from virtual_hardware import (
     PRESETS, HardwareObservation, ReceivedObservation, DistanceObservationReceiver,
     HardwareSimulation, VirtualChassis, VirtualCommunicationLink,
@@ -10,6 +12,35 @@ from virtual_hardware import (
 
 
 class HardwareSimulationTests(unittest.TestCase):
+    def test_safety_observations_are_only_emitted_while_moving(self):
+        simulation = HardwareSimulation(HiddenWorld(), {"simulation_profile": "IDEAL"})
+        simulation.advance(1.0)
+        self.assertEqual(simulation.last_safety_observations, [])
+        simulation.execute(VelocityCommand(forward_mps=0.1, duration_s=0.4))
+        simulation.advance(0.1)
+        self.assertTrue(simulation.last_safety_observations)
+
+    def test_navigation_recovers_from_ambiguous_corridor_match(self):
+        config = resolve_runtime_config(
+            "simulation",
+            "navigation",
+            {"simulation_profile": "IDEAL", "simulation_seed": 20260907},
+            prefer_mode_defaults=True,
+        )
+        simulation = HardwareSimulation(HiddenWorld(seed=20260907), config)
+        navigator = build_navigation_engine(config)
+        navigator.set_auto(True)
+        while simulation.time < 18.0:
+            for _, polar_points, _ in simulation.advance(0.05):
+                if simulation.time < simulation.resume_at:
+                    continue
+                command = navigator.process_scan(scan_points_from_polar(polar_points))
+                if not command.stopped:
+                    simulation.execute(command)
+                    navigator.predict_motion(command)
+        self.assertGreaterEqual(navigator.grid.update_count, 4)
+        self.assertEqual(navigator.rejected_scans, 0)
+
     def test_ground_truth_distance_is_submillimetre(self):
         world = HiddenWorld()
         self.assertAlmostEqual(world.ray_distance(math.pi / 2, 3), 0.55, delta=0.0001)

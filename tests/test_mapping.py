@@ -204,6 +204,20 @@ class MappingTests(unittest.TestCase):
         self.assertGreater(second, first)
         self.assertLessEqual(second, 1.5)
 
+    def test_search_window_expands_for_diagonal_motion_uncertainty(self):
+        grid, points = room_fixture()
+        navigator = NavigationEngine(grid)
+        navigator.set_auto(True)
+        with patch.object(navigator.matcher, "match", return_value=(Pose2D(), 0.1)) as match:
+            navigator.process_scan(points)
+            first = match.call_args.kwargs["window_scale"]
+            from navigation_core import VelocityCommand
+            navigator.predict_motion(VelocityCommand(forward_mps=0.08, right_mps=0.08, duration_s=0.5))
+            navigator.process_scan(points)
+            second = match.call_args.kwargs["window_scale"]
+        self.assertGreater(second, first)
+        self.assertLessEqual(second, 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()

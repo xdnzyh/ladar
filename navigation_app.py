@@ -13,7 +13,13 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from app_utils import capture_window, enable_windows_dpi_awareness, load_json_config, save_json
-from data_fusion import DeviceClock, SequenceMonitor, parse_chassis_state, parse_timestamped_distance, parse_trigger
+from data_fusion import DeviceClock, SequenceMonitor, parse_timestamped_distance, parse_trigger
+from chassis_controller import (
+    ChassisController,
+    ChassisMotionAdapter,
+    ChassisState,
+    MotionConversionError,
+)
 from motion_safety import MotionSafetyGuard
 from navigation_core import (
     HiddenWorld,
@@ -23,9 +29,12 @@ from navigation_core import (
     VelocityCommand,
     mecanum_mix,
 )
+from mapping_runtime import MappingResult, MappingRuntime
 from radar_app import COLORS, RadarCanvas
 from radar_core import CalibrationModel, CCDFrameParser, MotorLineParser, RotationTracker, SlidingRate
+from runtime_config import build_navigation_engine, resolve_runtime_config
 from serial_backend import SerialEndpoint, list_serial_ports
+from scan_acquisition import polar_to_scan_point
 from synchronized_acquisition import SynchronizedAcquisition
 from virtual_hardware import HardwareSimulation
 
@@ -44,8 +53,10 @@ DEFAULT_CONFIG = {
     "safety_clearance_m": 0.12,
     "safety_max_observation_age_s": 0.5,
     "safety_blind_timeout_s": 0.75,
+    "safety_speed_upper_bound_mps": None,
+    "safety_stop_distance_m": None,
     "safety_max_angle_error_deg": 15,
-    "hardware_sample_rate_hz": 50.0,
+    "hardware_sample_rate_hz": 80.0,
     "exposure_index": 3,
     "actual_exposure_index": 3,
     "measurement_firmware_version": "CCD-CAL-1.3-SYNC",
@@ -68,9 +79,11 @@ DEFAULT_CONFIG = {
     "rotation_port": "",
     "chassis_port": "",
     "baudrate": 115200,
+    "radar_baudrate": 115200,
+    "chassis_baudrate": 9600,
     "measurement_mode": "fffe",
     "ccd_command": "@c0071#@",
-    "sample_rate_hz": 50.0,
+    "sample_rate_hz": 80.0,
     "min_range_m": 0.10,
     "max_range_m": 0.50,
     "hardware_min_range_m": 0.10,
@@ -87,12 +100,26 @@ DEFAULT_CONFIG = {
     "radar_offset_y_m": 0.0,
     "radar_offset_yaw_deg": 0.0,
     "robot_radius_m": 0.15,
+    "path_turn_penalty": 0.75,
     "chassis_command_template": "",
     "chassis_stop_command": "",
     "chassis_feedback_protocol": "",
+    "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
+    "chassis_ack_timeout_s": 2.0,
+    "chassis_action_timeout_s": 12.0,
+    "chassis_stop_timeout_s": 3.0,
+    "chassis_stop_status_delay_s": 0.35,
+    "chassis_max_line_bytes": 1024,
+    "chassis_min_counts": 1,
+    "chassis_max_counts": 2000,
+    "chassis_max_translation_m": 0.20,
+    "chassis_max_rotation_rad": 0.5,
+    "chassis_speed_validated": False,
+    "chassis_braking_validated": False,
+    "chassis_calibration": {mode: {"status": "uncalibrated"} for mode in "WSADQEZCRF"},
     "wheel_output_scale": 1000,
     "wheel_signs": [1, 1, 1, 1],
-    "simulation_sample_rate_hz": 50.0,
+    "simulation_sample_rate_hz": 80.0,
     "simulation_speed": 1.0,
     "simulation_profile": "NOMINAL",
     "simulation_seed": 20260907,
@@ -104,7 +131,11 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_configuration() -> dict:
+def load_configuration(
+    source: str = "hardware",
+    view: str = "radar",
+    overrides: dict | None = None,
+) -> dict:
     config = dict(DEFAULT_CONFIG)
     radar_config = load_json_config(RADAR_CONFIG_PATH, {})
     for key in (
@@ -176,50 +207,22 @@ def load_configuration() -> dict:
             config["hardware_max_range_m"] = config.get("max_range_m", DEFAULT_CONFIG["max_range_m"])
     config["min_range_m"] = config.get("hardware_min_range_m", config.get("min_range_m", DEFAULT_CONFIG["min_range_m"]))
     config["max_range_m"] = config.get("hardware_max_range_m", config.get("max_range_m", DEFAULT_CONFIG["max_range_m"]))
-    if config.get("measurement_mode") not in {"fffe", "raw2", "timestamped_ascii"}:
-        config["measurement_mode"] = "fffe"
-    for key, lower, upper in (
-        ("hardware_sample_rate_hz", 1.0, 100.0),
-        ("sample_rate_hz", 0.5, 200.0),
-        ("min_range_m", 0.0, 100.0),
-        ("max_range_m", 0.2, 100.0),
-    ):
-        try:
-            value = float(config[key])
-        except (KeyError, TypeError, ValueError):
-            value = float(DEFAULT_CONFIG[key])
-        if not math.isfinite(value) or not lower <= value <= upper:
-            value = float(DEFAULT_CONFIG[key])
-        config[key] = value
-    if config["min_range_m"] >= config["max_range_m"]:
-        config["min_range_m"] = float(DEFAULT_CONFIG["min_range_m"])
-        config["max_range_m"] = float(DEFAULT_CONFIG["max_range_m"])
     config["hardware_min_range_m"] = config["min_range_m"]
     config["hardware_max_range_m"] = config["max_range_m"]
-    try:
-        display_radius = float(config.get("display_radius_m", DEFAULT_CONFIG["display_radius_m"]))
-    except (TypeError, ValueError):
-        display_radius = float(DEFAULT_CONFIG["display_radius_m"])
-    config["display_radius_m"] = display_radius if math.isfinite(display_radius) and display_radius > 0 else float(DEFAULT_CONFIG["display_radius_m"])
-    try:
-        config["baudrate"] = int(config["baudrate"])
-    except (KeyError, TypeError, ValueError):
-        config["baudrate"] = 115200
-    signs = config.get("wheel_signs")
-    if isinstance(signs, list) and len(signs) == 4:
-        try:
-            config["wheel_signs"] = [1 if int(value) >= 0 else -1 for value in signs]
-        except (TypeError, ValueError):
-            config["wheel_signs"] = [1, 1, 1, 1]
-    else:
-        config["wheel_signs"] = [1, 1, 1, 1]
-    return config
+    if overrides:
+        config.update(overrides)
+    return resolve_runtime_config(
+        source,
+        view,
+        config,
+        prefer_mode_defaults=str(source).lower() == "simulation",
+    )
 
 
 def save_configuration(config: dict) -> None:
     persisted = dict(config)
-    persisted.pop("calibration", None)
-    persisted.pop("calibration_error", None)
+    for key in ("calibration", "calibration_error", "runtime_source", "runtime_view", "auto_enabled", "config_fingerprint"):
+        persisted.pop(key, None)
     save_json(NAV_CONFIG_PATH, persisted)
 
 
@@ -231,7 +234,8 @@ class MapCanvas(tk.Canvas):
         self.path: list[tuple[int, int]] = []
         self.target: tuple[int, int] | None = None
         self.enabled = False
-        self._signature = None
+        self._static_signature = None
+        self._dynamic_signature = None
         self.bind("<Configure>", lambda _event: self.redraw())
 
     def update_scene(
@@ -242,28 +246,41 @@ class MapCanvas(tk.Canvas):
         target: tuple[int, int] | None,
         enabled: bool,
     ) -> None:
-        signature = (
-            grid.update_count,
+        static_signature = (
+            grid._revision if grid is not None else None,
+            grid.width if grid is not None else None,
+            grid.height if grid is not None else None,
+            grid.resolution_m if grid is not None else None,
+            enabled,
+            self.winfo_width(),
+            self.winfo_height(),
+        )
+        dynamic_signature = (
             round(pose.x, 3) if pose is not None else None,
             round(pose.y, 3) if pose is not None else None,
             round(pose.yaw, 3) if pose is not None else None,
             tuple(path),
             target,
-            enabled,
-            self.winfo_width(),
-            self.winfo_height(),
         )
-        if signature == self._signature:
-            return
-        self._signature = signature
         self.grid = grid
         self.pose = pose
-        self.path = path
+        self.path = list(path)
         self.target = target
         self.enabled = enabled
-        self.redraw()
+        if static_signature != self._static_signature:
+            self._static_signature = static_signature
+            self._redraw_static()
+        if dynamic_signature != self._dynamic_signature:
+            self._dynamic_signature = dynamic_signature
+            self._redraw_dynamic()
 
     def redraw(self) -> None:
+        self._static_signature = None
+        self._dynamic_signature = None
+        self._redraw_static()
+        self._redraw_dynamic()
+
+    def _redraw_static(self) -> None:
         self.delete("all")
         width = max(160, self.winfo_width())
         height = max(160, self.winfo_height())
@@ -305,18 +322,32 @@ class MapCanvas(tk.Canvas):
                 run_start = col
                 run_state = state
 
+        self.create_text(16, 14, text="累计栅格地图", anchor="nw", fill=COLORS["muted"], font=("Microsoft YaHei UI", 10))
+
+    def _redraw_dynamic(self) -> None:
+        self.delete("dynamic")
+        if not self.enabled or self.grid is None:
+            return
+        width = max(160, self.winfo_width())
+        height = max(160, self.winfo_height())
+        grid = self.grid
+        margin = 20
+        cell_size = min((width - margin * 2) / grid.width, (height - margin * 2) / grid.height)
+        left = (width - grid.width * cell_size) / 2
+        top = (height - grid.height * cell_size) / 2
+
         if self.path:
             coordinates = []
             for col, row in self.path:
                 coordinates.extend((left + (col + 0.5) * cell_size, top + (row + 0.5) * cell_size))
             if len(coordinates) >= 4:
-                self.create_line(*coordinates, fill=COLORS["yellow"], width=2)
+                self.create_line(*coordinates, fill=COLORS["yellow"], width=2, tags="dynamic")
 
         if self.target is not None:
             col, row = self.target
             x = left + (col + 0.5) * cell_size
             y = top + (row + 0.5) * cell_size
-            self.create_oval(x - 5, y - 5, x + 5, y + 5, outline=COLORS["yellow"], width=2)
+            self.create_oval(x - 5, y - 5, x + 5, y + 5, outline=COLORS["yellow"], width=2, tags="dynamic")
 
         if self.pose is not None:
             col, row = grid.world_to_cell(self.pose.x, self.pose.y)
@@ -326,9 +357,7 @@ class MapCanvas(tk.Canvas):
             tip = (x + 12 * math.sin(heading), y - 12 * math.cos(heading))
             side_a = (x + 7 * math.sin(heading + 2.45), y - 7 * math.cos(heading + 2.45))
             side_b = (x + 7 * math.sin(heading - 2.45), y - 7 * math.cos(heading - 2.45))
-            self.create_polygon(*tip, *side_a, *side_b, fill=COLORS["green"], outline="#ffffff")
-
-        self.create_text(16, 14, text="累计栅格地图", anchor="nw", fill=COLORS["muted"], font=("Microsoft YaHei UI", 10))
+            self.create_polygon(*tip, *side_a, *side_b, fill=COLORS["green"], outline="#ffffff", tags="dynamic")
 
 
 class SimulationSource:
@@ -392,8 +421,16 @@ class SimulationSource:
                 started = time.perf_counter()
                 with self.lock:
                     sweeps = self.hardware.advance(0.02)
+                    safety_observations = list(self.hardware.last_safety_observations)
+                    motion_completed = self.hardware.last_motion_completed
                 for sequence, points, period in sweeps:
                     self.events.put(("simulation_sweep", (self.generation, sequence, points, period), started))
+                for sequence, points, period in self.hardware.last_local_results:
+                    self.events.put(("simulation_local_sweep", (self.generation, sequence, points, period), started))
+                for packet, estimate, simulation_time in safety_observations:
+                    self.events.put(("simulation_observation", (self.generation, packet, estimate, simulation_time), started))
+                if motion_completed:
+                    self.events.put(("simulation_motion_stopped", self.generation, started))
                 speed = max(0.1, float(self.config.get("simulation_speed", 1.0)))
                 deadline += 0.02 / speed
                 now = time.perf_counter()
@@ -408,18 +445,20 @@ class NavigationApp:
     def __init__(self, root: tk.Tk, source: str, initial_view: str = "radar", simulation_speed: float | None = None, simulation_profile: str | None = None) -> None:
         self.root = root
         self.source = source
-        self.config = load_configuration()
+        self._closed = False
+        overrides = {}
         if simulation_speed is not None:
-            self.config["simulation_speed"] = simulation_speed
+            overrides["simulation_speed"] = simulation_speed
         if simulation_profile is not None:
-            self.config["simulation_profile"] = simulation_profile
+            overrides["simulation_profile"] = simulation_profile
+        self.config = load_configuration(source, initial_view, overrides)
         self.events: queue.Queue = queue.Queue()
         self.safety_events: queue.Queue = queue.Queue()
         self.mapping_tasks: queue.Queue = queue.Queue(maxsize=2)
         self.mapping_results: queue.Queue = queue.Queue()
         self.mapping_stop = threading.Event()
         self.mapping_generation = 0
-        self.mapping_lock = threading.Lock()
+        self.mapping_lock = threading.RLock()
         self.runtime_min_range_m = float(self.config.get(
             "simulation_min_range_m" if source == "simulation" else "min_range_m",
             0.08 if source == "simulation" else 0.10,
@@ -428,26 +467,29 @@ class NavigationApp:
             "simulation_max_range_m" if source == "simulation" else "max_range_m",
             3.0 if source == "simulation" else 0.50,
         ))
-        self.mapping_thread = threading.Thread(target=self._mapping_worker, name="navigation-mapper", daemon=True)
-        self.mapping_thread.start()
-        self.motion_safety = MotionSafetyGuard(self.config)
         self.pending_events: list[tuple[float, int, str, object]] = []
         self.event_counter = 0
         self.sequence_monitor = SequenceMonitor()
-        self.device_clocks = {name: DeviceClock() for name in ("measurement", "rotation", "chassis")}
-        self.grid = OccupancyGrid(
-            int(self.config.get("map_width_cells", 180)),
-            int(self.config.get("map_height_cells", 180)),
-            float(self.config.get("map_resolution_m", 0.04)),
+        self.device_clocks = {name: DeviceClock() for name in ("measurement", "rotation")}
+        self.motion_safety = MotionSafetyGuard(self.config)
+        self.runtime_min_range_m = float(
+            self.config.get("simulation_min_range_m" if source == "simulation" else "min_range_m")
         )
-        self.navigator = NavigationEngine(
-            self.grid,
-            self.runtime_max_range_m,
-            float(self.config.get("robot_radius_m", 0.16)),
-            float(self.config.get("radar_offset_x_m", 0.0)),
-            float(self.config.get("radar_offset_y_m", 0.0)),
-            math.radians(float(self.config.get("radar_offset_yaw_deg", 0.0))),
+        self.runtime_max_range_m = float(
+            self.config.get("simulation_max_range_m" if source == "simulation" else "max_range_m")
         )
+        self.navigator = build_navigation_engine(self.config)
+        self.grid = self.navigator.grid
+        self.navigator.min_range_m = self.runtime_min_range_m
+        self.mapping_snapshot = None
+        self.mapping_runtime = MappingRuntime(
+            self.navigator,
+            min_range_m=self.runtime_min_range_m,
+            queue_size=int(self.config.get("mapping_queue_size", 2)),
+            on_result=self._mapping_runtime_result,
+            lock=self.mapping_lock,
+        )
+        self.mapping_thread = self.mapping_runtime._thread
         self.view_mode = tk.StringVar(value="navigation" if initial_view == "navigation" else "radar")
         self.running = False
         self.connected = source == "simulation"
@@ -464,13 +506,18 @@ class NavigationApp:
         self.accept_samples = True
         self.moving = False
         self.motion_generation = 0
+        self.manual_motion = False
+        self.disconnect_requested = False
+        self._close_requested = False
+        self._close_deadline = None
+        self._resume_radar_on_settle = False
+        self._skip_next_chassis_stop = False
         self.scan_collect_after = -math.inf
 
         self.calibration = CalibrationModel.from_dict(self.config.get("calibration"))
         self.ccd_parser = CCDFrameParser(str(self.config.get("measurement_mode", "fffe")))
         self.measure_line_parser = MotorLineParser()
         self.rotation_parser = MotorLineParser()
-        self.chassis_parser = MotorLineParser()
         self.rotation = RotationTracker(
             angle_offset_deg=float(self.config.get("angle_offset_deg", 0.0)),
             clockwise=bool(self.config.get("clockwise", True)),
@@ -482,6 +529,12 @@ class NavigationApp:
         self.measure_endpoint = SerialEndpoint("测距串口", self._measurement_data, self._serial_error)
         self.rotation_endpoint = SerialEndpoint("旋转串口", self._rotation_data, self._serial_error)
         self.chassis_endpoint = SerialEndpoint("底盘串口", self._chassis_data, self._serial_error)
+        self.chassis_adapter = ChassisMotionAdapter(self.config)
+        self.chassis_controller = ChassisController(
+            self.chassis_endpoint,
+            self._emit_chassis_event,
+            self.config,
+        )
         self.sync = SynchronizedAcquisition(
             self.measure_endpoint, self.rotation_endpoint, self.calibration, self.config,
             self._receive_sync_event,
@@ -654,16 +707,31 @@ class NavigationApp:
         self.rotation_combo = self._compact_combo(controls, "旋转", self.rotation_port_var)
         self.chassis_combo = self._compact_combo(controls, "底盘", self.chassis_port_var)
         ttk.Button(controls, text="刷新串口", command=self.refresh_ports).pack(fill="x", pady=(7, 0))
-        self.protocol_var = tk.StringVar()
-        self.stop_command_var = tk.StringVar()
-        row = ttk.Frame(controls, style="Panel.TFrame")
-        row.pack(fill="x", pady=(10, 0))
-        ttk.Label(row, text="四轮指令", style="Muted.TLabel", width=8).pack(side="left")
-        ttk.Entry(row, textvariable=self.protocol_var).pack(side="left", fill="x", expand=True)
-        row = ttk.Frame(controls, style="Panel.TFrame")
-        row.pack(fill="x", pady=(5, 0))
-        ttk.Label(row, text="停止指令", style="Muted.TLabel", width=8).pack(side="left")
-        ttk.Entry(row, textvariable=self.stop_command_var).pack(side="left", fill="x", expand=True)
+        self.protocol_var = tk.StringVar(value="")
+        self.stop_command_var = tk.StringVar(value="")
+        ttk.Separator(controls).pack(fill="x", pady=(12, 10))
+        ttk.Label(controls, text="底盘人工短动作", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 7))
+        manual_row = ttk.Frame(controls, style="Panel.TFrame")
+        manual_row.pack(fill="x", pady=2)
+        ttk.Label(manual_row, text="方向", style="Muted.TLabel", width=8).pack(side="left")
+        self.manual_mode_var = tk.StringVar(value="W")
+        self.manual_mode_combo = ttk.Combobox(
+            manual_row,
+            textvariable=self.manual_mode_var,
+            values=tuple("WSADQEZCRF"),
+            state="readonly",
+            width=6,
+        )
+        self.manual_mode_combo.pack(side="left")
+        ttk.Label(manual_row, text="CNT", style="Muted.TLabel").pack(side="left", padx=(10, 4))
+        self.manual_counts_var = tk.StringVar(value="100")
+        ttk.Entry(manual_row, textvariable=self.manual_counts_var, width=10).pack(side="left", fill="x", expand=True)
+        action_row = ttk.Frame(controls, style="Panel.TFrame")
+        action_row.pack(fill="x", pady=(7, 0))
+        ttk.Button(action_row, text="发送人工动作", command=self._send_manual_move).pack(side="left", fill="x", expand=True)
+        ttk.Button(action_row, text="读取底盘状态", command=self._request_chassis_status).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.chassis_status_var = tk.StringVar(value="底盘未连接")
+        ttk.Label(controls, textvariable=self.chassis_status_var, style="Muted.TLabel", wraplength=370).pack(anchor="w", pady=(7, 0))
 
     def _toggle_hardware_controls(self) -> None:
         self._set_hardware_controls(not self.hardware_controls_expanded)
@@ -678,6 +746,36 @@ class NavigationApp:
         else:
             self.hardware_controls_frame.pack_forget()
             self.hardware_toggle_button.configure(text="展开串口与指令")
+
+    def _request_chassis_status(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None or not controller.request_status():
+            self._log("当前底盘状态不允许读取")
+
+    def _send_manual_move(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None:
+            self._log("底盘控制器未初始化")
+            return
+        try:
+            counts = int(self.manual_counts_var.get().strip())
+        except (AttributeError, TypeError, ValueError):
+            messagebox.showwarning("CNT 无效", "请输入正整数 CNT。")
+            return
+        if counts <= 0:
+            messagebox.showwarning("CNT 无效", "请输入正整数 CNT。")
+            return
+        if self.moving or controller.in_flight:
+            self._log("底盘仍在执行或等待停止，未发送新动作")
+            return
+        self._begin_hardware_motion(None, manual=True)
+        if not controller.request_move(self.manual_mode_var.get().strip(), counts, source="manual"):
+            self.moving = False
+            self.manual_motion = False
+            self.accept_samples = not self.running
+            self._log("人工底盘动作未发送")
+            return
+        self._log(f"已发送人工动作 {self.manual_mode_var.get().strip().upper()} {counts} CNT")
 
     def _compact_combo(self, parent, label: str, variable: tk.StringVar):
         row = ttk.Frame(parent, style="Panel.TFrame")
@@ -710,25 +808,32 @@ class NavigationApp:
     def _navigation_preflight(self, show: bool = False) -> bool:
         if self.source == "simulation":
             return True
-        mode = str(self.config.get("measurement_mode", "fffe"))
         calibration_detail = str(self.config.get("calibration_error", "")) or "当前测距格式需要有效距离标定。"
+        controller = getattr(self, "chassis_controller", None)
+        chassis_open = bool(controller is not None and self.chassis_endpoint.is_open)
+        chassis_confirmed = bool(controller is not None and controller.confirmed)
+        if controller is not None:
+            adapter_ready, adapter_reasons = self.chassis_adapter.readiness()
+            adapter_detail = "；".join(adapter_reasons)
+        else:
+            adapter_ready, adapter_detail = False, "底盘控制器未初始化"
         checks = (
             (self.connected, "设备未连接", "请先连接测距、旋转串口。"),
             (bool(self.calibration.ready), "标定不可用", calibration_detail),
             (bool(self.config.get("synchronized_acquisition", True)), "采集模式不支持导航", "自动导航需要同步观测和实时安全检测。"),
-            (self.chassis_endpoint.is_open, "底盘未连接", "自动导航需要连接底盘串口。"),
-            (bool(self.protocol_var.get().strip()), "底盘协议未配置", "请填写四轮指令模板。"),
-            (bool(self.stop_command_var.get().strip()), "停止指令未配置", "请填写底盘停止指令。"),
-            (False, "底盘反馈协议未接入", "当前版本等待底盘开始、预估和完成反馈字段确认，暂不启动四轮控制。"),
+            (chassis_open, "底盘未连接", "自动导航需要连接底盘串口。"),
+            (chassis_confirmed, "底盘状态未确认", "请先读取底盘状态或等待启动标识。"),
+            (adapter_ready, "底盘标定未完成", adapter_detail),
         )
         for ok, title, detail in checks:
             if ok:
                 continue
             if show:
-                if title in {"底盘协议未配置", "停止指令未配置"}:
+                if title in {"底盘未连接", "底盘状态未确认", "底盘标定未完成"}:
                     self._set_hardware_controls(True)
                 messagebox.showwarning(title, detail)
             return False
+        controller.allow_automatic()
         return True
 
     def refresh_ports(self) -> None:
@@ -755,32 +860,56 @@ class NavigationApp:
         if len(set(port for port in required if port)) != len(required):
             messagebox.showwarning("串口重复", "三个设备必须使用不同串口。")
             return
-        baudrate = int(self.config.get("baudrate", 115200))
+        radar_baudrate = int(self.config.get("radar_baudrate", self.config.get("baudrate", 115200)))
+        chassis_baudrate = int(self.config.get("chassis_baudrate", 9600))
         opened = []
+        chassis_generation = None
         try:
-            self.measure_endpoint.open(ports[0], baudrate)
+            self.measure_endpoint.open(ports[0], radar_baudrate)
             opened.append(self.measure_endpoint)
-            self.rotation_endpoint.open(ports[1], baudrate)
+            self.rotation_endpoint.open(ports[1], radar_baudrate)
             opened.append(self.rotation_endpoint)
-            if not radar_only and ports[2]:
-                self.chassis_endpoint.open(ports[2], baudrate)
+            if ports[2]:
+                chassis_generation = self.chassis_controller.begin_connection()
+                self.chassis_endpoint.open(
+                    ports[2],
+                    chassis_baudrate,
+                    on_data=lambda data, stamp, generation=chassis_generation: self._chassis_data(data, stamp, generation),
+                    on_error=lambda message, generation=chassis_generation: self._chassis_error(message, generation),
+                )
                 opened.append(self.chassis_endpoint)
+                self.chassis_controller.mark_connection_open()
         except Exception as exc:
             for endpoint in opened:
                 endpoint.close()
+            if chassis_generation is not None:
+                self.chassis_controller.disconnect()
             messagebox.showerror("连接失败", str(exc))
             return
         self.connected = True
         self.connection_label.configure(text="●  设备已连接", fg=COLORS["green"])
         self.connect_button.configure(text="断开设备")
-        self._log("三个数据通道已连接" if not radar_only and ports[2] else "测距和旋转通道已连接")
+        if ports[2]:
+            self.chassis_status_var.set("底盘串口已打开，等待启动标识或状态回复")
+        self._log("测距、旋转和底盘通道已连接" if ports[2] else "测距和旋转通道已连接")
 
     def disconnect(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None and controller.in_flight:
+            self.disconnect_requested = True
+            controller.request_stop(reason="断开前停止")
+            self._log("底盘动作尚未确认停止，保持连接等待反馈")
+            return
         self.emergency_stop()
+        if controller is not None:
+            controller.disconnect()
         self.measure_endpoint.close()
         self.rotation_endpoint.close()
         self.chassis_endpoint.close()
         self.connected = False
+        self.disconnect_requested = False
+        if hasattr(self, "chassis_status_var"):
+            self.chassis_status_var.set("底盘未连接")
         self.connection_label.configure(text="●  未连接", fg=COLORS["muted"])
         self.connect_button.configure(text="连接设备")
 
@@ -828,22 +957,33 @@ class NavigationApp:
         self.motion_generation += 1
         self.mapping_generation += 1
         self._clear_mapping_tasks()
+        self.mapping_snapshot = None
         if self.simulation:
             self.simulation.stop()
+        chassis_in_flight = False
         if self.source == "hardware":
+            if getattr(self, "_skip_next_chassis_stop", False):
+                self._skip_next_chassis_stop = False
+            else:
+                self._send_chassis_stop(wait=True)
+            controller = getattr(self, "chassis_controller", None)
+            chassis_in_flight = bool(controller is not None and controller.in_flight)
             if self.config.get("synchronized_acquisition", True):
                 self.sync.stop()
             else:
                 SynchronizedAcquisition._stop_endpoint(self.measure_endpoint, ["STOP", "LASER 0"])
                 SynchronizedAcquisition._stop_endpoint(self.rotation_endpoint, ["OFF"])
-            self._send_chassis_stop(wait=True)
         self.running = False
         self.accept_samples = False
-        self.moving = False
+        self.moving = chassis_in_flight
+        self.manual_motion = False
         self.navigator.set_auto(False)
+        if chassis_in_flight:
+            self.navigator.state = "停止中"
+            self.navigator.detail = "已发送停止字节，等待底盘报告或状态确认"
         self.start_button.configure(text="开始")
         self.connection_label.configure(
-            text="●  已暂停" if self.connected else "●  未连接",
+            text="●  停止中" if chassis_in_flight else ("●  已暂停" if self.connected else "●  未连接"),
             fg=COLORS["yellow"] if self.connected else COLORS["muted"],
         )
 
@@ -854,11 +994,24 @@ class NavigationApp:
         self._log("紧急停止")
 
     def reset(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if self.source == "hardware" and controller is not None and controller.in_flight:
+            controller.request_stop(reason="重置前停止")
+            self._log("底盘未确认停止，暂不重置导航状态")
+            return
         was_running = self.running
+        self.motion_safety.clear()
+        self.moving = False
+        self.accept_samples = True
+        self.mapping_generation += 1
+        self._clear_mapping_tasks()
         if self.simulation:
             self.simulation.stop()
             self.simulation.reset()
-        self.navigator.reset()
+        with self.mapping_lock:
+            self.navigator.reset()
+            self.mapping_snapshot = None
+            self.grid = self.navigator.grid
         self.navigator.set_auto(self.view_mode.get() == "navigation")
         self.latest_points.clear()
         self.current_pixel = None
@@ -868,11 +1021,18 @@ class NavigationApp:
         self._log("模拟场景已重置")
 
     def clear_local_map(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if self.source == "hardware" and controller is not None and controller.in_flight:
+            controller.request_stop(reason="清图前停止")
+            self._log("底盘未确认停止，暂不清空地图")
+            return
         self.mapping_generation += 1
         self._clear_mapping_tasks()
         with self.mapping_lock:
             self.navigator.reset()
             self.navigator.set_auto(self.view_mode.get() == "navigation" and self.running)
+            self.mapping_snapshot = None
+            self.grid = self.navigator.grid
         self._log("局部地图已清空")
 
     def _start_hardware_scan(self) -> None:
@@ -929,15 +1089,18 @@ class NavigationApp:
             else:
                 self.events.put(("rotation_status", line, host_time))
 
-    def _chassis_data(self, data: bytes, host_time: float) -> None:
-        for line in self.chassis_parser.feed(data):
-            parsed = parse_chassis_state(line)
-            if parsed is None:
-                self.events.put(("chassis_status", line, host_time))
-                continue
-            sequence, device_us, values = parsed
-            timestamp = self.device_clocks["chassis"].observe(device_us, host_time)
-            self.events.put(("chassis_state", (sequence, values), timestamp))
+    def _emit_chassis_event(self, kind: str, value: object, timestamp: float) -> None:
+        self.events.put((kind, value, timestamp))
+
+    def _chassis_data(self, data: bytes, host_time: float, connection_generation: int | None = None) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None:
+            return
+        generation = controller.connection_generation if connection_generation is None else connection_generation
+        controller.feed_data(data, host_time, generation)
+
+    def _chassis_error(self, message: str, connection_generation: int) -> None:
+        self.events.put(("chassis_transport_error", (connection_generation, message), time.perf_counter()))
 
     def _serial_error(self, message: str) -> None:
         self.events.put(("error", (self.sync.generation, message), time.perf_counter()))
@@ -951,6 +1114,9 @@ class NavigationApp:
             value = (self.sync.generation, value)
         target = self.safety_events if kind == "sync_observation" else self.events
         target.put((kind, value, timestamp))
+
+    def _mapping_runtime_result(self, result: MappingResult) -> None:
+        self.mapping_results.put(result)
 
     def _mapping_worker(self) -> None:
         while not self.mapping_stop.is_set():
@@ -974,13 +1140,21 @@ class NavigationApp:
                 self.mapping_tasks.task_done()
 
     def _clear_mapping_tasks(self) -> None:
+        runtime = getattr(self, "mapping_runtime", None)
+        if runtime is not None:
+            runtime.invalidate(getattr(self, "mapping_generation", runtime.generation))
         while True:
             try:
                 self.mapping_tasks.get_nowait()
             except queue.Empty:
-                return
+                break
             else:
                 self.mapping_tasks.task_done()
+        while True:
+            try:
+                self.mapping_results.get_nowait()
+            except queue.Empty:
+                return
 
     def _submit_mapping(self, sequence: int, points: list[ScanPoint], timestamp: float) -> None:
         self._submit_mapping_task("navigation", sequence, points, timestamp)
@@ -989,6 +1163,11 @@ class NavigationApp:
         self._submit_mapping_task("local", sequence, points, timestamp)
 
     def _submit_mapping_task(self, kind: str, sequence: int, points: list[ScanPoint], timestamp: float) -> None:
+        runtime = getattr(self, "mapping_runtime", None)
+        if runtime is not None:
+            session = self.sync.session if hasattr(self, "sync") else ""
+            runtime.submit(session, sequence, points, timestamp, mode="local" if kind == "local" else "navigation")
+            return
         item = (self.mapping_generation, kind, sequence, points, timestamp)
         try:
             self.mapping_tasks.put_nowait(item)
@@ -1006,14 +1185,40 @@ class NavigationApp:
     def _handle_mapping_results(self) -> None:
         while True:
             try:
-                generation, kind, sequence, command, timestamp, error = self.mapping_results.get_nowait()
+                result = self.mapping_results.get_nowait()
             except queue.Empty:
                 return
+            if isinstance(result, MappingResult):
+                generation = result.request.generation
+                kind = result.request.mode
+                command = result.command
+                error = result.error
+                if generation != self.mapping_generation:
+                    continue
+                if error is not None:
+                    self._runtime_fault(f"建图处理异常：{error}")
+                    return
+                if result.snapshot is not None:
+                    self.mapping_snapshot = result.snapshot
+                    self.grid = result.snapshot.grid
+                if (kind == "navigation" and command is not None
+                        and self.navigator.state == "泊车完成"):
+                    self._finish_parking()
+                    continue
+                if (kind == "navigation" and self.view_mode.get() == "navigation"
+                        and self.running and command is not None and not command.stopped):
+                    self._execute_navigation_command(command)
+                continue
+            generation, kind, sequence, command, timestamp, error = result
             if generation != self.mapping_generation:
                 continue
             if error is not None:
                 self._runtime_fault(f"建图处理异常：{error}")
                 return
+            if (kind == "navigation" and command is not None
+                    and self.navigator.state == "泊车完成"):
+                self._finish_parking()
+                continue
             if (kind == "navigation" and self.view_mode.get() == "navigation"
                     and self.running and command is not None and not command.stopped):
                 self._execute_navigation_command(command)
@@ -1024,17 +1229,53 @@ class NavigationApp:
         self.navigator.state = "控制故障"
         self.navigator.detail = message
 
+    def _finish_parking(self) -> None:
+        if not self.running:
+            return
+        self.motion_safety.clear()
+        self.motion_generation += 1
+        self.mapping_generation += 1
+        self._clear_mapping_tasks()
+        if self.simulation:
+            self.simulation.stop()
+        if self.source == "hardware":
+            controller = getattr(self, "chassis_controller", None)
+            if controller is None or controller.in_flight:
+                self._send_chassis_stop(wait=True)
+            if self.config.get("synchronized_acquisition", True):
+                self.sync.stop()
+            else:
+                SynchronizedAcquisition._stop_endpoint(self.measure_endpoint, ["STOP", "LASER 0"])
+                SynchronizedAcquisition._stop_endpoint(self.rotation_endpoint, ["OFF"])
+        self.running = False
+        self.accept_samples = False
+        self.moving = False
+        self.navigator.set_auto(False)
+        self.navigator.state = "泊车完成"
+        self.navigator.detail = "连续三次终点复测通过，雷达已停止"
+        self.start_button.configure(text="开始")
+        self.connection_label.configure(text="●  泊车完成", fg=COLORS["green"])
+        self._log("泊车完成，已停止雷达")
+
     def _stop_motion_for_mode_switch(self) -> None:
         self.motion_generation += 1
         generation = self.motion_generation
         self.motion_safety.clear()
-        self.moving = False
         self.accept_samples = False
         if self.source == "simulation":
             assert self.simulation is not None
             self.simulation.execute(VelocityCommand())
+            self.moving = False
             self.accept_samples = True
             return
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            self._resume_radar_on_settle = True
+            controller.request_stop(reason="切换到仅雷达", now=time.perf_counter())
+            self.moving = controller.in_flight
+            self._stop_radar_only()
+            return
+        self.moving = False
         self._send_chassis_stop(wait=True)
         if self.config.get("synchronized_acquisition", True):
             self.sync.stop()
@@ -1067,15 +1308,20 @@ class NavigationApp:
 
     def _safety_stop(self, reason):
         self._send_chassis_stop()
-        self.emergency_stop()
+        self._skip_next_chassis_stop = True
+        self.stop()
         self.navigator.state = "安全停车"
         self.navigator.detail = reason
         self._log(reason)
 
     def _poll(self) -> None:
+        if self._closed:
+            return
         now = time.perf_counter()
         try:
             self._handle_mapping_results()
+            if self.source == "hardware" and hasattr(self, "chassis_controller"):
+                self.chassis_controller.poll(now)
             if self.source == "hardware" and self.config.get("synchronized_acquisition", True):
                 self.sync.poll(now)
                 self._check_motion_safety(now)
@@ -1093,18 +1339,25 @@ class NavigationApp:
             while self.pending_events and self.pending_events[0][0] <= cutoff:
                 timestamp, _, kind, value = heapq.heappop(self.pending_events)
                 self._handle_event(kind, value, timestamp)
+            if self.source == "simulation" and self.running and self.moving and self.simulation is not None:
+                with self.simulation.lock:
+                    simulation_time = self.simulation.hardware.time
+                reason = self.motion_safety.poll(simulation_time)
+                if reason:
+                    self._safety_stop(reason)
 
             if (self.running and self.source == "hardware"
                     and not self.config.get("synchronized_acquisition", True)
                     and self.accept_samples and self.measure_endpoint.is_open):
-                interval = 1.0 / max(1.0, float(self.config.get("sample_rate_hz", 50.0)))
+                interval = 1.0 / max(1.0, float(self.config.get("sample_rate_hz", 80.0)))
                 if now - self.last_request_time >= interval:
                     self.measure_endpoint.write_line(str(self.config.get("ccd_command", "@c0071#@")))
                     self.last_request_time = now
         except Exception as exc:
             self._runtime_fault(f"运行调度异常：{exc}")
         finally:
-            self.root.after(15, self._poll)
+            if not self._closed:
+                self.root.after(15, self._poll)
 
     def _handle_event(self, kind: str, value: object, timestamp: float) -> None:
         if kind in {"sync_status", "sync_error", "sync_diagnostic"}:
@@ -1157,7 +1410,7 @@ class NavigationApp:
                 self.rotation.period_history.append(period)
                 self._handle_sweep(
                     sequence,
-                    [ScanPoint(p.angle_rad, p.distance_m, 1.0, p.is_echo) for p in polar_points],
+                    [polar_to_scan_point(p) for p in polar_points],
                     timestamp,
                 )
         elif kind == "sync_local_sweep":
@@ -1167,16 +1420,37 @@ class NavigationApp:
                     and polar_points[-1].timestamp >= self.scan_collect_after):
                 self.rotation.period_s = period
                 self.rotation.period_history.append(period)
-                points = [ScanPoint(p.angle_rad, p.distance_m, 1.0, p.is_echo) for p in polar_points]
+                points = [polar_to_scan_point(p) for p in polar_points]
                 self._submit_local_mapping(sequence, points, timestamp)
         elif kind == "simulation_sweep":
-            if self.running:
+            if self.running and not self.moving:
                 generation, sequence, polar_points, period = value
                 if self.simulation is None or generation != self.simulation.generation:
                     return
                 self.rotation.period_s = period
                 self.rotation.period_history.append(period)
-                self._handle_sweep(sequence, [ScanPoint(p.angle_rad, p.distance_m, 1.0, p.is_echo) for p in polar_points], timestamp)
+                self._handle_sweep(sequence, [polar_to_scan_point(p) for p in polar_points], timestamp)
+        elif kind == "simulation_local_sweep":
+            if self.running and not self.moving and self.view_mode.get() == "radar":
+                generation, sequence, polar_points, period = value
+                if self.simulation is None or generation != self.simulation.generation or not polar_points:
+                    return
+                self.rotation.period_s = period
+                self.rotation.period_history.append(period)
+                self._submit_local_mapping(sequence, [polar_to_scan_point(p) for p in polar_points], timestamp)
+        elif kind == "simulation_observation":
+            if self.running and self.moving:
+                generation, packet, estimate, simulation_time = value
+                if self.simulation is None or generation != self.simulation.generation:
+                    return
+                reason = self.motion_safety.observe(packet, estimate, float(simulation_time))
+                if reason:
+                    self._safety_stop(reason)
+        elif kind == "simulation_motion_stopped":
+            if self.running and self.moving and self.simulation is not None and value == self.simulation.generation:
+                self.motion_safety.clear()
+                self.moving = False
+                self.accept_samples = True
         elif kind == "range" and self.accept_samples:
             distance, pixel, sequence = value  # type: ignore[misc]
             if sequence is not None:
@@ -1192,8 +1466,49 @@ class NavigationApp:
         elif kind == "trigger" and self.accept_samples:
             completed = self.rotation.trigger(timestamp, value if isinstance(value, int) else None)
             if completed:
-                points = [ScanPoint(point.angle_rad, point.distance_m, 1.0, point.is_echo) for point in completed]
+                points = [polar_to_scan_point(point) for point in completed]
                 self._handle_sweep(self.rotation.trigger_count - 1, points, timestamp)
+        elif kind == "chassis_frame":
+            generation, frame = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is not None:
+                controller.handle_frame(int(generation), frame, timestamp)
+        elif kind == "chassis_ack":
+            generation, action, ack = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is None or generation != controller.connection_generation:
+                return
+            self._log(f"底盘已接受 {ack.mode} {ack.counts} CNT")
+            self.navigator.state = "底盘执行中"
+            self.navigator.detail = "已收到 ACK，等待完整 DONE 报告"
+        elif kind == "chassis_done":
+            generation, action, report = value
+            self._handle_chassis_done(int(generation), action, report, timestamp)
+        elif kind == "chassis_stop_confirmed":
+            generation, status = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is None or generation != controller.connection_generation:
+                return
+            self.chassis_status_var.set("底盘返回 IDLE；仍需停稳观察，未视为外部测量证明") if hasattr(self, "chassis_status_var") else None
+            self._log("底盘状态回复 IDLE")
+            if self.disconnect_requested and not controller.in_flight:
+                self._complete_disconnect()
+        elif kind == "chassis_ready":
+            generation, action, detail = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is None or generation != controller.connection_generation:
+                return
+            if self.disconnect_requested and not controller.in_flight:
+                self._complete_disconnect()
+            if hasattr(self, "chassis_status_var"):
+                self.chassis_status_var.set(str(detail))
+        elif kind == "chassis_waiting_scan":
+            self.navigator.state = "等待停稳后新扫描"
+            self.navigator.detail = "底盘 DONE 已收到，等待停稳并重新获取完整相邻扫描"
+        elif kind in {"chassis_fault", "chassis_timeout", "chassis_protocol_error", "chassis_unmatched_done"}:
+            self._handle_chassis_fault(kind, value)
+        elif kind == "chassis_rejected":
+            self._log(f"底盘动作拒绝：{value[1] if isinstance(value, tuple) and len(value) > 1 else value}")
         elif kind == "motion_sent":
             generation, command = value
             if self.running and self.moving and generation == self.motion_generation:
@@ -1224,13 +1539,27 @@ class NavigationApp:
         elif kind == "rotation_status":
             self._log(f"旋转  {value}")
         elif kind == "chassis_status":
-            self._log(f"底盘  {value}")
+            if isinstance(value, tuple) and len(value) == 2:
+                self._log(f"底盘  {value[1]}")
+            else:
+                self._log(f"底盘  {value}")
         elif kind == "chassis_state":
-            sequence, values = value  # type: ignore[misc]
-            missing = self.sequence_monitor.add("chassis", int(sequence))
-            if missing:
-                self._log(f"底盘状态缺失 {missing} 帧")
-            self.latest_chassis_state = tuple(float(item) for item in values)
+            if isinstance(value, tuple) and len(value) == 3:
+                _generation, state, detail = value
+                if hasattr(self, "chassis_status_var"):
+                    self.chassis_status_var.set(str(detail))
+                self._log(f"底盘状态：{state}，{detail}")
+            elif isinstance(value, tuple) and len(value) == 2:
+                sequence, values = value
+                missing = self.sequence_monitor.add("chassis", int(sequence))
+                if missing:
+                    self._log(f"底盘状态缺失 {missing} 帧")
+                self.latest_chassis_state = tuple(float(item) for item in values)
+        elif kind == "chassis_transport_error":
+            generation, message = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is not None:
+                controller.handle_transport_error(int(generation), str(message), timestamp)
 
     def _handle_sweep(self, sequence: int, points: list[ScanPoint], timestamp: float) -> None:
         self.latest_points = points
@@ -1239,16 +1568,191 @@ class NavigationApp:
             self.latest_distance = nearest.distance_m
             self.latest_angle = math.degrees(nearest.angle_rad) % 360
         self.scan_rate.add(timestamp)
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None and controller.state == ChassisState.WAITING_SCAN:
+            controller.mark_scan_ready(timestamp)
         self._submit_mapping(sequence, points, timestamp)
+
+    def _handle_chassis_done(self, generation: int, action, report, timestamp: float) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None or generation != controller.connection_generation:
+            return
+        if action is None or controller.pending is not action:
+            return
+        self.latest_chassis_state = (
+            float(report.requested_counts), float(report.brake), float(report.enc),
+            float(report.dx), float(report.dy), float(report.dr), float(report.ds),
+            float(report.q1), float(report.q2), float(report.q3), float(report.q4),
+        )
+        self._log(f"底盘 DONE {report.mode} {report.reason} REQ={report.requested_counts} ENC={report.enc:g}")
+        self.motion_safety.clear()
+        self.accept_samples = False
+        self.manual_motion = action.source == "manual"
+        if action.source == "auto" and report.reason == "TARGET" and not action.stop_requested and self.running:
+            try:
+                estimate = self.chassis_adapter.execution_from_report(report)
+                with self.mapping_lock:
+                    self.navigator.apply_execution_delta(
+                        estimate.local_x_m,
+                        estimate.local_y_m,
+                        estimate.yaw_rad,
+                        estimate.uncertainty_m,
+                    )
+            except (MotionConversionError, ValueError) as exc:
+                self.navigator.state = "位置待重新确认"
+                self.navigator.detail = str(exc)
+                self._log(str(exc))
+                self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
+                return
+            self.navigator.state = "停稳等待新扫描"
+            self.navigator.detail = "已应用一次编码器执行先验，等待停稳后的完整相邻扫描"
+            self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=True)
+            return
+
+        if getattr(self, "_resume_radar_on_settle", False):
+            self.navigator.set_auto(False)
+            self.navigator.state = "等待停稳"
+            self.navigator.detail = "模式切换已停止底盘，等待停稳后恢复仅雷达扫描"
+            self._stop_radar_only()
+            self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
+            return
+        if report.reason == "TARGET" and action.source == "manual":
+            detail = "人工动作已完成；固定姿态地图参考点已失效"
+        elif action.stop_requested:
+            detail = f"底盘已停止（{report.reason}），不恢复自动动作"
+        else:
+            detail = f"底盘异常结束（{report.reason}），需要重新确认位置"
+        self.navigator.state = "底盘动作结束"
+        self.navigator.detail = detail
+        self._stop_radar_only()
+        self.running = False
+        self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
+
+    def _finish_chassis_action_after_settle(self, action, generation: int, timestamp: float, *, resume_auto: bool) -> None:
+        self.scan_collect_after = max(time.perf_counter(), float(timestamp)) + self._settle_duration()
+        if self.config.get("synchronized_acquisition", True) and hasattr(self, "sync"):
+            self.sync.begin_after(self.scan_collect_after)
+        delay = max(1, round(max(0.0, self.scan_collect_after - time.perf_counter()) * 1000))
+        motion_generation = self.motion_generation
+        callback = lambda: self._complete_chassis_settle(
+            generation,
+            action.action_id,
+            motion_generation,
+            resume_auto,
+        )
+        if hasattr(self, "root"):
+            self.root.after(delay, callback)
+        else:
+            callback()
+
+    def _complete_chassis_settle(
+        self,
+        connection_generation: int,
+        action_id: int,
+        motion_generation: int,
+        resume_auto: bool,
+    ) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None or connection_generation != controller.connection_generation:
+            return
+        action = controller.pending
+        if action is None or action.action_id != action_id:
+            return
+        should_resume = bool(
+            resume_auto
+            and self.running
+            and not action.stop_requested
+            and self.motion_generation == motion_generation
+        )
+        if not controller.complete_settle(resume_auto=should_resume):
+            return
+        if should_resume:
+            self._restart_hardware_scan(motion_generation)
+            return
+        self.motion_safety.clear()
+        self.moving = False
+        self.manual_motion = False
+        if getattr(self, "_resume_radar_on_settle", False) and self.running:
+            self._resume_radar_on_settle = False
+            self._resume_radar_after_mode_switch(motion_generation)
+            return
+        self.accept_samples = False
+        if self.disconnect_requested and not controller.in_flight:
+            self._complete_disconnect()
+
+    def _handle_chassis_fault(self, kind: str, value: object) -> None:
+        if kind == "chassis_protocol_error":
+            detail = value[2] if isinstance(value, tuple) and len(value) > 2 else value
+            self._log(f"底盘协议行已丢弃：{detail}")
+            return
+        if isinstance(value, tuple) and len(value) >= 2:
+            detail = value[1]
+        else:
+            detail = value
+        self.navigator.state = "底盘故障"
+        self.navigator.detail = str(detail)
+        self._log(str(detail))
+        self.running = False
+        self.accept_samples = False
+        self.motion_safety.clear()
+        self._clear_mapping_tasks()
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None or controller.state == ChassisState.UNKNOWN:
+            self.moving = False
+
+    def _stop_radar_only(self) -> None:
+        if self.source != "hardware":
+            return
+        if self.config.get("synchronized_acquisition", True):
+            self.sync.stop()
+        else:
+            SynchronizedAcquisition._stop_endpoint(self.measure_endpoint, ["STOP", "LASER 0"])
+            SynchronizedAcquisition._stop_endpoint(self.rotation_endpoint, ["OFF"])
+
+    def _complete_disconnect(self) -> None:
+        if not self.disconnect_requested:
+            return
+        self.disconnect_requested = False
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            controller.disconnect()
+        self.measure_endpoint.close()
+        self.rotation_endpoint.close()
+        self.chassis_endpoint.close()
+        self.connected = False
+        if hasattr(self, "chassis_status_var"):
+            self.chassis_status_var.set("底盘未连接")
+        self.connection_label.configure(text="●  未连接", fg=COLORS["muted"])
+        self.connect_button.configure(text="连接设备")
 
     def _execute_navigation_command(self, command: VelocityCommand) -> None:
         if self.moving:
             return
         if self.source == "simulation":
             assert self.simulation is not None
+            if command.stopped:
+                return
+            self.moving = True
+            self.accept_samples = False
+            self.motion_generation += 1
+            self.motion_safety.start(command, self.simulation.hardware.time)
             self.simulation.execute(command)
             with self.mapping_lock:
                 self.navigator.predict_motion(command)
+            return
+
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            try:
+                request = self.chassis_adapter.request_for_command(command, automatic=True)
+            except MotionConversionError as exc:
+                self.navigator.state = "底盘动作拒绝"
+                self.navigator.detail = str(exc)
+                self._log(str(exc))
+                return
+            self._begin_hardware_motion(command, manual=False)
+            if not controller.request_move(request.mode, request.counts, source="auto"):
+                self._hardware_motion_failed("底盘动作未能排队发送")
             return
 
         template = self.protocol_var.get().strip()
@@ -1293,8 +1797,45 @@ class NavigationApp:
             self.stop()
             self._log("底盘运动指令发送失败")
 
+    def _begin_hardware_motion(self, command: VelocityCommand | None, *, manual: bool) -> None:
+        self.manual_motion = bool(manual)
+        self.moving = True
+        self.accept_samples = False
+        self.motion_generation += 1
+        self.mapping_generation = getattr(self, "mapping_generation", 0) + 1
+        if hasattr(self, "_clear_mapping_tasks"):
+            self._clear_mapping_tasks()
+        self.mapping_snapshot = None
+        self.scan_collect_after = math.inf
+        if command is not None:
+            self.motion_safety.start(command, time.perf_counter())
+        if self.config.get("synchronized_acquisition", True):
+            receiver = getattr(self.sync, "receiver", None)
+            if receiver is not None:
+                self.sync.begin_after(math.inf)
+            else:
+                self.sync.stop()
+        elif hasattr(self, "rotation_endpoint"):
+            self.rotation_endpoint.write_line("OFF")
+        if hasattr(self, "navigator"):
+            self.navigator.state = "等待底盘反馈"
+            self.navigator.detail = "动作已登记，等待 ACK 和 DONE"
+
+    def _hardware_motion_failed(self, detail: str) -> None:
+        self.motion_safety.clear()
+        self.accept_samples = False
+        self.moving = False
+        self.manual_motion = False
+        self.navigator.state = "底盘执行状态不明"
+        self.navigator.detail = detail
+        self._log(detail)
+
     def _finish_hardware_motion(self, generation: int) -> None:
         if not self.running or not self.moving or generation != self.motion_generation:
+            return
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            controller.request_stop(reason="上位机停止动作", now=time.perf_counter())
             return
         command = self.stop_command_var.get().strip()
         if not command or not self._write_with_completion(
@@ -1335,10 +1876,19 @@ class NavigationApp:
     def _send_chassis_stop(self, wait: bool = False) -> bool:
         if self.source != "hardware" or not self.chassis_endpoint.is_open:
             return False
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            return bool(controller.request_stop(reason="上位机停止", now=time.perf_counter()))
         command = self.stop_command_var.get().strip() if hasattr(self, "stop_command_var") else ""
         if not command:
             return False
-        sent = self.chassis_endpoint.write_line(command)
+        cancel_pending = getattr(self.chassis_endpoint, "cancel_pending", None)
+        if callable(cancel_pending):
+            cancel_pending()
+        try:
+            sent = self.chassis_endpoint.write_line(command, priority=True)
+        except TypeError:
+            sent = self.chassis_endpoint.write_line(command)
         if wait:
             flush = getattr(self.chassis_endpoint, "flush", None)
             if callable(flush):
@@ -1346,16 +1896,30 @@ class NavigationApp:
         return sent
 
     def _draw(self) -> None:
+        if self._closed:
+            return
         radar_points = [(point.x, point.y, 1.0) for point in self.latest_points]
         receiver = self.simulation.hardware.receiver if self.simulation is not None else self.sync.receiver
         if receiver is not None:
             preview = receiver.preview_points
-            radar_points = [(distance * math.sin(angle), distance * math.cos(angle), 1.0)
-                            for _, angle, distance in preview]
+            radar_points = []
+            for item in preview:
+                angle = item.angle_rad if hasattr(item, "angle_rad") else item[1]
+                distance = item.distance_m if hasattr(item, "distance_m") else item[2]
+                radar_points.append((distance * math.sin(angle), distance * math.cos(angle), 1.0))
             if preview:
-                nearest = min(preview, key=lambda point: point[2])
-                self.latest_angle = math.degrees(nearest[1]) % 360
-                self.latest_distance = nearest[2]
+                nearest = min(
+                    preview,
+                    key=lambda point: point.distance_m if hasattr(point, "distance_m") else point[2],
+                )
+                angle = nearest.angle_rad if hasattr(nearest, "angle_rad") else nearest[1]
+                self.latest_angle = math.degrees(angle) % 360
+                self.latest_distance = nearest.distance_m if hasattr(nearest, "distance_m") else nearest[2]
+                self.current_pixel = nearest.pixel if hasattr(nearest, "pixel") else self.current_pixel
+            elif self.running:
+                self.latest_angle = None
+                self.latest_distance = None
+                self.current_pixel = None
         if receiver is not None and self.running and not radar_points:
             waiting_text = receiver.builder.reason
         elif self.running and not radar_points:
@@ -1369,14 +1933,26 @@ class NavigationApp:
             self.latest_angle or 0.0,
             waiting_text,
         )
-        navigation_view = self.view_mode.get() == "navigation"
-        self.map_canvas.update_scene(
-            self.grid,
-            self.navigator.pose,
-            self.navigator.path_cells,
-            self.navigator.target_cell,
-            navigation_view,
+        snapshot = self.mapping_snapshot
+        map_grid = snapshot.grid if snapshot is not None else self.grid
+        map_pose = snapshot.pose if snapshot is not None else self.navigator.pose
+        map_path = list(snapshot.path) if snapshot is not None else self.navigator.path_cells
+        map_target = snapshot.target if snapshot is not None else self.navigator.target_cell
+        map_enabled = bool(
+            map_grid is not None
+            and (map_grid.update_count > 0 or self.navigator.local_map_updates > 0)
         )
+        self.map_canvas.update_scene(
+            map_grid,
+            map_pose,
+            map_path,
+            map_target,
+            map_enabled,
+        )
+        completed_scans = snapshot.completed_scans if snapshot is not None else self.navigator.completed_scans
+        local_map_updates = snapshot.local_map_updates if snapshot is not None else self.navigator.local_map_updates
+        nav_state = snapshot.state if snapshot is not None else self.navigator.state
+        nav_detail = snapshot.detail if snapshot is not None else self.navigator.detail
         self.metric_vars["distance"].set("—" if self.latest_distance is None else f"{self.latest_distance:.2f}")
         self.metric_vars["angle"].set("—" if self.latest_angle is None else f"{self.latest_angle:.1f}")
         if self.rotation.period_history:
@@ -1387,18 +1963,18 @@ class NavigationApp:
         frequency = self.measurement_rate.value()
         self.metric_vars["frequency"].set("—" if frequency <= 0 else f"{frequency:.1f}")
         self.metric_vars["points"].set(str(len(receiver.preview_points)) if receiver is not None else str(len(self.latest_points)))
-        self.metric_vars["scans"].set(str(self.navigator.completed_scans))
-        self.metric_vars["local_maps"].set(str(self.navigator.local_map_updates))
+        self.metric_vars["scans"].set(str(completed_scans))
+        self.metric_vars["local_maps"].set(str(local_map_updates))
         self.metric_vars["drift"].set("—")
-        self.map_percent_var.set(f"{self.grid.known_area_m2():.1f} m²")
+        self.map_percent_var.set(f"{map_grid.known_area_m2():.1f} m²")
         self.measurement_detail_var.set(
             f"像素 {self.current_pixel if self.current_pixel is not None else '—'}   "
             f"距离 {self.latest_distance:.3f} m" if self.latest_distance is not None
             else f"像素 {self.current_pixel if self.current_pixel is not None else '—'}   距离 —"
         )
-        self.nav_state_var.set(self.navigator.state)
-        self.nav_detail_var.set(self.navigator.detail)
-        pose = self.navigator.pose
+        self.nav_state_var.set(nav_state)
+        self.nav_detail_var.set(nav_detail)
+        pose = map_pose
         self.pose_var.set(f"x {pose.x:+.2f} m   y {pose.y:+.2f} m   θ {math.degrees(pose.yaw):+.1f}°")
         score = "—" if self.navigator.match_score == 0 else f"{self.navigator.match_score:.2f}"
         self.frontier_var.set(
@@ -1407,7 +1983,8 @@ class NavigationApp:
         if self.simulation is not None:
             receiver = self.simulation.hardware.receiver
             self.sim_status_var.set(f"有效 {receiver.accepted} 圈 · 丢弃 {receiver.discarded} 圈 · 迟到 {receiver.late} 包\n{receiver.builder.reason}")
-        self.root.after(50, self._draw)
+        if not self._closed:
+            self.root.after(50, self._draw)
 
     def _log(self, message: str) -> None:
         self.status_history.append(f"{datetime.now():%H:%M:%S}  {message}")
@@ -1427,7 +2004,40 @@ class NavigationApp:
         return result
 
     def on_close(self) -> None:
+        if self._closed or self._close_requested:
+            return
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None and controller.in_flight:
+            self._close_requested = True
+            self._close_deadline = time.perf_counter() + max(
+                0.5, float(self.config.get("chassis_stop_timeout_s", 3.0)) + 0.5
+            )
+            self.stop()
+            self.connection_label.configure(text="●  关闭中，等待底盘停止", fg=COLORS["yellow"])
+            self.root.after(50, self._poll_close)
+            return
         self.stop()
+        self._finalize_close()
+
+    def _poll_close(self) -> None:
+        if self._closed or not self._close_requested:
+            return
+        controller = getattr(self, "chassis_controller", None)
+        deadline = self._close_deadline if self._close_deadline is not None else time.perf_counter()
+        if controller is not None and controller.in_flight and time.perf_counter() < deadline:
+            self.root.after(50, self._poll_close)
+            return
+        self._finalize_close()
+
+    def _finalize_close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._close_requested = False
+        self._close_deadline = None
+        controller = getattr(self, "chassis_controller", None)
+        if controller is not None:
+            controller.disconnect()
         self.measure_endpoint.close()
         self.rotation_endpoint.close()
         self.chassis_endpoint.close()
@@ -1436,9 +2046,18 @@ class NavigationApp:
                 save_configuration(self._collect_config())
             except (OSError, ValueError, tk.TclError):
                 pass
-        self.mapping_stop.set()
-        self._clear_mapping_tasks()
-        self.mapping_tasks.put(None)
+        runtime = getattr(self, "mapping_runtime", None)
+        if runtime is not None:
+            runtime.stop()
+        else:
+            self.mapping_stop.set()
+            self._clear_mapping_tasks()
+            self.mapping_tasks.put(None)
+        try:
+            for callback_id in self.root.tk.call("after", "info"):
+                self.root.after_cancel(callback_id)
+        except tk.TclError:
+            pass
         self.root.destroy()
 
 

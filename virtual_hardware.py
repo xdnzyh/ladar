@@ -181,7 +181,7 @@ class VirtualRangeSensor:
         status = "over_range" if distance >= self.maximum else "ok"
         bad_interval = p.bad_interval_s > 0 and 3.0 <= now % 9.0 < 3.0 + p.bad_interval_s
         if self.random.random() < p.failure_probability or (bad_interval and self.sequence % 3 == 0):
-            return HardwareObservation("range", self.sequence, now, None, "no_return")
+            return HardwareObservation("range", self.sequence, now, None, "no_return", is_echo=False)
         if status == "ok":
             sigma = max(0, p.sigma0_m + p.sigma1 * distance + p.sigma2 * distance * distance)
             distance += p.range_bias_m + p.drift_m * math.sin(now / 25) + self.random.gauss(0, sigma)
@@ -190,7 +190,7 @@ class VirtualRangeSensor:
             if p.quantization_m > 0:
                 distance = round(distance / p.quantization_m) * p.quantization_m
             distance = min(self.maximum, distance)
-        return HardwareObservation("range", self.sequence, now, distance, status)
+        return HardwareObservation("range", self.sequence, now, distance, status, is_echo=status == "ok")
 
 
 class VirtualChassis:
@@ -247,7 +247,7 @@ class HardwareSimulation:
         self.parameters = simulation_parameters(config)
         seed = int(config.get("simulation_seed", 20260907))
         period = float(config.get("radar_period_s", 1.5))
-        rate = float(config.get("simulation_sample_rate_hz", 50))
+        rate = float(config.get("simulation_sample_rate_hz", 80))
         minimum = float(config.get("simulation_min_range_m", 0.08))
         maximum = float(config.get("simulation_max_range_m", 3.0))
         if not all(math.isfinite(v) and v > 0 for v in (period, rate, maximum)):
@@ -259,10 +259,14 @@ class HardwareSimulation:
         receiver_config = dict(config)
         receiver_config["min_range_m"] = minimum
         receiver_config["max_range_m"] = maximum
+        receiver_config["arbitrary_phase_scans"] = True
         self.receiver = DistanceObservationReceiver(receiver_config)
         self.time = 0.0
         self.resume_at = 0.0
         self.was_moving = False
+        self.last_local_results = []
+        self.last_safety_observations = []
+        self.last_motion_completed = False
 
     def execute(self, command: VelocityCommand):
         self.chassis.execute(command, self.time)
@@ -272,11 +276,16 @@ class HardwareSimulation:
 
     def stop(self):
         self.chassis.stop(self.time)
+        self.resume_at = self.time
+        self.was_moving = False
         self.receiver.reset(self.time + float(self.config.get("simulation_settle_s", 0.2)))
 
     def advance(self, duration: float):
         end = self.time + duration
         results = []
+        self.last_local_results = []
+        self.last_safety_observations = []
+        self.last_motion_completed = False
         while self.time < end - 1e-10:
             dt = min(0.002, end - self.time)
             if self.sensor.next_sample > self.time + 1e-10:
@@ -292,9 +301,16 @@ class HardwareSimulation:
             moving = self.time < self.resume_at
             if self.was_moving and not moving:
                 self.was_moving = False
+                self.last_motion_completed = True
             for received in self.link.receive(self.time):
                 self.receiver.feed(received)
-            results.extend(self.receiver.poll(self.time))
+                if moving and received.observation.source == "range":
+                    self.last_safety_observations.append(
+                        (received.observation, self.receiver.estimate_angle(received.observation), self.time)
+                    )
+            poll_result = self.receiver.poll(self.time)
+            results.extend(poll_result.formal_scans)
+            self.last_local_results.extend(poll_result.local_scans)
         return results
 
     def diagnostics(self):
@@ -305,5 +321,6 @@ class HardwareSimulation:
                 "discarded_scans": receiver.discarded,
                 "scan_discard_rate": receiver.discarded / total if total else 0.0,
                 "late_packets": receiver.late, "duplicate_packets": receiver.duplicates,
-                "dropped_packets": self.link.dropped, "collisions": self.chassis.collisions}
+                "dropped_packets": self.link.dropped, "collisions": self.chassis.collisions,
+                "pending_depth_peak": receiver.max_pending}
 

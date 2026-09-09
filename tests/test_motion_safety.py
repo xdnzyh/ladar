@@ -62,6 +62,18 @@ class MotionSafetyTests(unittest.TestCase):
         app._safety_stop.assert_called_once()
         app.navigator.process_scan.assert_not_called()
 
+    def test_safety_stop_keeps_navigation_view(self):
+        app = object.__new__(NavigationApp)
+        app._send_chassis_stop = Mock()
+        app.stop = Mock()
+        app.navigator = Mock()
+        app._log = Mock()
+        app._safety_stop("测距中断")
+        app._send_chassis_stop.assert_called_once_with()
+        app.stop.assert_called_once_with()
+        self.assertEqual(app.navigator.state, "安全停车")
+        self.assertEqual(app.navigator.detail, "测距中断")
+
     def test_settle_delay_is_configurable_and_rejects_invalid_values(self):
         app = object.__new__(NavigationApp)
         for value in (0, 0.2, 0.7):

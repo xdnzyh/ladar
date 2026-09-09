@@ -219,7 +219,7 @@ class AcquisitionTests(unittest.TestCase):
         a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
         a.poll(1.1)
         self.assertEqual(a.state, 'running')
-        self.assertTrue(any(message.startswith('START ') for message in endpoints[0].messages))
+        self.assertIn(f'START {a.session} 80 3 fffe', endpoints[0].messages)
         self.assertTrue(any(message.startswith('ROT ') for message in endpoints[1].messages))
         self.assertTrue(any('测距 8/8' in str(value) and '旋转 8/8' in str(value)
                             for kind, value, _ in output if kind == 'sync_status'))

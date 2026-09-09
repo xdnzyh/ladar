@@ -5,6 +5,7 @@ import csv
 from dataclasses import dataclass, field
 import math
 import re
+from statistics import median, quantiles
 import time
 from typing import Deque, Iterable
 
@@ -96,6 +97,26 @@ class CalibrationModel:
         if not math.isfinite(result) or result <= 0:
             return None
         return result
+
+    def distance_slope_m_per_pixel(self, pixel: float) -> float | None:
+        if not math.isfinite(float(pixel)):
+            return None
+        if self.model == "table":
+            for (d1, x1), (d2, x2) in zip(self.table_points, self.table_points[1:]):
+                if x2 <= pixel <= x1:
+                    return abs(d2 - d1) / (100.0 * abs(x2 - x1))
+            return None
+        if not self.ready:
+            return None
+        denominator = float(pixel) - float(self.p0)
+        if abs(denominator) < 1e-9:
+            return None
+        slope = abs(float(self.k) / (denominator * denominator))
+        return slope if math.isfinite(slope) else None
+
+    def pixel_quantization_error_m(self, pixel: float) -> float | None:
+        slope = self.distance_slope_m_per_pixel(pixel)
+        return None if slope is None else 0.5 * slope
 
     def to_dict(self) -> dict:
         return {
@@ -314,6 +335,12 @@ class PolarPoint:
     timestamp: float
     pixel: int
     is_echo: bool = True
+    time_error_s: float | None = None
+    angle_error_rad: float | None = None
+    distance_error_m: float | None = None
+    calibration_version: str | None = None
+    source: str | None = None
+    session: str | None = None
 
     @property
     def x(self) -> float:
@@ -322,6 +349,50 @@ class PolarPoint:
     @property
     def y(self) -> float:
         return self.distance_m * math.cos(self.angle_rad)
+
+
+def analyze_repeated_calibration(samples, model: CalibrationModel | None = None) -> dict:
+    grouped: dict[float, list[float]] = {}
+    if isinstance(samples, dict):
+        iterator = samples.items()
+        for distance, pixels in iterator:
+            grouped[float(distance)] = [float(pixel) for pixel in pixels]
+    else:
+        for distance, pixel in samples:
+            grouped.setdefault(float(distance), []).append(float(pixel))
+    result = []
+    for distance, pixels in sorted(grouped.items()):
+        pixels = [pixel for pixel in pixels if math.isfinite(pixel)]
+        if not pixels:
+            continue
+        center = median(pixels)
+        deviations = [abs(pixel - center) for pixel in pixels]
+        entry = {
+            "distance_m": distance,
+            "pixel_median": center,
+            "pixel_mad": median(deviations),
+            "sample_count": len(pixels),
+            "pixel_q05": None,
+            "pixel_q95": None,
+            "residual_median_m": None,
+            "residual_mad_m": None,
+            "quantization_error_m": None,
+            "uncertainty_status": "未标定重复误差",
+        }
+        if len(pixels) >= 2:
+            entry["pixel_q05"] = quantiles(pixels, n=20, method="inclusive")[0]
+            entry["pixel_q95"] = quantiles(pixels, n=20, method="inclusive")[-1]
+        if model is not None:
+            predicted = [model.distance(pixel) for pixel in pixels]
+            residuals = [value - distance for value in predicted if value is not None and math.isfinite(value)]
+            if residuals:
+                residual_center = median(residuals)
+                entry["residual_median_m"] = residual_center
+                entry["residual_mad_m"] = median(abs(value - residual_center) for value in residuals)
+                entry["quantization_error_m"] = model.pixel_quantization_error_m(center)
+                entry["uncertainty_status"] = "已计算量化与重复残差，系统项未标定"
+        result.append(entry)
+    return {"samples": result, "model_used": bool(model), "refit": False}
 
 
 @dataclass

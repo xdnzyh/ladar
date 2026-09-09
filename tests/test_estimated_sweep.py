@@ -7,6 +7,12 @@ from virtual_hardware import HardwareSimulation, DistanceObservationReceiver, Ha
 
 
 class EstimatedSweepTests(unittest.TestCase):
+    def test_live_preview_starts_before_formal_scan_is_ready(self):
+        simulation = HardwareSimulation(HiddenWorld(), {"simulation_profile": "IDEAL"})
+        self.assertFalse(simulation.advance(3.6))
+        self.assertTrue(simulation.receiver.preview_points)
+        self.assertEqual(simulation.receiver.accepted, 0)
+
     def test_live_preview_updates_before_complete_scan(self):
         simulation = HardwareSimulation(HiddenWorld(), {"simulation_profile": "IDEAL"})
         self.assertFalse(simulation.advance(5.5))
@@ -103,7 +109,7 @@ class EstimatedSweepTests(unittest.TestCase):
         self.assertTrue(normal)
         self.assertEqual(normal, burst)
 
-    def test_hardware_sampling_resumes_on_first_zero_after_settle(self):
+    def test_hardware_sampling_resumes_after_settle_without_waiting_for_zero(self):
         simulation = HardwareSimulation(HiddenWorld(), {"simulation_profile": "IDEAL"})
         simulation.advance(8.1)
         simulation.execute(VelocityCommand(forward_mps=0.1, duration_s=0.4))
@@ -113,8 +119,7 @@ class EstimatedSweepTests(unittest.TestCase):
         self.assertTrue(sweeps)
         first_stamp = sweeps[0][1][0].timestamp
         self.assertGreaterEqual(first_stamp, resume_at - 1e-9)
-        self.assertGreaterEqual(first_stamp, 9.0 - 1e-9)
-        self.assertLess(first_stamp, 9.051)
+        self.assertLess(first_stamp, resume_at + 0.08)
 
 
 if __name__ == "__main__":

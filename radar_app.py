@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
     "pixel_min": CCD_PIXEL_MIN,
     "pixel_max": CCD_PIXEL_MAX,
-    "sample_rate_hz": 50.0,
+    "sample_rate_hz": 80.0,
     "max_range_m": 3.0,
     "min_range_m": 0.08,
     "angle_offset_deg": 0.0,
@@ -537,7 +537,7 @@ class RadarApp:
         parser_mode = str(self.config.get("ccd_parser", "fffe"))
         self.parser_var.set(CCDFrameParser.MODES.get(parser_mode, CCDFrameParser.MODES["fffe"]))
         self.exposure_var.set(3)
-        self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 50.0)))
+        self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 80.0)))
         self.min_range_var.set(float(self.config.get("min_range_m", 0.08)))
         self.max_range_var.set(float(self.config.get("max_range_m", 3.0)))
         self.angle_offset_var.set(float(self.config.get("angle_offset_deg", 0.0)))
@@ -572,7 +572,7 @@ class RadarApp:
     def _sync_config(self) -> dict:
         config = dict(self.config)
         config["measurement_mode"] = config.get("ccd_parser", "fffe")
-        config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 50.0))
+        config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 80.0))
         config["exposure_index"] = 3
         config["actual_exposure_index"] = 3
         config["pixel_min"] = CCD_PIXEL_MIN

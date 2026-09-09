@@ -87,8 +87,8 @@ class SharedAcquisitionTests(unittest.TestCase):
         for _, points, _ in actual:
             self.assertTrue(points[-1].timestamp < 6.2 or points[0].timestamp >= 7.1)
         resumed = next(points for _, points, _ in actual if points[0].timestamp >= 7.1)
-        self.assertGreaterEqual(resumed[0].timestamp, 7.5)
-        self.assertLess(resumed[0].timestamp, 7.56)
+        self.assertGreaterEqual(resumed[0].timestamp, 7.1)
+        self.assertLess(resumed[0].timestamp, 7.16)
         self.assertEqual(acquisition.endpoints["rotation"].messages.count("OFF"), 1)
 
     def test_real_clock_uncertainty_rejects_unreliable_sweeps(self):
@@ -141,6 +141,28 @@ class SharedAcquisitionTests(unittest.TestCase):
         self.assertEqual(app.chassis_endpoint.messages, [])
         self.assertTrue(app.moving)
         app.root.after.assert_not_called()
+
+    def test_parking_completion_stops_radar_and_preserves_success_state(self):
+        app = self.app()
+        app.mapping_generation = 0
+        app.mapping_tasks = queue.Queue()
+        app.mapping_results = queue.Queue()
+        app.simulation = None
+        app.start_button = Mock()
+        app.connection_label = Mock()
+        app.connected = True
+        app._send_chassis_stop = Mock(return_value=True)
+        app._log = Mock()
+
+        app._finish_parking()
+
+        self.assertFalse(app.running)
+        self.assertFalse(app.accept_samples)
+        self.assertFalse(app.moving)
+        self.assertEqual(app.navigator.state, "泊车完成")
+        self.assertIn("雷达已停止", app.navigator.detail)
+        app._send_chassis_stop.assert_called_once_with(wait=True)
+        app.sync.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":

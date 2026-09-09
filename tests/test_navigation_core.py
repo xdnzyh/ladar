@@ -86,6 +86,74 @@ class SimulatorTests(unittest.TestCase):
             )
         )
 
+    def test_terminal_confirmation_does_not_rotate_an_omnidirectional_radar(self):
+        navigator = NavigationEngine(OccupancyGrid())
+        navigator.set_auto(True)
+        navigator._corridor_probe_command = lambda: VelocityCommand()
+        navigator._terminal_geometry_confirmed = lambda: True
+        navigator._last_scan_had_translation = True
+        commands = [navigator._plan_next_command() for _ in range(2)]
+        self.assertTrue(all(command.stopped for command in commands))
+        self.assertTrue(all(command.yaw_rps == 0.0 for command in commands))
+        self.assertEqual(navigator.state, "终点确认")
+
+    def test_three_terminal_confirmations_complete_parking(self):
+        navigator = NavigationEngine(OccupancyGrid())
+        navigator.set_auto(True)
+        navigator._corridor_probe_command = lambda: VelocityCommand()
+        navigator._terminal_geometry_confirmed = lambda: True
+        navigator._last_scan_had_translation = True
+
+        commands = [navigator._plan_next_command() for _ in range(3)]
+
+        self.assertTrue(all(command.stopped for command in commands))
+        self.assertEqual(navigator.state, "泊车完成")
+
+    def test_terminal_geometry_requires_two_close_parking_sides(self):
+        def points(front, right, left, rear):
+            result = []
+            for angle, distance in (
+                (0.0, front),
+                (math.pi / 2, right),
+                (-math.pi / 2, left),
+                (math.pi, rear),
+            ):
+                result.extend(ScanPoint(angle + offset, distance) for offset in (-0.1, 0.0, 0.1))
+            return result
+
+        navigator = NavigationEngine(OccupancyGrid(), robot_radius_m=0.15)
+        navigator.match_score = 0.8
+        navigator.latest_scan = points(0.25, 0.29, 0.60, 0.95)
+        navigator._last_scan_had_translation = True
+        self.assertTrue(navigator._terminal_geometry_confirmed())
+
+        navigator.latest_scan = points(0.25, 0.30, 0.60, 0.95)
+        navigator._terminal_signature = None
+        navigator._terminal_evidence_scans = 0
+        self.assertFalse(navigator._terminal_geometry_confirmed())
+
+    def test_terminal_confirmation_moves_toward_nearest_open_parking_side(self):
+        def points(front, right, left, rear):
+            result = []
+            for angle, distance in (
+                (0.0, front),
+                (math.pi / 2, right),
+                (-math.pi / 2, left),
+                (math.pi, rear),
+            ):
+                result.extend(ScanPoint(angle + offset, distance) for offset in (-0.1, 0.0, 0.1))
+            return result
+
+        navigator = NavigationEngine(OccupancyGrid(), robot_radius_m=0.15)
+        navigator.match_score = 0.8
+        navigator.latest_scan = points(0.38, 0.42, 0.60, 0.95)
+        navigator._collision_guard = lambda command: command
+        command = navigator._parking_search_command()
+
+        self.assertGreater(command.forward_mps, 0.0)
+        self.assertEqual(command.right_mps, 0.0)
+        self.assertLessEqual(command.forward_mps * command.duration_s, 0.10)
+
     def test_navigation_builds_map_without_access_to_hidden_map(self):
         world = HiddenWorld(seed=20260903)
         navigator = NavigationEngine(

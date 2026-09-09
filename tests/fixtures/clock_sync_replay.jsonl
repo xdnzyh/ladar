@@ -1,0 +1,17 @@
+{"record_type":"header","schema_version":"1.0","source_type":"synthetic_dual_clock_replay","session":"clock","clock_faults":["constant_offset","drift_update","asymmetric_sync_delay","long_tail_arrival","device_restart"],"sync_exchanges":[{"source":"measurement","model_version":0,"t1_s":0,"t2_us":130000,"t3_us":131000,"t4_s":0.021,"drift_ppm":180},{"source":"measurement","model_version":1,"t1_s":4,"t2_us":4135000,"t3_us":4136000,"t4_s":4.021,"drift_ppm":180},{"source":"rotation","model_version":0,"t1_s":1,"t2_us":930000,"t3_us":931000,"t4_s":1.021,"drift_ppm":220},{"source":"rotation","model_version":1,"t1_s":5,"t2_us":4935000,"t3_us":4936000,"t4_s":5.021,"drift_ppm":220}]}
+{"source":"rotation","clock_model_version":0,"arrival_s":1,"line":"TRIG clock 1 920000"}
+{"source":"measurement","clock_model_version":0,"arrival_s":1.02,"line":"PIX clock 1 1140000 1141000 942"}
+{"source":"measurement","clock_model_version":0,"arrival_s":1.2,"line":"PIX clock 2 1320000 1321000 942"}
+{"source":"measurement","clock_model_version":0,"arrival_s":1.42,"line":"PIX clock 3 1540000 1541000 942"}
+{"source":"rotation","clock_model_version":0,"arrival_s":2.5,"line":"TRIG clock 2 2420000"}
+{"source":"measurement","clock_model_version":0,"arrival_s":2.52,"line":"PIX clock 4 2640000 2641000 942"}
+{"source":"measurement","clock_model_version":0,"arrival_s":2.8,"line":"PIX clock 5 2920000 2921000 942"}
+{"source":"measurement","clock_model_version":0,"arrival_s":3.2,"line":"PIX clock 6 3320000 3321000 942"}
+{"source":"rotation","clock_model_version":1,"arrival_s":4,"line":"TRIG clock 3 3925000"}
+{"source":"measurement","clock_model_version":1,"arrival_s":4.02,"line":"PIX clock 7 4145000 4146000 942"}
+{"source":"measurement","clock_model_version":1,"arrival_s":4.22,"line":"PIX clock 8 4345000 4346000 942"}
+{"source":"measurement","clock_model_version":1,"arrival_s":4.42,"line":"PIX clock 9 4545000 4546000 942"}
+{"source":"rotation","clock_model_version":1,"arrival_s":5.5,"line":"TRIG clock 4 5425000"}
+{"source":"measurement","clock_model_version":1,"arrival_s":5.3,"line":"PIX clock 99 4925000 4926000 942"}
+{"source":"measurement","clock_model_version":1,"arrival_s":5.31,"line":"PIX clock 99 4925000 4926000 942"}
+{"source":"measurement","clock_model_version":1,"arrival_s":5.32,"line":"PIX clock 100 3000000 3001000 942"}
