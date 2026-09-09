@@ -20,11 +20,19 @@ class CurrentFirmwareBaselineTests(unittest.TestCase):
             self.assertEqual(digest, entry["sha256"])
 
     def test_measurement_baseline_exposes_fixed_hardware_limits(self):
-        path = ROOT / "firmware_baseline" / "measurement_main_MEASUREMENT_SYNC_CAL_V3.py"
+        manifest = json.loads((ROOT / "firmware_baseline" / "manifest.json").read_text(encoding="utf-8"))
+        path = ROOT / "firmware_baseline" / manifest["measurement"]["file"]
         text = path.read_text(encoding="utf-8")
-        self.assertIn('VERSION = "MEASUREMENT_SYNC_CAL_V3"', text)
-        self.assertIn("EXPOSURE_INDEX = 3", text)
+        self.assertIn('VERSION = "CCD-PEAK-RAW-CAL-3.0"', text)
+        self.assertIn("DEFAULT_EXPOSURE = 5", text)
         self.assertIn("COORDINATE_MAX = 1500", text)
+        self.assertNotIn('elif cmd.startswith("START ")', text)
+
+    def test_synchronized_candidate_uses_current_calibration_exposure(self):
+        path = ROOT / "firmware_candidates" / "measurement_main_MEASUREMENT_SYNC_CAL_V3_candidate.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("EXPOSURE_INDEX = 5", text)
+        self.assertIn('command = b"@c0071#@" if mode == "fffe"', text)
 
     def test_rotation_baseline_is_micropython_session_protocol(self):
         path = ROOT / "firmware_baseline" / "rotation_main_ROTATION_SYNC_MP_V2.py"

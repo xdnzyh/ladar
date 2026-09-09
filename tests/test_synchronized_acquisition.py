@@ -219,10 +219,32 @@ class AcquisitionTests(unittest.TestCase):
         a.feed('rotation', f'OK ROT {a.session}\n'.encode(), 1.1)
         a.poll(1.1)
         self.assertEqual(a.state, 'running')
-        self.assertIn(f'START {a.session} 80 3 fffe', endpoints[0].messages)
+        self.assertIn(f'START {a.session} 80 5 fffe', endpoints[0].messages)
         self.assertTrue(any(message.startswith('ROT ') for message in endpoints[1].messages))
         self.assertTrue(any('测距 8/8' in str(value) and '旋转 8/8' in str(value)
                             for kind, value, _ in output if kind == 'sync_status'))
+
+    def test_sync_failure_distinguishes_zero_byte_response(self):
+        a, endpoints, output = self.make()
+        endpoints[0].port = 'COM3'
+        endpoints[1].port = 'COM4'
+        for timestamp in (0.1 + i * 1.1 for i in range(17)):
+            a.poll(timestamp)
+        errors = [str(value) for kind, value, _ in output if kind == 'sync_error']
+        self.assertEqual(a.state, 'stopped')
+        self.assertTrue(any('测距端(COM3)未收到任何字节' in value for value in errors))
+        self.assertTrue(any('已发送 16 次' in value and '有效回应 0/8' in value for value in errors))
+
+    def test_sync_failure_reports_received_invalid_frames(self):
+        a, endpoints, output = self.make()
+        endpoints[0].port = 'COM3'
+        a.feed('measurement', b'not-a-sync\n', 0.2)
+        a.poll(0.2)
+        for timestamp in (1.3 + i * 1.1 for i in range(16)):
+            a.poll(timestamp)
+        errors = [str(value) for kind, value, _ in output if kind == 'sync_error']
+        self.assertTrue(any('收到' in value and '有效 SYNC' in value and 'COM3' in value for value in errors))
+        self.assertGreater(a.received_bytes['measurement'], 0)
 
     def test_rotation_waits_for_delayed_measurements(self):
         a, _, output = self.running()
@@ -448,7 +470,7 @@ class ConfigurationTests(unittest.TestCase):
             config = navigation_app.load_configuration()
         self.assertEqual(config['calibration']['k'], 100)
         self.assertEqual(config['measurement_mode'], 'raw2')
-        self.assertEqual(config['exposure_index'], 3)
+        self.assertEqual(config['exposure_index'], 5)
 
 
 @unittest.skip("历史 MEASUREMENT_SYNC_V2 回归；当前设备基准由 test_firmware_baseline.py 校验")

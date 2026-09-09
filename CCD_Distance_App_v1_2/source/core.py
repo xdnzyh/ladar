@@ -6,11 +6,13 @@ import math
 from pathlib import Path
 import re
 
-# The original ruler readings used the CCD housing as the reference point.
-# The final measurement reference is the laser spot, 2 cm closer to the wall.
-DEFAULT_POINTS = ((8, 1211), (13, 1100), (18, 1025), (23, 982),
-                  (28, 942), (33, 921), (38, 901), (43, 886),
-                  (48, 871), (53, 862), (58, 855))
+DEFAULT_POINTS = (
+    (15, 1203), (20, 1099), (25, 1033), (30, 989),
+    (35, 947), (40, 922), (45, 901), (50, 885),
+    (55, 873), (60, 863), (65, 853), (70, 844),
+    (75, 838), (80, 831), (85, 827), (90, 823),
+    (95, 818), (100, 814),
+)
 COORDINATE_PATTERN = re.compile(r"CCD MIN X:\s*(\d+)\s*\Z")
 
 
@@ -72,7 +74,19 @@ class Calibration:
     def identifier(self):
         return hashlib.sha256(repr(self.points).encode()).hexdigest()[:10]
 
+    @property
+    def distance_range_cm(self):
+        return self.points[0][0], self.points[-1][0]
+
+    @property
+    def coordinate_range(self):
+        return self.points[-1][1], self.points[0][1]
+
     def convert(self, x):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return None, "无效坐标"
         if not math.isfinite(x) or not 0 <= x <= 1500:
             return None, "无效坐标"
         if x > self.points[0][1]:

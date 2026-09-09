@@ -17,14 +17,16 @@ class RuntimeConfigContractTests(unittest.TestCase):
     def test_mode_defaults_are_centered_and_share_engine_builder(self):
         hardware = resolve_runtime_config("hardware", "radar", {}, prefer_mode_defaults=True)
         simulation = resolve_runtime_config("simulation", "navigation", {}, prefer_mode_defaults=True)
-        self.assertEqual((hardware["map_width_cells"], hardware["map_height_cells"]), (100, 100))
+        self.assertEqual((hardware["map_width_cells"], hardware["map_height_cells"]), (120, 120))
         self.assertEqual(hardware["map_resolution_m"], 0.02)
         self.assertEqual(hardware["hardware_sample_rate_hz"], 80.0)
+        self.assertEqual((hardware["min_range_m"], hardware["max_range_m"]), (0.15, 1.0))
+        self.assertEqual(hardware["actual_exposure_index"], 5)
         self.assertEqual((simulation["map_width_cells"], simulation["map_height_cells"]), (180, 280))
         self.assertEqual(simulation["map_resolution_m"], 0.04)
         self.assertEqual(simulation["simulation_sample_rate_hz"], 80.0)
         self.assertEqual(build_navigation_engine(simulation).path_turn_penalty, 0.75)
-        self.assertEqual(build_navigation_engine(hardware).grid.origin_row, 50)
+        self.assertEqual(build_navigation_engine(hardware).grid.origin_row, 60)
         self.assertEqual(build_navigation_engine(simulation).grid.origin_row, 140)
         custom = resolve_runtime_config(
             "simulation",
@@ -107,8 +109,8 @@ class MappingContractTests(unittest.TestCase):
         self.assertAlmostEqual(point.angle_error_rad, 0.01)
 
     def test_repeated_calibration_reports_uncertainty_without_refitting(self):
-        model = CalibrationModel.from_table([(8, 1211), (13, 1100), (18, 1025)])
-        report = analyze_repeated_calibration({0.13: [1100, 1101, 1099]}, model)
+        model = CalibrationModel.from_table([(15, 1203), (20, 1099), (25, 1033)])
+        report = analyze_repeated_calibration({0.20: [1099, 1100, 1098]}, model)
         self.assertFalse(report["refit"])
         self.assertEqual(report["samples"][0]["sample_count"], 3)
         self.assertIsNotNone(report["samples"][0]["quantization_error_m"])

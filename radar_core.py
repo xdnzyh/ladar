@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import csv
 from dataclasses import dataclass, field
+import hashlib
 import math
 import re
 from statistics import median, quantiles
@@ -30,6 +31,27 @@ class CalibrationModel:
         if self.model == "table":
             return len(self.table_points) >= 2
         return self.p0 is not None and self.k is not None and abs(self.k) > 1e-9
+
+    @property
+    def identifier(self) -> str:
+        if self.model == "table":
+            payload = repr(tuple(self.table_points))
+        else:
+            payload = repr((self.p0, self.k, self.rmse, tuple(self.points)))
+        digest = hashlib.sha256(payload.encode("ascii")).hexdigest()[:12]
+        return f"{self.model}-{digest}"
+
+    @property
+    def distance_range_m(self) -> tuple[float, float] | None:
+        if self.model == "table" and self.table_points:
+            return self.table_points[0][0] / 100.0, self.table_points[-1][0] / 100.0
+        return None
+
+    @property
+    def coordinate_range(self) -> tuple[float, float] | None:
+        if self.model == "table" and self.table_points:
+            return self.table_points[-1][1], self.table_points[0][1]
+        return None
 
     def add_point(self, pixel: float, distance_m: float) -> None:
         if not (CCD_PIXEL_MIN <= pixel <= CCD_PIXEL_MAX):
@@ -75,8 +97,14 @@ class CalibrationModel:
         return p0, k, rmse
 
     def distance(self, pixel: float) -> float | None:
+        try:
+            pixel = float(pixel)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(pixel):
+            return None
         if self.model == "table":
-            if not math.isfinite(float(pixel)) or not self.table_points:
+            if not self.table_points:
                 return None
             first_pixel = self.table_points[0][1]
             last_pixel = self.table_points[-1][1]
@@ -99,7 +127,11 @@ class CalibrationModel:
         return result
 
     def distance_slope_m_per_pixel(self, pixel: float) -> float | None:
-        if not math.isfinite(float(pixel)):
+        try:
+            pixel = float(pixel)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(pixel):
             return None
         if self.model == "table":
             for (d1, x1), (d2, x2) in zip(self.table_points, self.table_points[1:]):
@@ -115,6 +147,13 @@ class CalibrationModel:
         return slope if math.isfinite(slope) else None
 
     def pixel_quantization_error_m(self, pixel: float) -> float | None:
+        if self.model == "table":
+            center = self.distance(pixel)
+            if center is None:
+                return None
+            neighbors = [self.distance(float(pixel) - 0.5), self.distance(float(pixel) + 0.5)]
+            deviations = [abs(value - center) for value in neighbors if value is not None]
+            return max(deviations) if deviations else None
         slope = self.distance_slope_m_per_pixel(pixel)
         return None if slope is None else 0.5 * slope
 

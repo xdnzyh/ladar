@@ -57,9 +57,10 @@ DEFAULT_CONFIG = {
     "safety_stop_distance_m": None,
     "safety_max_angle_error_deg": 15,
     "hardware_sample_rate_hz": 80.0,
-    "exposure_index": 3,
-    "actual_exposure_index": 3,
-    "measurement_firmware_version": "CCD-CAL-1.3-SYNC",
+    "exposure_index": 5,
+    "actual_exposure_index": 5,
+    "calibration_firmware_version": "CCD-PEAK-RAW-CAL-3.0",
+    "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
     "rotation_firmware_version": "ROTATION_SYNC_MP_V2",
     "pixel_min": 0,
     "pixel_max": 1500,
@@ -84,18 +85,18 @@ DEFAULT_CONFIG = {
     "measurement_mode": "fffe",
     "ccd_command": "@c0071#@",
     "sample_rate_hz": 80.0,
-    "min_range_m": 0.10,
-    "max_range_m": 0.50,
-    "hardware_min_range_m": 0.10,
-    "hardware_max_range_m": 0.50,
-    "display_radius_m": 0.60,
+    "min_range_m": 0.15,
+    "max_range_m": 1.00,
+    "hardware_min_range_m": 0.15,
+    "hardware_max_range_m": 1.00,
+    "display_radius_m": 1.10,
     "angle_offset_deg": 0.0,
     "clockwise": True,
     "radar_period_s": 1.5,
     "fusion_delay_ms": 80,
     "map_resolution_m": 0.02,
-    "map_width_cells": 100,
-    "map_height_cells": 100,
+    "map_width_cells": 120,
+    "map_height_cells": 120,
     "radar_offset_x_m": 0.0,
     "radar_offset_y_m": 0.0,
     "radar_offset_yaw_deg": 0.0,
@@ -189,8 +190,8 @@ def load_configuration(
             config["calibration"] = table.to_dict()
             config["calibration_model"] = "table"
             config["calibration_file"] = str(calibration_path.relative_to(APP_DIR)) if calibration_path.is_relative_to(APP_DIR) else str(calibration_path)
-    config["actual_exposure_index"] = 3
-    config["exposure_index"] = 3
+    config["actual_exposure_index"] = 5
+    config["exposure_index"] = 5
     config["pixel_min"] = 0
     config["pixel_max"] = 1500
     legacy_range = (config.get("min_range_m"), config.get("max_range_m"))
@@ -461,11 +462,11 @@ class NavigationApp:
         self.mapping_lock = threading.RLock()
         self.runtime_min_range_m = float(self.config.get(
             "simulation_min_range_m" if source == "simulation" else "min_range_m",
-            0.08 if source == "simulation" else 0.10,
+            0.08 if source == "simulation" else 0.15,
         ))
         self.runtime_max_range_m = float(self.config.get(
             "simulation_max_range_m" if source == "simulation" else "max_range_m",
-            3.0 if source == "simulation" else 0.50,
+            3.0 if source == "simulation" else 1.00,
         ))
         self.pending_events: list[tuple[float, int, str, object]] = []
         self.event_counter = 0
@@ -1929,7 +1930,7 @@ class NavigationApp:
         self.radar_canvas.update_scene(
             radar_points,
             float(self.config.get("simulation_max_range_m", 3.0)
-                  if self.simulation is not None else self.config.get("display_radius_m", 0.60)),
+                  if self.simulation is not None else self.config.get("display_radius_m", 1.10)),
             self.latest_angle or 0.0,
             waiting_text,
         )

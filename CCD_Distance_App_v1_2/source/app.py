@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from core import Calibration, parse_reference, write_records
-from transport import SerialWorker, SyncWorker
+from transport import EXPOSURE_INDEX, SerialWorker, SyncWorker
 
 BG = "#f1f5f9"
 INK = "#172b4d"
@@ -21,7 +21,7 @@ MUTED = "#64748b"
 class DistanceApp:
     def __init__(self, root):
         self.root = root
-        root.title("CCD 测距工作台 1.1 · 连接诊断")
+        root.title("CCD 测距工作台 1.2 · 连接诊断")
         root.geometry("1160x850")
         root.minsize(960, 760)
         root.configure(bg=BG)
@@ -86,7 +86,7 @@ class DistanceApp:
         header.pack(fill="x")
         ttk.Label(header, text="CCD 测距工作台", font=("Microsoft YaHei UI", 23, "bold")).pack(side="left")
         ttk.Button(header, text="查看 / 复制通信日志", command=self.show_log).pack(side="right")
-        ttk.Label(outer, text="原始坐标 → 标定换算 → 与尺量距离对照   /   曝光档位 3", foreground=MUTED).pack(anchor="w", pady=(4, 12))
+        ttk.Label(outer, text="原始坐标 → 标定换算 → 与尺量距离对照   /   曝光档位 5", foreground=MUTED).pack(anchor="w", pady=(4, 12))
 
         connection = ttk.Frame(outer)
         connection.pack(fill="x")
@@ -102,7 +102,6 @@ class DistanceApp:
         self.demo_check = ttk.Checkbutton(connection, text="演示数据（无硬件）", variable=self.demo)
         self.demo_check.pack(side="right")
         self.sync_check = ttk.Checkbutton(connection, text="同步协议", variable=self.sync_mode)
-        self.sync_check.pack(side="right", padx=(0, 12))
         self.banner = tk.Label(outer, textvariable=self.status, anchor="w", bg="#e2e8f0", fg=INK, padx=12, pady=9)
         self.banner.pack(fill="x", pady=12)
         self.banner.bind("<Configure>", lambda e: self.banner.configure(wraplength=max(300,e.width-24)))
@@ -131,15 +130,12 @@ class DistanceApp:
         self.run_button = ttk.Button(controls, text="连续测量", command=self.toggle_continuous, style="Primary.TButton")
         self.run_button.pack(side="left")
         self.sync_button = ttk.Button(controls, text="开始同步扫描", command=self.toggle_sync, style="Primary.TButton")
-        self.sync_button.pack(side="left", padx=8)
         ttk.Label(controls, text="  采样间隔 ms").pack(side="left")
         self.interval_entry = ttk.Spinbox(controls, from_=200, to=10000, increment=100,
                                           textvariable=self.interval, width=6)
         self.interval_entry.pack(side="left", padx=5)
-        ttk.Label(controls, text="  同步频率 Hz").pack(side="left")
         self.sync_rate_entry = ttk.Spinbox(controls, from_=1, to=50, increment=1,
                                             textvariable=self.sync_rate, width=5)
-        self.sync_rate_entry.pack(side="left", padx=5)
         ttk.Label(controls, text="尺量距离 cm（可留空）").pack(side="left", padx=(14, 5))
         self.reference_entry = ttk.Entry(controls, textvariable=self.reference, width=9)
         self.reference_entry.pack(side="left")
@@ -171,10 +167,10 @@ class DistanceApp:
         tabs.pack(fill="both", expand=True)
         table_frame = ttk.Frame(tabs)
         tabs.add(table_frame, text="测量记录")
-        columns = ("seq", "time", "sample", "device", "x", "distance", "reference", "error", "state")
+        columns = ("seq", "time", "x", "distance", "reference", "error", "state")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=5)
-        for key, title, width in zip(columns, ("序号", "电脑接收时间", "同步序号", "设备时间 μs", "CCD 坐标", "距离 cm", "尺量 cm", "偏差 cm", "状态"),
-                                     (50, 120, 70, 120, 80, 80, 80, 80, 220)):
+        for key, title, width in zip(columns, ("序号", "电脑接收时间", "CCD 坐标", "距离 cm", "尺量 cm", "偏差 cm", "状态"),
+                                     (50, 130, 90, 90, 90, 90, 260)):
             self.table.heading(key, text=title)
             self.table.column(key, width=width, anchor="center", stretch=key == "state")
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
@@ -187,7 +183,7 @@ class DistanceApp:
         self.log_widget.pack(fill="both", expand=True)
         footer = ttk.Frame(outer)
         footer.pack(fill="x", pady=(6, 0))
-        ttk.Label(footer, text="静态模式记录电脑时间；同步模式显示设备时间和采样序号，角度等待传动协议接入。", foreground=MUTED,
+        ttk.Label(footer, text="电脑时间仅用于记录请求与回复；距离只在当前标定范围内换算。", foreground=MUTED,
                   font=("Microsoft YaHei UI", 9)).pack(side="left")
         ttk.Label(footer, textvariable=self.counter, foreground=MUTED).pack(side="right")
 
@@ -257,7 +253,7 @@ class DistanceApp:
         self.window.clear()
         self.chart_start = len(self.records)
         self.draw_chart()
-        self._reset_cards("正在连接；等待设备启动并设置曝光 3…")
+        self._reset_cards("正在连接；等待设备启动并设置曝光 5…")
         self.status.set("正在连接 {} · 请稍候".format(self.port_name))
         self.banner.configure(bg="#fef3c7")
         self.worker.start()
@@ -377,7 +373,7 @@ class DistanceApp:
                   "trigger_id": trigger_id, "ccd_x": x, "distance_cm": distance,
                   "reference_cm": reference, "error_cm": error, "status": state,
                   "calibration_id": calibration.identifier, "calibration_points": repr(calibration.points),
-                  "exposure_sent": 3}
+                  "exposure_sent": EXPOSURE_INDEX}
         self.records.append(record)
         self.distance_text.set("—" if distance is None else "{:.2f}".format(distance))
         self.coordinate_text.set("—" if x is None else str(x))
@@ -395,8 +391,6 @@ class DistanceApp:
                 len(values), statistics.median(values), min(values), max(values), max(values)-min(values), std))
         show = lambda value: "—" if value is None else "{:.2f}".format(value)
         self.table.insert("", "end", values=(record["sequence"], rx[11:23],
-            sample_id if sample_id != "" else "—",
-            device_begin_us if device_begin_us != "" else "—",
             x if x is not None else "—", show(distance), show(reference), show(error), tag + state))
         children = self.table.get_children()
         if len(children) > 200:
@@ -451,7 +445,7 @@ class DistanceApp:
                 elif self.sync_mode.get():
                     message = "已连接 {} · 同步协议就绪 · 点击「开始同步扫描」".format(self.port_name)
                 else:
-                    message = "已连接 {} · 曝光 3 已发送 · 点击「开启激光」".format(self.port_name)
+                    message = "已连接 {} · 曝光 5 已发送 · 点击「开启激光」".format(self.port_name)
                 self.status.set(message)
                 self.banner.configure(bg="#fef3c7" if self.source == "DEMO" else "#dcfce7")
             elif kind == "laser":

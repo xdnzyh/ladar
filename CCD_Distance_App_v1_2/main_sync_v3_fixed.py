@@ -26,7 +26,7 @@
 #   STATUS
 #   DEBUG 0/1
 #   INPUT USB/LORA/BOTH
-#   EXPOSURE 3
+#   EXPOSURE 5
 #   HELP
 #
 # Legacy raw CCD commands are supported while no synchronized scan is running:
@@ -49,10 +49,10 @@ import math
 # Keep the CCD-CAL prefix and BATCH=... field in STATUS for compatibility
 # with the existing static-verification desktop app. The synchronized
 # scanning commands from the classmate's protocol remain available.
-VERSION = "CCD-CAL-1.3-SYNC"
+VERSION = "MEASUREMENT_SYNC_CAL_V3"
 
 # -------------------- fixed hardware settings --------------------
-EXPOSURE_INDEX = 3
+EXPOSURE_INDEX = 5
 DEFAULT_INPUT_MODE = "BOTH"        # USB / LORA / BOTH
 DEFAULT_CENTER_MODE = "fffe"       # fffe / raw2
 LASER_PIN = 25                      # laser module IN/TTL input
@@ -739,14 +739,14 @@ class MeasurementNode:
 
     def help(self, source="USB"):
         lines = (
-            VERSION + " EXPOSURE FIXED AT 3",
+            VERSION + " EXPOSURE FIXED AT 5",
             "SYNC: SYNC <token>",
             "SCAN: START <session> <rate_hz> <exposure_field> <fffe|raw2>",
             "CAL: CAL <token> <exposure_field> <fffe|raw2>",
             "CMDS: PING, STOP, LASER 1, LASER 0, STATUS",
             "CMDS: MIN (or X/MEASURE), SAMPLE [n] (1..100)",
             "CMDS: DEBUG 1, DEBUG 0, INPUT USB/LORA/BOTH, HELP",
-            "EXPOSURE: fixed at 3; EXPOSURE 3 may be sent again",
+            "EXPOSURE: fixed at 5; EXPOSURE 5 may be sent again",
             "LEGACY: @c0071#@ or @c0081#@ while synchronized scan is stopped",
         )
         for line in lines:
@@ -873,11 +873,11 @@ class MeasurementNode:
                     self.respond(source, "ERR BUSY")
                     return
                 if self.apply_fixed_exposure():
-                    self.respond(source, "EXPOSURE SENT: 3 (NO READBACK VERIFICATION)")
+                    self.respond(source, "EXPOSURE SENT: 5 (NO READBACK VERIFICATION)")
                 else:
                     self.respond(source, "ERR EXPOSURE CCD_WRITE_FAILED")
             else:
-                self.respond(source, "ERR EXPOSURE FIXED AT 3")
+                self.respond(source, "ERR EXPOSURE FIXED AT 5")
             self.last_command_us = self.clock.now()
             return
 
@@ -945,7 +945,7 @@ class MeasurementNode:
                     # Raw exposure commands historically expect no radio text.
                     if source == "USB":
                         self.usb_print(
-                            "EXPOSURE SENT: 3 (NO READBACK VERIFICATION)"
+                            "EXPOSURE SENT: 5 (NO READBACK VERIFICATION)"
                         )
                 else:
                     self.respond(source, "ERR EXPOSURE CCD_WRITE_FAILED")

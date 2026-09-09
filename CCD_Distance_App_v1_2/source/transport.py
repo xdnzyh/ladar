@@ -9,6 +9,10 @@ import time
 from core import LineBuffer, parse_coordinate_line, parse_pix_line, parse_angle_line
 
 
+FIRMWARE_VERSION = "CCD-PEAK-RAW-CAL-3.0"
+EXPOSURE_INDEX = 5
+
+
 class LinkError(Exception):
     pass
 
@@ -140,10 +144,16 @@ class SerialWorker(threading.Thread):
         step("STOP", exact("OK STOP"))
         step("DEBUG 0", exact("OK DEBUG 0"))
         step("LASER 0", exact("OK LASER 0"))
-        status = step("STATUS", lambda s: s if s.startswith("STATUS CCD-CAL-") else None)
+        status_prefix = "STATUS " + FIRMWARE_VERSION + " "
+        status = step("STATUS", lambda s: s if s.startswith(status_prefix) else None)
         if "BATCH=0" not in status:
             raise LinkError("设备仍在批量采样；请复位后重连")
-        step("EXPOSURE 3", lambda s: s if s.startswith("EXPOSURE SENT: 3 ") and s.endswith("(NO READBACK VERIFICATION)") else None)
+        if "CMD=@c0071#@" not in status:
+            raise LinkError("测距固件未使用短坐标命令 @c0071#@")
+        step("EXPOSURE {}".format(EXPOSURE_INDEX), exact("EXPOSURE SENT: {}".format(EXPOSURE_INDEX)))
+        status = step("STATUS", lambda s: s if s.startswith(status_prefix) else None)
+        if "EXPOSURE_SENT={}".format(EXPOSURE_INDEX) not in status:
+            raise LinkError("曝光档位设置未确认")
         return status
 
     def run(self):
@@ -308,7 +318,7 @@ class SyncWorker(SerialWorker):
                     session = context.get("session_id", self.session)
                     rate_hz = float(context.get("rate_hz", self.rate_hz))
                     mode = context.get("mode", "fffe")
-                    command = "START {} {} 3 {}".format(session, rate_hz, mode)
+                    command = "START {} {} {} {}".format(session, rate_hz, EXPOSURE_INDEX, mode)
                     protocol.transact(command, exact("OK START " + session))
                     self.session = session
                     self.rate_hz = rate_hz

@@ -21,7 +21,7 @@ class CalibrationSessionTests(unittest.TestCase):
         self.app.root = Mock()
         self.app.current_pixel_var = Mock()
         self.app._log = Mock()
-        self.app._collect_config = lambda: {'ccd_parser': 'raw2', 'exposure_index': 8}
+        self.app._collect_config = lambda: {'ccd_parser': 'raw2', 'exposure_index': 5}
 
     def request(self, now):
         with patch('radar_app.time.perf_counter', return_value=now):

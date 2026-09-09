@@ -1,4 +1,4 @@
-# 历史兼容脚本：当前设备基准见 firmware_baseline/measurement_main_MEASUREMENT_SYNC_CAL_V3.py。
+# 历史兼容脚本：当前已烧录测距基准见 firmware_baseline/measurement_main_CCD_PEAK_RAW_CAL_3.py，同步候选见 firmware_candidates/。
 # 本文件仅保留供旧实验回放使用，不得作为当前设备的默认烧录对象。
 
 import utime

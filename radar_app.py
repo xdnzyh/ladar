@@ -48,14 +48,15 @@ DEFAULT_CONFIG = {
     "baudrate": 115200,
     "ccd_command": "@c0071#@",
     "ccd_parser": "fffe",
-    "exposure_index": 3,
-    "actual_exposure_index": 3,
+    "exposure_index": 5,
+    "actual_exposure_index": 5,
+    "calibration_firmware_version": "CCD-PEAK-RAW-CAL-3.0",
     "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
     "pixel_min": CCD_PIXEL_MIN,
     "pixel_max": CCD_PIXEL_MAX,
     "sample_rate_hz": 80.0,
-    "max_range_m": 3.0,
-    "min_range_m": 0.08,
+    "max_range_m": 1.0,
+    "min_range_m": 0.15,
     "angle_offset_deg": 0.0,
     "clockwise": True,
     "keep_revolutions": 3,
@@ -66,8 +67,8 @@ DEFAULT_CONFIG = {
 
 def load_config() -> dict:
     config = load_json_config(CONFIG_PATH, DEFAULT_CONFIG)
-    config["exposure_index"] = 3
-    config["actual_exposure_index"] = 3
+    config["exposure_index"] = 5
+    config["actual_exposure_index"] = 5
     config["pixel_min"] = CCD_PIXEL_MIN
     config["pixel_max"] = CCD_PIXEL_MAX
     if config.get("ccd_parser") not in {"fffe", "raw2", "ascii"}:
@@ -434,7 +435,7 @@ class RadarApp:
         parser_values = list(CCDFrameParser.MODES.values())
         parser_combo = self._labeled_combo(proto, 1, "返回帧格式", self.parser_var, parser_values)
         parser_combo.configure(state="readonly")
-        self._labeled_combo(proto, 2, "实际曝光", self.exposure_var, ["3"]).configure(state="readonly")
+        self._labeled_combo(proto, 2, "实际曝光", self.exposure_var, ["5"]).configure(state="readonly")
         self._labeled_entry(proto, 3, "采样频率 / Hz", self.sample_rate_var)
 
         ttk.Separator(parent).pack(fill="x", pady=16)
@@ -536,7 +537,7 @@ class RadarApp:
         self.command_var.set(str(self.config.get("ccd_command", "@c0071#@")))
         parser_mode = str(self.config.get("ccd_parser", "fffe"))
         self.parser_var.set(CCDFrameParser.MODES.get(parser_mode, CCDFrameParser.MODES["fffe"]))
-        self.exposure_var.set(3)
+        self.exposure_var.set(5)
         self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 80.0)))
         self.min_range_var.set(float(self.config.get("min_range_m", 0.08)))
         self.max_range_var.set(float(self.config.get("max_range_m", 3.0)))
@@ -553,8 +554,8 @@ class RadarApp:
             "baudrate": 115200,
             "ccd_command": self.command_var.get().strip() or "@c0071#@",
             "ccd_parser": parser_mode,
-            "exposure_index": 3,
-            "actual_exposure_index": 3,
+            "exposure_index": 5,
+            "actual_exposure_index": 5,
             "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
             "pixel_min": CCD_PIXEL_MIN,
             "pixel_max": CCD_PIXEL_MAX,
@@ -573,8 +574,8 @@ class RadarApp:
         config = dict(self.config)
         config["measurement_mode"] = config.get("ccd_parser", "fffe")
         config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 80.0))
-        config["exposure_index"] = 3
-        config["actual_exposure_index"] = 3
+        config["exposure_index"] = 5
+        config["actual_exposure_index"] = 5
         config["pixel_min"] = CCD_PIXEL_MIN
         config["pixel_max"] = CCD_PIXEL_MAX
         return config
@@ -672,8 +673,8 @@ class RadarApp:
         try:
             exposure = int(self.exposure_var.get())
             sample_rate = float(self.sample_rate_var.get())
-            if exposure != 3:
-                raise ValueError("当前测距固件实际曝光固定为 3")
+            if exposure != 5:
+                raise ValueError("当前标定对应曝光档位 5")
             if not 0.5 <= sample_rate <= 200:
                 raise ValueError("采样频率应为 0.5～200 Hz")
         except ValueError as exc:
@@ -695,7 +696,7 @@ class RadarApp:
         self.last_request_time = 0.0
         self.scan_button.configure(text="停止扫描")
         self.sync_points = []
-        self._log(f"同步扫描启动：实际曝光 3，请求频率 {sample_rate:g} Hz")
+        self._log(f"同步扫描启动：实际曝光 5，请求频率 {sample_rate:g} Hz")
 
     def stop_scan(self) -> None:
         if self.demo:

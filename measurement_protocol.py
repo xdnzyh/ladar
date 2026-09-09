@@ -66,7 +66,7 @@ def parse_observation(source, line, session, calibration, config):
         return DeviceObservation(
             "range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
             distance, pixel, status, status == "ok", session,
-            str(getattr(calibration, "model", "unknown")), distance_error,
+            str(getattr(calibration, "identifier", getattr(calibration, "model", "unknown"))), distance_error,
         )
     if source == "rotation" and parts[0] == "TRIG" and len(parts) == 4:
         sequence, tick = map(int, parts[2:])

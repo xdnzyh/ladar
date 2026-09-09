@@ -19,9 +19,10 @@ RUNTIME_DEFAULTS = {
     "safety_stop_distance_m": None,
     "safety_max_angle_error_deg": 15.0,
     "hardware_sample_rate_hz": 80.0,
-    "exposure_index": 3,
-    "actual_exposure_index": 3,
-    "measurement_firmware_version": "CCD-CAL-1.3-SYNC",
+    "exposure_index": 5,
+    "actual_exposure_index": 5,
+    "calibration_firmware_version": "CCD-PEAK-RAW-CAL-3.0",
+    "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
     "rotation_firmware_version": "ROTATION_SYNC_MP_V2",
     "pixel_min": 0,
     "pixel_max": 1500,
@@ -46,18 +47,18 @@ RUNTIME_DEFAULTS = {
     "measurement_mode": "fffe",
     "ccd_command": "@c0071#@",
     "sample_rate_hz": 80.0,
-    "min_range_m": 0.10,
-    "max_range_m": 0.50,
-    "hardware_min_range_m": 0.10,
-    "hardware_max_range_m": 0.50,
-    "display_radius_m": 0.60,
+    "min_range_m": 0.15,
+    "max_range_m": 1.00,
+    "hardware_min_range_m": 0.15,
+    "hardware_max_range_m": 1.00,
+    "display_radius_m": 1.10,
     "angle_offset_deg": 0.0,
     "clockwise": True,
     "radar_period_s": 1.5,
     "fusion_delay_ms": 80,
     "map_resolution_m": 0.02,
-    "map_width_cells": 100,
-    "map_height_cells": 100,
+    "map_width_cells": 120,
+    "map_height_cells": 120,
     "radar_offset_x_m": 0.0,
     "radar_offset_y_m": 0.0,
     "radar_offset_yaw_deg": 0.0,
@@ -154,7 +155,7 @@ def resolve_runtime_config(
     config["max_range_m"] = config["hardware_max_range_m"]
 
     mode_defaults = {
-        "hardware": (100, 100, 0.02),
+        "hardware": (120, 120, 0.02),
         "simulation": (180, 280, 0.04),
     }
     mode_prefix = f"{source}_map_"
@@ -225,7 +226,7 @@ def resolve_runtime_config(
     if config["radar_baudrate"] <= 0 or config["chassis_baudrate"] <= 0:
         raise RuntimeConfigError("串口波特率必须是正整数")
     config["baudrate"] = config["radar_baudrate"]
-    config["exposure_index"] = int(config.get("exposure_index", 3))
+    config["exposure_index"] = int(config.get("exposure_index", 5))
     config["actual_exposure_index"] = int(config.get("actual_exposure_index", config["exposure_index"]))
     if not 0 <= config["exposure_index"] <= 13 or not 0 <= config["actual_exposure_index"] <= 13:
         raise RuntimeConfigError("曝光档位必须在 0 到 13 之间")

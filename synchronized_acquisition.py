@@ -85,11 +85,13 @@ class SynchronizedAcquisition:
         self.state = "stopped"
         self.session = ""
         self.generation = 0
+        self.sync_started_at = -math.inf
         self.pending = self.receiver.pending
         self.clocks = {}
         self.sent_times = {}
         self.last_report = ""
         self.sync_stats = self._new_sync_stats()
+        self.received_bytes = {source: 0 for source in self.endpoints}
         self.ignored_counts = {source: {} for source in self.endpoints}
         self.recent_anomalies = deque(maxlen=8)
         self._last_diagnostic_at = -math.inf
@@ -132,6 +134,7 @@ class SynchronizedAcquisition:
         self.next_probe = {source: now + 0.1 for source in self.endpoints}
         self.last_sequence = {}
         self.sync_stats = self._new_sync_stats()
+        self.received_bytes = {source: 0 for source in self.endpoints}
         self.ignored_counts = {source: {} for source in self.endpoints}
         self.recent_anomalies.clear()
         self._last_diagnostic_at = -math.inf
@@ -286,6 +289,8 @@ class SynchronizedAcquisition:
             parser = self.parsers.get(source)
             if parser is None:
                 continue
+            if arrival >= self.sync_started_at:
+                self.received_bytes[source] = self.received_bytes.get(source, 0) + len(data)
             invalid_before = parser.invalid_frames
             for line in parser.feed(data):
                 self._line(source, line, arrival)
@@ -358,6 +363,30 @@ class SynchronizedAcquisition:
                 return
             self._stat(source, "sent")
 
+    def _sync_failure_message(self, source):
+        stats = self.sync_stats[source]
+        received = self.received_bytes.get(source, 0)
+        valid = len(self.exchanges[source])
+        attempts = self.attempts[source]
+        label = self._endpoint_label(source)
+        if received == 0:
+            return (f"校时失败：{label}未收到任何字节（已发送 {attempts} 次，"
+                    f"有效回应 {valid}/{SYNC_REQUIRED_EXCHANGES}）；请检查设备供电、无线链路、"
+                    "AUX/MD0/MD1 状态和实际固件")
+        if stats["token_mismatch"]:
+            return (f"校时失败：{label}收到 {received} 字节，但没有匹配本次 token 的回应（"
+                    f"有效回应 {valid}/{SYNC_REQUIRED_EXCHANGES}，token 不匹配 {stats['token_mismatch']} 条）")
+        if stats["format_error"] or stats["missing_send_time"] or stats["invalid_timestamp"]:
+            return (f"校时失败：{label}收到 {received} 字节，但有效 SYNC 仅 "
+                    f"{valid}/{SYNC_REQUIRED_EXCHANGES}（格式/时间字段无效 "
+                    f"{stats['format_error'] + stats['missing_send_time'] + stats['invalid_timestamp']} 条）")
+        if stats["ignored"]:
+            return (f"校时失败：{label}收到 {received} 字节，但没有有效 SYNC 回应（"
+                    f"有效回应 {valid}/{SYNC_REQUIRED_EXCHANGES}，无关回应 {stats['ignored']} 条）；"
+                    "请检查固件是否支持当前同步协议")
+        return (f"校时失败：{label}收到 {received} 字节，但没有有效 SYNC 回应（"
+                f"有效回应 {valid}/{SYNC_REQUIRED_EXCHANGES}）；请检查固件同步协议")
+
     def _sync_poll(self, now):
         if now - self.sync_started_at > SYNC_TOTAL_TIMEOUT_S:
             pending = [self._endpoint_label(source) for source in self.endpoints
@@ -377,7 +406,7 @@ class SynchronizedAcquisition:
             if now < self.next_probe[source]:
                 continue
             if self.attempts[source] >= SYNC_MAX_ATTEMPTS:
-                self._fail(f"校时失败：{self._endpoint_label(source)}响应丢失过多，请检查无线链路")
+                self._fail(self._sync_failure_message(source))
                 return
             self.attempts[source] += 1
             token = f"{self.session}-{self.attempts[source]}"
@@ -397,7 +426,7 @@ class SynchronizedAcquisition:
                 return
             try:
                 rate = float(self.config.get("hardware_sample_rate_hz", 80))
-                exposure = int(self.config.get("actual_exposure_index", self.config.get("exposure_index", 3)))
+                exposure = int(self.config.get("actual_exposure_index", self.config.get("exposure_index", 5)))
                 if not 1 <= rate <= 100 or not 0 <= exposure <= 13:
                     raise ValueError
             except (TypeError, ValueError, OverflowError):
