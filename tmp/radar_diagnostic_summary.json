@@ -1,0 +1,249 @@
+[
+  {
+    "folder": "tmp\\radar_diagnostic_20260910_144550",
+    "measurement_status": [
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CC"
+    ],
+    "measurement_errors": [],
+    "rotation_status": [
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=36 SESSION=- AUX=1 TXQ=0",
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=36 SESSION=- AUX=1 TXQ=1"
+    ],
+    "rotation_errors": [],
+    "sync_sweep_counts": [],
+    "sync_local_sweep_counts": [],
+    "foreign_rotation": [],
+    "errors": [
+      "校时失败：测距端(COM6)收到 68 字节，但有效 SYNC 仅 1/8（格式/时间字段无效 2 条）"
+    ]
+  },
+  {
+    "folder": "tmp\\radar_diagnostic_20260910_144838",
+    "measurement_status": [
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=2489 PIX_SENT=2489 CCD_TIMEOUTS=0 INVALID_FRAMES=0",
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=2489 PIX_SENT=2489 CCD_TIMEOUTS=0 INVALID_FRAMES=0"
+    ],
+    "measurement_errors": [],
+    "rotation_status": [
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=36 SESSION=- AUX=1 TXQ=0",
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=36 SESSION=- AUX=1 TXQ=0"
+    ],
+    "rotation_errors": [],
+    "sync_sweep_counts": [],
+    "sync_local_sweep_counts": [],
+    "foreign_rotation": [
+      "BURST,33736,8,5"
+    ],
+    "errors": []
+  },
+  {
+    "folder": "tmp\\radar_diagnostic_20260910_144953",
+    "measurement_status": [
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=50.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=0 PIX_SENT=0 CCD_TIMEOUTS=0 INVALID_FRAMES=0",
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=2 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=4409 PIX_SENT=4409 CCD_TIMEOUTS=0 INVALID_FRAMES=0"
+    ],
+    "measurement_errors": [],
+    "rotation_status": [
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=0 SESSION=- AUX=1 TXQ=0",
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=60 SESSION=- AUX=1 TXQ=0"
+    ],
+    "rotation_errors": [],
+    "pixels": 4367,
+    "sequence_span": 4409,
+    "rx_hz": 99.04895309612373,
+    "outside_calibration": 258,
+    "sync_sweep_counts": [
+      60,
+      63,
+      64,
+      63,
+      62,
+      60,
+      62,
+      64,
+      62,
+      65,
+      62,
+      64,
+      66,
+      69,
+      68,
+      70,
+      69,
+      67,
+      67,
+      69,
+      69,
+      68,
+      67,
+      67,
+      66,
+      69,
+      69,
+      66,
+      68,
+      68,
+      67,
+      69,
+      67,
+      71,
+      67,
+      68,
+      67,
+      65,
+      70,
+      67,
+      68,
+      66,
+      68,
+      67,
+      66,
+      67
+    ],
+    "sync_local_sweep_counts": [
+      33
+    ],
+    "foreign_rotation": [
+      "PIX 375f553d5612 3911 9581129",
+      "PIX 375f553d5612 3912 958239275f553d5612 3914 95841850 958",
+      "PIX 375f553d5612 3927 9597079PIX 375f553d5612 3931 9601100SYNC 375f553d5612-80 95433691 95434981",
+      "PIX 375f553d5612 3938 96080550 96096012 980",
+      "PIX 375f553d5612 3957 9627144",
+      "PIX 375f553d5612 4000 9670021",
+      "PIX 375f553d5612 4008 9678114",
+      "PIX 375f553d5612 4013 96830786 96835303 959",
+      "PIX 375f553d5612 4019 9689235",
+      "PIX 375f553d5612 4042 9712053",
+      "PIX 375f553d5612 4043 9713152",
+      "PIX 375f553d5612 4065 9735110",
+      "PIX 375f553d5612 4100 9770161",
+      "PIX 375f553d5612 4165 9835070TRIG 375f553d5612 57 97792356"
+    ],
+    "errors": []
+  },
+  {
+    "folder": "tmp\\radar_diagnostic_20260910_145448",
+    "measurement_status": [
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=4409 PIX_SENT=4409 CCD_TIMEOUTS=0 INVALID_FRAMES=0",
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=2 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=7818 PIX_SENT=7818 CCD_TIMEOUTS=0 INVALID_FRAMES=0"
+    ],
+    "measurement_errors": [],
+    "rotation_status": [
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=60 SESSION=- AUX=1 TXQ=0",
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=44 SESSION=- AUX=1 TXQ=0"
+    ],
+    "rotation_errors": [],
+    "pixels": 3313,
+    "sequence_span": 3409,
+    "rx_hz": 97.18414514616398,
+    "outside_calibration": 195,
+    "sync_sweep_counts": [
+      49,
+      52,
+      55,
+      67,
+      69,
+      67,
+      66,
+      69,
+      67,
+      67,
+      67,
+      65,
+      70,
+      67,
+      69,
+      66,
+      68,
+      66,
+      68,
+      66,
+      66,
+      66,
+      52,
+      57,
+      63,
+      65,
+      62,
+      59,
+      65,
+      67,
+      64,
+      62,
+      57,
+      64,
+      65
+    ],
+    "sync_local_sweep_counts": [
+      30,
+      39
+    ],
+    "foreign_rotation": [
+      "PIXSYNC 275998c6f516-21 357578512 357579787"
+    ],
+    "errors": []
+  },
+  {
+    "folder": "tmp\\radar_diagnostic_20260910_150130",
+    "measurement_status": [
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=7818 PIX_SENT=7818 CCD_TIMEOUTS=0 INVALID_FRAMES=0",
+      "STATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=1 AUX=1 DEBUG=0 INPUT=BOTH SCAN_ATTEMPTS=10727 PIX_SENT=10726 CCD_TIMEOUTS=0 INVALID_FRAMES=0"
+    ],
+    "measurement_errors": [],
+    "rotation_status": [
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=44 SESSION=- AUX=1 TXQ=0",
+      "STATUS ROTATION_SYNC_MP_V3_1 MOTOR=0 COUNT=41 SESSION=- AUX=1 TXQ=0"
+    ],
+    "rotation_errors": [
+      "ERROR COMMAND"
+    ],
+    "pixels": 2902,
+    "sequence_span": 2908,
+    "rx_hz": 99.79802338679471,
+    "outside_calibration": 188,
+    "sync_sweep_counts": [
+      51,
+      51,
+      52,
+      57,
+      54,
+      56,
+      51,
+      53,
+      52,
+      51,
+      48,
+      51,
+      50,
+      53,
+      53,
+      50,
+      54,
+      50,
+      50,
+      50,
+      50,
+      51,
+      50,
+      52,
+      52,
+      53,
+      52,
+      52,
+      66,
+      68,
+      66
+    ],
+    "sync_local_sweep_counts": [],
+    "foreign_rotation": [],
+    "errors": [],
+    "example_quality": {
+      "received": 71,
+      "invalid": 0,
+      "boundary": 7,
+      "timing_position": 16,
+      "kept": 48
+    },
+    "example_sequence": 12
+  }
+]

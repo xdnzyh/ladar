@@ -147,7 +147,10 @@ class RadarCanvas(tk.Canvas):
 
         self.create_text(22, 20, text="局部坐标 / 车头朝上", anchor="nw", fill=COLORS["muted"], font=("Microsoft YaHei UI", 10))
         if self.waiting_text:
-            self.create_text(cx, cy + radius * 0.62, text=self.waiting_text, fill=COLORS["yellow"], font=("Microsoft YaHei UI", 13, "bold"))
+            if self.points:
+                self.create_text(22, height - 22, text=self.waiting_text, anchor="sw", fill=COLORS["yellow"], font=("Microsoft YaHei UI", 10))
+            else:
+                self.create_text(cx, cy + radius * 0.62, text=self.waiting_text, fill=COLORS["yellow"], font=("Microsoft YaHei UI", 13, "bold"))
 
 
 class ScrollableTab(ttk.Frame):

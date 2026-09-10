@@ -370,14 +370,17 @@ class SimulationSource:
                     sweeps = self.hardware.advance(0.02)
                     safety_observations = list(self.hardware.last_safety_observations)
                     motion_completed = self.hardware.last_motion_completed
-                for sequence, points, period in sweeps:
-                    self.events.put(("simulation_sweep", (self.generation, sequence, points, period), started))
-                for sequence, points, period in self.hardware.last_local_results:
-                    self.events.put(("simulation_local_sweep", (self.generation, sequence, points, period), started))
-                for packet, estimate, simulation_time in safety_observations:
-                    self.events.put(("simulation_observation", (self.generation, packet, estimate, simulation_time), started))
-                if motion_completed:
-                    self.events.put(("simulation_motion_stopped", self.generation, started))
+                    # Publish the whole step atomically with its simulation time.
+                    # The UI must consume these observations before checking a
+                    # timeout against that time, including the completion event.
+                    for sequence, points, period in sweeps:
+                        self.events.put(("simulation_sweep", (self.generation, sequence, points, period), started))
+                    for sequence, points, period in self.hardware.last_local_results:
+                        self.events.put(("simulation_local_sweep", (self.generation, sequence, points, period), started))
+                    for packet, estimate, simulation_time in safety_observations:
+                        self.events.put(("simulation_observation", (self.generation, packet, estimate, simulation_time), started))
+                    if motion_completed:
+                        self.events.put(("simulation_motion_stopped", self.generation, started))
                 speed = max(0.1, float(self.config.get("simulation_speed", 1.0)))
                 deadline += 0.02 / speed
                 now = time.perf_counter()
@@ -1670,6 +1673,23 @@ class NavigationApp:
                 self._safety_stop(reason)
 
     def _safety_stop(self, reason):
+        if (getattr(self, "source", None) == "simulation" and self.running
+                and self.motion_safety.command is not None
+                and reason == "运动方向出现近距离障碍，紧急停车"):
+            command = self.motion_safety.command
+            with self.simulation.lock:
+                elapsed = self.simulation.hardware.time - self.motion_safety.started_at
+                self.simulation.hardware.stop()
+            self.motion_safety.clear()
+            self.motion_generation += 1
+            self.mapping_generation += 1
+            with self.mapping_lock:
+                self._clear_mapping_tasks()
+                self.navigator.request_obstacle_recovery(command, elapsed)
+            self.moving = False
+            self.accept_samples = True
+            self._log("近障碍保护：当前动作已停止，继续扫描并自动平移避让")
+            return
         self._send_chassis_stop()
         self._skip_next_chassis_stop = True
         self.stop()
@@ -1688,23 +1708,31 @@ class NavigationApp:
             if self.source == "hardware" and self.config.get("synchronized_acquisition", True):
                 self.sync.poll(now)
                 self._check_motion_safety(now)
-            event_limit = 2 if self.source == "simulation" else 64
-            for _ in range(event_limit):
-                try:
-                    kind, value, timestamp = self.events.get_nowait()
+            simulation_time = None
+            if self.source == "simulation" and self.simulation is not None:
+                # Capture a finite batch and its matching clock under the same
+                # lock used by the producer. Rendering delays must not look like
+                # missing sensor data; later steps wait until the next UI poll.
+                with self.simulation.lock:
+                    simulation_time = self.simulation.hardware.time
+                    batch = [self.events.get_nowait() for _ in range(self.events.qsize())]
+                for kind, value, timestamp in batch:
                     self._queue_event(str(kind), value, float(timestamp))
-                except queue.Empty:
-                    break
+            else:
+                for _ in range(64):
+                    try:
+                        kind, value, timestamp = self.events.get_nowait()
+                        self._queue_event(str(kind), value, float(timestamp))
+                    except queue.Empty:
+                        break
 
             delay = (0.0 if self.source == "simulation" or self.config.get("synchronized_acquisition", True)
                       else float(self.config.get("fusion_delay_ms", 80)) / 1000.0)
-            cutoff = now - delay
+            cutoff = time.perf_counter() if simulation_time is not None else now - delay
             while self.pending_events and self.pending_events[0][0] <= cutoff:
                 timestamp, _, kind, value = heapq.heappop(self.pending_events)
                 self._handle_event(kind, value, timestamp)
-            if self.source == "simulation" and self.running and self.moving and self.simulation is not None:
-                with self.simulation.lock:
-                    simulation_time = self.simulation.hardware.time
+            if simulation_time is not None and self.running and self.moving:
                 reason = self.motion_safety.poll(simulation_time)
                 if reason:
                     self._safety_stop(reason)
@@ -2323,6 +2351,12 @@ class NavigationApp:
             waiting_text = "等待转速估计" if self.simulation is not None else "等待零位"
         else:
             waiting_text = ""
+        if self.running and radar_points and self.source == "hardware" and receiver is not None:
+            if receiver.preview_points:
+                phase = "实时预览（尚未闭合）" if receiver.builder.samples else "闭合圈原始回波"
+            else:
+                phase = "最近有效扫描"
+            waiting_text = f"{phase} · {displayed_radar_count} 点"
         self.radar_canvas.update_scene(
             radar_points,
             float(self.config.get("simulation_max_range_m", 3.0)

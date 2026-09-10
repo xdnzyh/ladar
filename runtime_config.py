@@ -769,6 +769,11 @@ def build_navigation_engine(config: Mapping[str, object]):
         min_range_m=float(resolved["min_range_m"] if resolved["runtime_source"] == "hardware" else resolved["simulation_min_range_m"]),
         path_turn_penalty=float(resolved["path_turn_penalty"]),
         translation_capabilities=translation_capabilities,
+        safety_clearance_m=float(resolved['safety_clearance_m']),
+        safety_stop_distance_m=float(resolved.get('safety_stop_distance_m') or 0.0),
+        safety_max_observation_age_s=float(resolved['safety_max_observation_age_s']),
+        safety_speed_upper_bound_mps=(resolved.get('safety_speed_upper_bound_mps')
+                                      if resolved['runtime_source'] == 'hardware' else None),
     )
 
 

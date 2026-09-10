@@ -1,0 +1,108 @@
+{"host": 58143.5949198, "kind": "tx", "source": "measurement", "text": "STATUS"}
+{"host": 58143.595227, "kind": "tx", "source": "measurement", "text": "STATUS"}
+{"host": 58143.5953124, "kind": "tx", "source": "rotation", "text": "STATUS"}
+{"host": 58143.5953972, "kind": "tx", "source": "rotation", "text": "STATUS"}
+{"host": 58143.6365141, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58143.6371223, "kind": "rx", "source": "rotation", "hex": "544154555320524f544154494f4e5f53594e435f4d505f56335f31204d4f54", "text": "TATUS ROTATION_SYNC_MP_V3_1 MOT"}
+{"host": 58143.6391594, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 58143.6646782, "kind": "rx", "source": "rotation", "hex": "523d3020434f554e543d34312053455353494f4e3d2d204155583d31205458513d300d0a", "text": "R=0 COUNT=41 SESSION=- AUX=1 TXQ=0\r\n"}
+{"host": 58145.6007433, "kind": "stop_tx", "source": "measurement", "lines": ["STOP", "LASER 0"]}
+{"host": 58145.6030597, "kind": "stop_tx", "source": "rotation", "lines": ["OFF"]}
+{"host": 58145.604971, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 0/8"}
+{"host": 58145.6397506, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 58145.6400591, "kind": "rx", "source": "rotation", "hex": "4b204f46460d0a", "text": "K OFF\r\n"}
+{"host": 58145.6443508, "kind": "sync_diagnostic", "value": "旋转端(COM7)忽略无关或重复状态回应：OK OFF（累计 1 条）"}
+{"host": 58145.7053544, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-1"}
+{"host": 58145.7055319, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-1"}
+{"host": 58145.7503792, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58145.7505931, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3120313936343435333232372031", "text": "YNC 83f4c37fa6ed-1 1964453227 1"}
+{"host": 58145.7527215, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58145.7531054, "kind": "rx", "source": "rotation", "hex": "36343435343735360d0a", "text": "64454756\r\n"}
+{"host": 58145.7546481, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 1/8"}
+{"host": 58145.7883187, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-2"}
+{"host": 58145.8324848, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58145.8326103, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3220313936343533353433302031", "text": "YNC 83f4c37fa6ed-2 1964535430 1"}
+{"host": 58145.8349911, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58145.8352462, "kind": "rx", "source": "rotation", "hex": "36343533363935360d0a", "text": "64536956\r\n"}
+{"host": 58145.8376143, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 2/8"}
+{"host": 58145.8705181, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-3"}
+{"host": 58145.9148582, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58145.9149846, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3320313936343631373630372031", "text": "YNC 83f4c37fa6ed-3 1964617607 1"}
+{"host": 58145.9168149, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58145.916899, "kind": "rx", "source": "rotation", "hex": "36343631393133330d0a", "text": "64619133\r\n"}
+{"host": 58145.9203583, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 3/8"}
+{"host": 58145.9480348, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-4"}
+{"host": 58145.9927857, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58145.9929707, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3420313936343639353536392031", "text": "YNC 83f4c37fa6ed-4 1964695569 1"}
+{"host": 58145.994821, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58145.9949176, "kind": "rx", "source": "rotation", "hex": "36343639373039320d0a", "text": "64697092\r\n"}
+{"host": 58145.9976459, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 4/8"}
+{"host": 58146.0304577, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-5"}
+{"host": 58146.0751831, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58146.075673, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3520313936343737373734372031", "text": "YNC 83f4c37fa6ed-5 1964777747 1"}
+{"host": 58146.0771101, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58146.0772289, "kind": "rx", "source": "rotation", "hex": "36343737393236350d0a", "text": "64779265\r\n"}
+{"host": 58146.080736, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 5/8"}
+{"host": 58146.108099, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-6"}
+{"host": 58146.1527553, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58146.1531367, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3620313936343835353637322031", "text": "YNC 83f4c37fa6ed-6 1964855672 1"}
+{"host": 58146.1549325, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58146.1551094, "kind": "rx", "source": "rotation", "hex": "36343835373138360d0a", "text": "64857186\r\n"}
+{"host": 58146.1587557, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 6/8"}
+{"host": 58146.1865837, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-7"}
+{"host": 58146.2308862, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58146.2310908, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3720313936343933333537382031", "text": "YNC 83f4c37fa6ed-7 1964933578 1"}
+{"host": 58146.23294, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58146.2330762, "kind": "rx", "source": "rotation", "hex": "36343933353039360d0a", "text": "64935096\r\n"}
+{"host": 58146.2354977, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 7/8"}
+{"host": 58146.2631795, "kind": "tx", "source": "rotation", "text": "SYNC 83f4c37fa6ed-8"}
+{"host": 58146.3072815, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58146.3076389, "kind": "rx", "source": "rotation", "hex": "594e43203833663463333766613665642d3820313936353031303036382031", "text": "YNC 83f4c37fa6ed-8 1965010068 1"}
+{"host": 58146.3095105, "kind": "rx", "source": "rotation", "hex": "39", "text": "9"}
+{"host": 58146.3097232, "kind": "rx", "source": "rotation", "hex": "36353031313538360d0a", "text": "65011586\r\n"}
+{"host": 58146.3137392, "kind": "sync_status", "value": "双端校时：测距 0/8，旋转 8/8"}
+{"host": 58146.7099954, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-2"}
+{"host": 58147.7100418, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-3"}
+{"host": 58148.7140005, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-4"}
+{"host": 58149.7176025, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-5"}
+{"host": 58150.4318681, "kind": "rx", "source": "rotation", "hex": "72", "text": "r"}
+{"host": 58150.4321483, "kind": "rx", "source": "rotation", "hex": "756e5f6d733d36303030300d0a", "text": "un_ms=60000\r\n"}
+{"host": 58150.4372531, "kind": "sync_diagnostic", "value": "旋转端(COM7)忽略格式错误：run_ms=60000（累计 2 条）"}
+{"host": 58150.439814, "kind": "rx", "source": "rotation", "hex": "45", "text": "E"}
+{"host": 58150.4400226, "kind": "rx", "source": "rotation", "hex": "52524f5220434f4d4d414e440d0a", "text": "RROR COMMAND\r\n"}
+{"host": 58150.7229392, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-6"}
+{"host": 58151.2850803, "kind": "rx", "source": "rotation", "hex": "72", "text": "r"}
+{"host": 58151.2855121, "kind": "rx", "source": "rotation", "hex": "756e5f6d733d36303030300d0a", "text": "un_ms=60000\r\n"}
+{"host": 58151.6622121, "kind": "rx", "source": "rotation", "hex": "45", "text": "E"}
+{"host": 58151.6623248, "kind": "rx", "source": "rotation", "hex": "52524f5220434f4d4d414e440d0a", "text": "RROR COMMAND\r\n"}
+{"host": 58151.6638693, "kind": "sync_diagnostic", "value": "旋转端(COM7)忽略无效或不相关错误回应：ERROR COMMAND（累计 5 条）"}
+{"host": 58151.7244028, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-7"}
+{"host": 58152.7295994, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-8"}
+{"host": 58153.7300919, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-9"}
+{"host": 58154.7316531, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-10"}
+{"host": 58155.7325194, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-11"}
+{"host": 58156.7369464, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-12"}
+{"host": 58157.7411114, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-13"}
+{"host": 58158.741923, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-14"}
+{"host": 58159.7467494, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-15"}
+{"host": 58160.748623, "kind": "tx", "source": "measurement", "text": "SYNC 83f4c37fa6ed-16"}
+{"host": 58161.7544787, "kind": "stop_tx", "source": "measurement", "lines": ["STOP", "LASER 0"]}
+{"host": 58161.7549436, "kind": "stop_tx", "source": "rotation", "lines": ["OFF"]}
+{"host": 58161.7554469, "kind": "sync_error", "value": "校时失败：测距端(COM6)未收到任何字节（已发送 16 次，有效回应 0/8）；请检查设备供电、无线链路、AUX/MD0/MD1 状态和实际固件"}
+{"host": 58161.7555954, "kind": "summary", "state": "stopped", "counts": {"sync_status": 9, "sync_diagnostic": 3, "sync_error": 1}, "ignored": {"measurement": {}, "rotation": {"无关或重复状态回应": 1, "格式错误": 2, "无效或不相关错误回应": 2}}, "sync_stats": {"measurement": {"sent": 16, "success": 0, "timeout": 16, "token_mismatch": 0, "format_error": 0, "missing_send_time": 0, "invalid_timestamp": 0, "ignored": 0}, "rotation": {"sent": 8, "success": 8, "timeout": 0, "token_mismatch": 0, "format_error": 2, "missing_send_time": 0, "invalid_timestamp": 0, "ignored": 5}}}
+{"host": 58161.7557277, "kind": "stop_tx", "source": "measurement", "lines": ["STOP", "LASER 0"]}
+{"host": 58161.7561592, "kind": "stop_tx", "source": "rotation", "lines": ["OFF"]}
+{"host": 58161.7566425, "kind": "tx", "source": "measurement", "text": "STATUS"}
+{"host": 58161.7567412, "kind": "tx", "source": "rotation", "text": "STATUS"}
+{"host": 58161.792708, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 58161.7929064, "kind": "rx", "source": "rotation", "hex": "4b204f46460d0a", "text": "K OFF\r\n"}
+{"host": 58161.8019004, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 58161.8021116, "kind": "rx", "source": "rotation", "hex": "4b204f46460d0a", "text": "K OFF\r\n"}
+{"host": 58161.8104236, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 58161.8106229, "kind": "rx", "source": "rotation", "hex": "544154555320524f544154494f4e5f53594e435f4d505f56335f31204d4f54", "text": "TATUS ROTATION_SYNC_MP_V3_1 MOT"}
+{"host": 58161.8133357, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 58161.8135194, "kind": "rx", "source": "rotation", "hex": "523d3020434f554e543d34312053455353494f4e3d2d204155583d31205458", "text": "R=0 COUNT=41 SESSION=- AUX=1 TX"}
+{"host": 58161.814835, "kind": "rx", "source": "rotation", "hex": "51", "text": "Q"}
+{"host": 58161.8150733, "kind": "rx", "source": "rotation", "hex": "3d300d0a", "text": "=0\r\n"}
+{"host": 58162.4917428, "kind": "rx", "source": "rotation", "hex": "72", "text": "r"}
+{"host": 58162.4922602, "kind": "rx", "source": "rotation", "hex": "756e5f6d733d36303030300d0a", "text": "un_ms=60000\r\n"}

@@ -4,6 +4,21 @@ from scan_acquisition import DistanceObservationReceiver, HardwareObservation, R
 
 
 class DisplayAllScanPointsTests(unittest.TestCase):
+    def test_sparse_scan_reports_distance_dependent_timing_rejections(self):
+        builder = TimedSweepBuilder({"min_scan_points": 40})
+        builder.trigger(0, .02, 1)
+        builder.trigger(.8, .02, 2)
+        for n in range(80):
+            builder.sample(.8 + (n + .5) * .01, .02, 1000, .25 if n % 2 else .5)
+        builder.trigger(1.6, .02, 3)
+        counts = builder.last_quality_counts
+        self.assertEqual(counts["received"], 80)
+        self.assertGreater(counts["timing_position"], 0)
+        self.assertGreater(counts["boundary"], 0)
+        self.assertLess(counts["kept"], 50)
+        self.assertEqual(sum(counts[k] for k in ("invalid", "boundary", "timing_position", "kept")), 80)
+        self.assertEqual(len(builder.last_display_points), 80)
+
     def test_builder_keeps_low_confidence_points_for_display_only(self):
         builder = TimedSweepBuilder({"max_timing_position_error_m": 0.04})
         for n in range(4):

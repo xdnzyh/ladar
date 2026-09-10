@@ -17,6 +17,21 @@ class Endpoint:
 
 
 class RuntimeDiagnosticTests(unittest.TestCase):
+    def test_cross_channel_capture_is_identified_without_becoming_a_range(self):
+        acquisition, output = self.acquisition()
+        # COM7 capture from 2026-09-10: a measurement frame reached rotation.
+        line = f"PIX {acquisition.session} 3938 96080550 96096012 980"
+        acquisition._line("rotation", line, 10.0)
+        self.assertEqual(acquisition.ignored_counts["rotation"].get("跨端口数据"), 1)
+        self.assertFalse(any(kind == "sync_range" for kind, _, _ in output))
+        self.assertIn("跨端口", acquisition._runtime_status(10.0))
+
+    def test_foreign_burst_is_not_reported_as_a_broken_rotation_frame(self):
+        acquisition, _ = self.acquisition()
+        acquisition._line("rotation", "BURST,33736,8,5", 10.0)
+        self.assertEqual(acquisition.ignored_counts["rotation"].get("外来协议消息"), 1)
+        self.assertEqual(acquisition.sync_stats["rotation"]["format_error"], 0)
+
     def acquisition(self):
         output = []
         acquisition = SynchronizedAcquisition(

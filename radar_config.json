@@ -1,6 +1,6 @@
 {
-  "measurement_port": "",
-  "motor_port": "",
+  "measurement_port": "COM6",
+  "motor_port": "COM7",
   "baudrate": 115200,
   "ccd_command": "@c0071#@",
   "ccd_parser": "fffe",

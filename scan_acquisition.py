@@ -91,6 +91,7 @@ class TimedSweepBuilder:
         self.last_closed_period = None
         self.last_outcome = "waiting_for_zero"
         self.last_failure_reason = ""
+        self.last_quality_counts = {}
 
     def begin_after(self, timestamp):
         self.samples.clear()
@@ -98,6 +99,7 @@ class TimedSweepBuilder:
         self.reason = "等待停车后完整零位圈"
         self.last_display_points = []
         self.last_failure_reason = ""
+        self.last_quality_counts = {}
 
     def sample(self, timestamp, uncertainty, pixel, distance, is_echo=True,
                distance_error_m=None, calibration_version=None, source_session=None):
@@ -112,6 +114,7 @@ class TimedSweepBuilder:
         self.last_closed_points = []
         self.last_display_points = []
         self.last_closed_period = None
+        self.last_quality_counts = {}
         anchor, samples = self.anchor, self.samples
         self.anchor = (timestamp, uncertainty, count)
         self.samples = []
@@ -196,14 +199,20 @@ class TimedSweepBuilder:
             float(self.config.get("max_timing_position_error_m", 0.04)),
             float(self.config.get("hard_timing_position_error_m", 0.12)),
         )
+        counts = dict(received=len(samples), invalid=0, boundary=0, timing_position=0, kept=0)
         for stamp, error, pixel, distance, is_echo, distance_error_m, calibration_version, source_session in samples:
-            if (not all(math.isfinite(v) for v in (stamp, error, distance)) or error < 0
-                    or stamp - error < start + start_error or stamp + error >= timestamp - uncertainty):
+            if not all(math.isfinite(v) for v in (stamp, error, distance)) or error < 0:
+                counts["invalid"] += 1
+                self.rejected_points += 1
+                continue
+            if stamp - error < start + start_error or stamp + error >= timestamp - uncertainty:
+                counts["boundary"] += 1
                 self.rejected_points += 1
                 continue
             phase = (stamp - start) / period
             angular_error = math.tau * (error + (1 - phase) * start_error + phase * uncertainty) / lower_period
             if distance * angular_error > error_limit:
+                counts["timing_position"] += 1
                 self.rejected_points += 1
                 continue
             result.append(PolarPoint(
@@ -219,6 +228,32 @@ class TimedSweepBuilder:
                 source="range",
                 session=source_session,
             ))
+        if (self.config.get("runtime_source") == "hardware"
+                and self.config.get("runtime_view") == "radar"
+                and self.config.get("radar_structure_filter_enabled", True)):
+            # Radar-only mapping can use geometric evidence without pretending
+            # the clock became more accurate. Keep original point coordinates
+            # and uncertainty; navigation still uses the strict time gate above.
+            supported = line_supported_indices(self.last_display_points)
+            max_angle = math.radians(float(self.config.get("radar_structure_max_angle_deg", 25.0)))
+            max_position = float(self.config.get("radar_structure_max_position_error_m", 0.20))
+            structural = [
+                p for i, p in enumerate(self.last_display_points)
+                if i in supported and p.is_echo and p.angle_error_rad is not None
+                and math.isfinite(p.angle_error_rad)
+                and 0 <= p.angle_error_rad <= max_angle
+                and p.distance_m * p.angle_error_rad <= max_position
+            ]
+            old_times = {p.timestamp for p in result}
+            new_times = {p.timestamp for p in structural}
+            counts["timing_kept"] = len(result)
+            counts["structure_rescued"] = len(new_times - old_times)
+            counts["structure_rejected"] = len(old_times - new_times)
+            counts["structure_unsupported"] = len(self.last_display_points) - len(supported)
+            counts["structure_untrusted"] = len(supported) - len(structural)
+            result = structural
+        counts["kept"] = len(result)
+        self.last_quality_counts = counts
         self.last_closed_points = result
         required_stable_periods = max(1, int(self.config.get("formal_scan_stable_periods", 1)))
         if self.stable_periods < required_stable_periods:

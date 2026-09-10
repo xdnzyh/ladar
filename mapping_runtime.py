@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import math
 import threading
 import time
 from typing import Callable, Sequence
@@ -215,7 +216,26 @@ class MappingRuntime:
                     working.detail = selection.rejection_reason or "等待连续两圈墙面证据"
                     command = VelocityCommand()
                 else:
-                    command = working.process_scan(selection.points)
+                    # Wall fitting supplies obstacle evidence, but cannot describe
+                    # open directions. Keep explicit, valid max-range observations.
+                    clear_rays = tuple(
+                        point for point in request.points
+                        if point.is_echo is False
+                    )
+                    # Raw wall rays also prove free space up to the return,
+                    # even where line fitting discarded an endpoint. Keep these
+                    # separate so they cannot replace confirmed wall hits.
+                    approach_rays = tuple(
+                        replace(point, distance_m=point.distance_m - math.sqrt(2) * working.grid.resolution_m,
+                                is_echo=False, source="free_space")
+                        for point in request.points
+                        if point.has_echo(working.max_range_m)
+                        and math.isfinite(point.distance_m)
+                        and self.min_range_m <= point.distance_m <= working.max_range_m
+                    )
+                    command = working.process_scan(selection.points + clear_rays,
+                                                   free_space_points=approach_rays,
+                                                   obstacle_points=request.points)
             except BaseException as exc:
                 result = MappingResult(request, None, None, exc)
             else:

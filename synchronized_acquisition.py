@@ -255,6 +255,23 @@ class SynchronizedAcquisition:
         ]
         if last_failure and last_failure != current:
             lines.append(f"最近失败：{last_failure}")
+        quality = getattr(self.builder, "last_quality_counts", {})
+        if "structure_rescued" in quality:
+            lines.append(
+                f"最近闭合圈：标定有效 {quality['received']}，结构保留 {quality['kept']}；"
+                f"墙面恢复 {quality['structure_rescued']}，无连续结构 {quality['structure_unsupported']}，"
+                f"角度不可信 {quality['structure_untrusted']}"
+            )
+        elif quality:
+            lines.append(
+                f"最近闭合圈：标定有效 {quality['received']}，保留 {quality['kept']}；"
+                f"圈边界不确定 {quality['boundary']}，角度误差过大 {quality['timing_position']}，"
+                f"无效 {quality['invalid']}（以上为剔除点数）"
+            )
+        cross = sum(items.get("跨端口数据", 0) for items in self.ignored_counts.values())
+        foreign = sum(items.get("外来协议消息", 0) for items in self.ignored_counts.values())
+        if cross or foreign:
+            lines.append(f"链路串入：跨端口 {cross} 条，外来协议 {foreign} 条；检查无线信道/地址及接线隔离")
         return "\n".join(lines)
 
     def _publish_runtime_status(self, now: float) -> None:
@@ -551,6 +568,20 @@ class SynchronizedAcquisition:
             self._handle_stop_confirmation(source, parts)
             return
         command = parts[0].upper()
+        if ((command == "PIX" and source != "measurement")
+                or (command == "TRIG" and source != "rotation")):
+            first = not self.ignored_counts[source].get("跨端口数据", 0)
+            self._record_ignored(source, line, "跨端口数据", arrival)
+            if first:
+                self._diagnostic(
+                    f"{self._endpoint_label(source)}收到另一端的 {command} 数据，已隔离；"
+                    "检查无线信道/地址及串口接线，不能据此判定 CCD 或光电开关损坏",
+                    force=True, timestamp=arrival,
+                )
+            return
+        if command.startswith("BURST,"):
+            self._record_ignored(source, line, "外来协议消息", arrival)
+            return
         if command == "SYNC":
             if len(parts) != 4:
                 self._record_ignored(source, line, "格式错误", arrival, format_error=True)

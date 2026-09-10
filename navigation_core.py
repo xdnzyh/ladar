@@ -293,7 +293,32 @@ class OccupancyGrid:
         frees = {}
         out_of_bounds = 0
         valid_points = 0
-        for point in points:
+        valid = [point for point in points
+                 if math.isfinite(point.angle_rad) and math.isfinite(point.quality)
+                 and point.quality >= self.MIN_QUALITY
+                 and min_range_m <= point.distance_m <= max_range_m]
+        rays = list(valid)
+        if not add_only and len(valid) > 1:
+            ordered = sorted(valid, key=lambda point: point.angle_rad % math.tau)
+            for left, right in zip(ordered, ordered[1:] + ordered[:1]):
+                gap = (right.angle_rad - left.angle_rad) % math.tau
+                # Only bridge ordinary scan spacing, never an unobserved sector.
+                if not 0 < gap <= math.radians(5.0):
+                    continue
+                distance = min(left.distance_m, right.distance_m)
+                if left.has_echo(max_range_m) or right.has_echo(max_range_m):
+                    distance -= math.sqrt(2) * self.resolution_m
+                if distance < min_range_m:
+                    continue
+                steps = max(1, math.ceil(gap * distance / (0.5 * self.resolution_m)))
+                # Use the weaker ray's evidence; extra rays do not count as
+                # repeated observations (frees stores the maximum per cell).
+                quality = min(left.evidence_weight(self.resolution_m),
+                              right.evidence_weight(self.resolution_m))
+                for index in range(1, steps):
+                    rays.append(ScanPoint(left.angle_rad + gap * index / steps,
+                                          distance, quality, False))
+        for point in rays:
             if (not math.isfinite(point.angle_rad) or not math.isfinite(point.quality)
                     or point.quality < self.MIN_QUALITY
                     or not min_range_m <= point.distance_m <= max_range_m):
@@ -836,11 +861,20 @@ class NavigationEngine:
         min_range_m: float = 0.08,
         path_turn_penalty: float = PATH_TURN_PENALTY,
         translation_capabilities: Mapping[str, Mapping[str, object]] | None = None,
+        safety_clearance_m: float = 0.035,
+        safety_stop_distance_m: float = 0.0,
+        safety_max_observation_age_s: float = 0.0,
+        safety_speed_upper_bound_mps: float | None = None,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
         self.min_range_m = min_range_m
         self.robot_radius_m = robot_radius_m
+        self.safety_clearance_m = safety_clearance_m
+        self.safety_stop_distance_m = safety_stop_distance_m
+        self.safety_max_observation_age_s = safety_max_observation_age_s
+        self.safety_speed_upper_bound_mps = safety_speed_upper_bound_mps
+        self.recovery_requested = False
         self.sensor_offset_x_m = sensor_offset_x_m
         self.sensor_offset_y_m = sensor_offset_y_m
         self.sensor_offset_yaw_rad = sensor_offset_yaw_rad
@@ -925,6 +959,7 @@ class NavigationEngine:
         return normalized
 
     def reset(self) -> None:
+        self.recovery_requested = False
         self.grid.clear()
         self.pose = Pose2D()
         self.start_pose = Pose2D()
@@ -966,6 +1001,7 @@ class NavigationEngine:
         self.trajectory = [(0.0, 0.0)]
 
     def set_auto(self, enabled: bool) -> None:
+        self.recovery_requested = False
         self.auto_enabled = bool(enabled)
         if enabled:
             self.state = "准备探索"
@@ -1029,7 +1065,9 @@ class NavigationEngine:
         if math.hypot(self.pose.x - self.trajectory[-1][0], self.pose.y - self.trajectory[-1][1]) >= 0.04:
             self.trajectory.append((self.pose.x, self.pose.y))
 
-    def process_scan(self, points: Sequence[ScanPoint]) -> VelocityCommand:
+    def process_scan(self, points: Sequence[ScanPoint], *,
+                     free_space_points: Sequence[ScanPoint] = (),
+                     obstacle_points: Sequence[ScanPoint] = ()) -> VelocityCommand:
         self._last_scan_had_motion = self._motion_since_last_scan
         self._motion_since_last_scan = False
         self._last_scan_had_diagonal_motion = self._diagonal_motion_since_last_scan
@@ -1052,7 +1090,11 @@ class NavigationEngine:
             if previous is None or (point.quality, -point.distance_m) > (previous.quality, -previous.distance_m):
                 unique[key] = point
         valid = list(unique.values())
-        self.latest_scan = valid
+        self.latest_scan = valid + [point for point in obstacle_points
+                                    if math.isfinite(point.distance_m) and math.isfinite(point.angle_rad)
+                                    and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
+                                    and self.min_range_m <= point.distance_m <= self.max_range_m
+                                    and point.has_echo(self.max_range_m)]
         if len(valid) < 12:
             if self.auto_enabled and self.grid.update_count:
                 return self._reject_scan(0.0, f"有效点仅 {len(valid)} 个，停车重扫")
@@ -1125,7 +1167,8 @@ class NavigationEngine:
         self._predicted_motion_uncertainty_m = 0.0
         self._predicted_rotation_rad = 0.0
         self._predicted_motion_uncertainty_rad = 0.0
-        summary = self.grid.update_scan(self._sensor_pose(), valid, self.max_range_m, scan_confidence=score)
+        summary = self.grid.update_scan(self._sensor_pose(), valid + list(free_space_points),
+                                        self.max_range_m, scan_confidence=score)
         if summary.out_of_bounds_points:
             self.detail = f"本圈有 {summary.out_of_bounds_points} 个回波超出地图范围"
         if initializing:
@@ -1205,6 +1248,8 @@ class NavigationEngine:
         return VelocityCommand()
 
     def _plan_next_command(self) -> VelocityCommand:
+        if self.recovery_requested:
+            return self._recovery_command()
         start = self.grid.world_to_cell(self.pose.x, self.pose.y)
         clusters = self.grid.frontier_clusters()
         self.frontier_count = len(clusters)
@@ -1626,6 +1671,8 @@ class NavigationEngine:
                 self.state = "探索中"
                 self.detail = "保守45°平移，下一圈重新定位"
                 return diagonal
+        if candidates and last_reason == "最新雷达回波显示车体扫过距离不足":
+            return self._recovery_command()
         return self._set_motion_blocked(last_reason)
 
     @staticmethod
@@ -1740,6 +1787,7 @@ class NavigationEngine:
         self,
         command: VelocityCommand,
         blocked: set[tuple[int, int]] | None = None,
+        *, allow_backtracking: bool = False,
     ) -> tuple[VelocityCommand, str | None]:
         if command.stopped:
             return command, None
@@ -1792,7 +1840,7 @@ class NavigationEngine:
         route_distances, _ = self.grid.reachable_tree(route_start, blocked)
         current = self.grid.world_to_cell(self.pose.x, self.pose.y)
         current_progress = route_distances.get(current)
-        if current_progress is None or not self._is_forward_path(cells, route_distances, current_progress):
+        if not allow_backtracking and (current_progress is None or not self._is_forward_path(cells, route_distances, current_progress)):
             reason = "动作不满足单向路线进度约束"
             self._last_motion_rejection_reason = reason
             return VelocityCommand(), reason
@@ -1888,14 +1936,70 @@ class NavigationEngine:
         travel_angle = math.atan2(command.right_mps, command.forward_mps)
         travel_distance = speed * command.duration_s
         footprint_radius = self.robot_radius_m + 0.035
+        stopping_buffer = (self.robot_radius_m + self.safety_clearance_m
+                           + self.safety_stop_distance_m
+                           + max(speed, self.safety_speed_upper_bound_mps or 0.0)
+                           * self.safety_max_observation_age_s + 0.035)
         for point in self.latest_scan:
+            if not point.has_echo(self.max_range_m):
+                continue
             sensor_x, sensor_y = point.x, point.y
             body_x, body_y = self._sensor_to_body(sensor_x, sensor_y)
             along = body_y * math.cos(travel_angle) + body_x * math.sin(travel_angle)
             lateral = abs(body_x * math.cos(travel_angle) - body_y * math.sin(travel_angle))
-            if 0.0 < along < travel_distance + footprint_radius + 0.035 and lateral < footprint_radius:
+            error = max(0.0, point.angle_error_rad or 0.0)
+            margin = point.distance_m * math.sin(min(math.pi / 2, error)) + max(0.0, point.distance_error_m or 0.0)
+            if -margin <= along < travel_distance + stopping_buffer + margin and lateral < footprint_radius + margin:
                 return False
         return True
+
+    def request_obstacle_recovery(self, command: VelocityCommand, elapsed_s: float) -> None:
+        """Replace the unexecuted part of the motion prior; require a new scan."""
+        remaining = max(0.0, command.duration_s - max(0.0, elapsed_s))
+        self.pose.x, self.pose.y = self.pose.local_to_world(
+            -command.right_mps * remaining, -command.forward_mps * remaining)
+        self._predicted_travel_m = max(0.0, self._predicted_travel_m - math.hypot(command.right_mps, command.forward_mps) * remaining)
+        self._predicted_strafe_m = max(0.0, self._predicted_strafe_m - abs(command.right_mps) * remaining)
+        self._predicted_motion_uncertainty_m += 0.03
+        if self.trajectory:
+            self.trajectory[-1] = (self.pose.x, self.pose.y)
+        self.path_cells.clear()
+        self.target_cell = None
+        self.recovery_requested = True
+        self.state = "避障重规划"
+        self.detail = "已停止当前动作，等待新扫描后平移避让"
+
+    def _recovery_command(self) -> VelocityCommand:
+        echoes = [self._sensor_to_body(p.x, p.y) for p in self.latest_scan if p.has_echo(self.max_range_m)]
+        if not echoes:
+            return self._set_motion_blocked("等待新的障碍测距，暂不执行避让")
+        initial = min(math.hypot(x, y) for x, y in echoes)
+        candidates = []
+        for forward, right in ((1, 0), (0, 1), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            norm = math.hypot(forward, right)
+            velocity = VelocityCommand(0.1 * forward / norm, 0.1 * right / norm, duration_s=1)
+            capability = self._capability(self._translation_mode(velocity))
+            distance = min(0.15, float(capability['max_m']))
+            if not capability['enabled'] or distance < float(capability['min_m']):
+                continue
+            command = VelocityCommand(velocity.forward_mps, velocity.right_mps, duration_s=distance / 0.1)
+            guarded, _ = self._translation_guard(command, allow_backtracking=True)
+            if guarded.stopped:
+                continue
+            dx, dy = command.right_mps * command.duration_s, command.forward_mps * command.duration_s
+            end_clearance = min(math.hypot(x - dx, y - dy) for x, y in echoes)
+            if end_clearance < initial - 0.005:
+                continue
+            candidates.append((end_clearance - initial + 0.01 * forward, command))
+        if candidates:
+            command = max(candidates, key=lambda item: item[0])[1]
+            self.recovery_requested = False
+            self.state = "平移避让"
+            self.detail = "沿已扫描空闲区域短距离避让，随后重新规划"
+            return command
+        self.state = "等待避让空间"
+        self.detail = "继续扫描，当前没有满足间距的平移动作"
+        return VelocityCommand()
 
     def _collision_guard(self, command: VelocityCommand) -> VelocityCommand:
         if command.stopped:

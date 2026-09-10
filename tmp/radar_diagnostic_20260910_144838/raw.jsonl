@@ -1,0 +1,105 @@
+{"host": 56159.363142, "kind": "tx", "source": "measurement", "text": "STATUS"}
+{"host": 56159.3632895, "kind": "tx", "source": "rotation", "text": "STATUS"}
+{"host": 56159.4042499, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56159.4044445, "kind": "rx", "source": "rotation", "hex": "544154555320524f544154494f4e5f53594e435f4d505f56335f31204d4f54", "text": "TATUS ROTATION_SYNC_MP_V3_1 MOT"}
+{"host": 56159.4070037, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 56159.4073021, "kind": "rx", "source": "rotation", "hex": "523d3020434f554e543d33362053455353494f4e3d2d204155583d31205458", "text": "R=0 COUNT=36 SESSION=- AUX=1 TX"}
+{"host": 56159.4313616, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56159.4314564, "kind": "rx", "source": "measurement", "hex": "5441545553204d4541535552454d454e545f53594e435f43414c5f5633204c415345523d30204558504f535552455f46495845443d35204343445f51554152414e54494e45443d30205343414e3d302053455353494f4e3d2d204d4f44453d6666666520524154455f485a3d3130302e303030205345513d30205458513d30204155583d312044454255473d3020494e5055543d424f5448205343414e5f41", "text": "TATUS MEASUREMENT_SYNC_CAL_V3 LASER=0 EXPOSURE_FIXED=5 CCD_QUARANTINED=0 SCAN=0 SESSION=- MODE=fffe RATE_HZ=100.000 SEQ=0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOTH SCAN_A"}
+{"host": 56159.431537, "kind": "rx", "source": "rotation", "hex": "513d300d0a", "text": "Q=0\r\n"}
+{"host": 56159.4317965, "kind": "rx", "source": "measurement", "hex": "54", "text": "T"}
+{"host": 56159.4319679, "kind": "rx", "source": "measurement", "hex": "54454d5054533d32343839205049585f53454e543d32343839204343445f54", "text": "TEMPTS=2489 PIX_SENT=2489 CCD_T"}
+{"host": 56159.4356017, "kind": "rx", "source": "measurement", "hex": "49", "text": "I"}
+{"host": 56159.435702, "kind": "rx", "source": "measurement", "hex": "4d454f5554533d3020494e56414c49445f4652414d45533d300d0a", "text": "MEOUTS=0 INVALID_FRAMES=0\r\n"}
+{"host": 56161.4009621, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 56161.4011975, "kind": "rx", "source": "rotation", "hex": "4b204f46460d0a", "text": "K OFF\r\n"}
+{"host": 56161.4032503, "kind": "rx", "source": "measurement", "hex": "4f", "text": "O"}
+{"host": 56161.4033699, "kind": "rx", "source": "measurement", "hex": "4b2053544f500d0a", "text": "K STOP\r\n"}
+{"host": 56161.4067272, "kind": "rx", "source": "measurement", "hex": "4f", "text": "O"}
+{"host": 56161.4070509, "kind": "rx", "source": "measurement", "hex": "4b204c4153455220300d0a", "text": "K LASER 0\r\n"}
+{"host": 56162.364792, "kind": "tx", "source": "measurement", "text": "SYNC diag0"}
+{"host": 56162.4081559, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56162.4086612, "kind": "rx", "source": "measurement", "hex": "594e4320646961673020363836373638303938203638363736393333360d0a", "text": "YNC diag0 686768098 686769336\r\n"}
+{"host": 56163.0653377, "kind": "tx", "source": "measurement", "text": "SYNC diag1"}
+{"host": 56163.1051298, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56163.1053865, "kind": "rx", "source": "measurement", "hex": "594e4320646961673120363837343636373238203638373436373837330d0a", "text": "YNC diag1 687466728 687467873\r\n"}
+{"host": 56163.7657796, "kind": "tx", "source": "measurement", "text": "SYNC diag2"}
+{"host": 56163.808754, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56163.8090546, "kind": "rx", "source": "measurement", "hex": "594e4320646961673220363838313637363639203638383136383931370d0a", "text": "YNC diag2 688167669 688168917\r\n"}
+{"host": 56164.4665734, "kind": "tx", "source": "measurement", "text": "SYNC diag3"}
+{"host": 56164.5113337, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56164.5115194, "kind": "rx", "source": "measurement", "hex": "594e4320646961673320363838383638353937203638383837303130320d0a", "text": "YNC diag3 688868597 688870102\r\n"}
+{"host": 56164.9851486, "kind": "rx", "source": "rotation", "hex": "0d", "text": "\r"}
+{"host": 56164.9855869, "kind": "rx", "source": "rotation", "hex": "0a42555253542c33333733362c382c350d0a", "text": "\nBURST,33736,8,5\r\n"}
+{"host": 56165.1669101, "kind": "tx", "source": "measurement", "text": "SYNC diag4"}
+{"host": 56165.2173999, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56165.2175103, "kind": "rx", "source": "measurement", "hex": "594e4320646961673420363839353639393430203638393537313138320d0a", "text": "YNC diag4 689569940 689571182\r\n"}
+{"host": 56165.867286, "kind": "tx", "source": "measurement", "text": "SYNC diag5"}
+{"host": 56165.9090508, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56165.9093192, "kind": "rx", "source": "measurement", "hex": "594e4320646961673520363930323639323038203639303237303436320d0a", "text": "YNC diag5 690269208 690270462\r\n"}
+{"host": 56166.5677354, "kind": "tx", "source": "measurement", "text": "SYNC diag6"}
+{"host": 56166.609222, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56166.6094304, "kind": "rx", "source": "measurement", "hex": "594e4320646961673620363930393639333839203639303937303633390d0a", "text": "YNC diag6 690969389 690970639\r\n"}
+{"host": 56167.2683207, "kind": "tx", "source": "measurement", "text": "SYNC diag7"}
+{"host": 56167.3130716, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56167.3132695, "kind": "rx", "source": "measurement", "hex": "594e4320646961673720363931363731383239203639313637333037340d0a", "text": "YNC diag7 691671829 691673074\r\n"}
+{"host": 56167.9689577, "kind": "tx", "source": "measurement", "text": "SYNC diag8"}
+{"host": 56168.0088779, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56168.009057, "kind": "rx", "source": "measurement", "hex": "594e4320646961673820363932333730353131203639323337313634380d0a", "text": "YNC diag8 692370511 692371648\r\n"}
+{"host": 56168.6697634, "kind": "tx", "source": "measurement", "text": "SYNC diag9"}
+{"host": 56168.7128937, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56168.7130052, "kind": "rx", "source": "measurement", "hex": "594e4320646961673920363933303733303631203639333037343330360d0a", "text": "YNC diag9 693073061 693074306\r\n"}
+{"host": 56169.3704003, "kind": "tx", "source": "measurement", "text": "STATUS"}
+{"host": 56169.4265783, "kind": "rx", "source": "measurement", "hex": "53", "text": "S"}
+{"host": 56169.4268557, "kind": "rx", "source": "measurement", "hex": "5441545553204d4541535552454d454e545f53594e435f43414c5f5633204c", "text": "TATUS MEASUREMENT_SYNC_CAL_V3 L"}
+{"host": 56169.4292405, "kind": "rx", "source": "measurement", "hex": "41", "text": "A"}
+{"host": 56169.429337, "kind": "rx", "source": "measurement", "hex": "5345523d30204558504f535552455f46495845443d35204343445f51554152", "text": "SER=0 EXPOSURE_FIXED=5 CCD_QUAR"}
+{"host": 56169.4326358, "kind": "rx", "source": "measurement", "hex": "41", "text": "A"}
+{"host": 56169.4328846, "kind": "rx", "source": "measurement", "hex": "4e54494e45443d30205343414e3d302053455353494f4e", "text": "NTINED=0 SCAN=0 SESSION"}
+{"host": 56169.4358508, "kind": "rx", "source": "measurement", "hex": "3d", "text": "="}
+{"host": 56169.4361298, "kind": "rx", "source": "measurement", "hex": "2d204d4f44453d6666666520524154455f485a3d3130302e30303020534551", "text": "- MODE=fffe RATE_HZ=100.000 SEQ"}
+{"host": 56169.4399006, "kind": "rx", "source": "measurement", "hex": "3d", "text": "="}
+{"host": 56169.4401161, "kind": "rx", "source": "measurement", "hex": "30205458513d30204155583d312044454255473d3020494e5055543d424f54", "text": "0 TXQ=0 AUX=1 DEBUG=0 INPUT=BOT"}
+{"host": 56169.4422089, "kind": "rx", "source": "measurement", "hex": "48", "text": "H"}
+{"host": 56169.4424143, "kind": "rx", "source": "measurement", "hex": "205343414e5f415454454d5054533d32343839205049585f53454e543d3234", "text": " SCAN_ATTEMPTS=2489 PIX_SENT=24"}
+{"host": 56169.4449671, "kind": "rx", "source": "measurement", "hex": "38", "text": "8"}
+{"host": 56169.4451774, "kind": "rx", "source": "measurement", "hex": "39204343445f54494d454f5554533d3020494e56414c49445f4652414d4553", "text": "9 CCD_TIMEOUTS=0 INVALID_FRAMES"}
+{"host": 56169.4465624, "kind": "rx", "source": "measurement", "hex": "3d", "text": "="}
+{"host": 56169.4467029, "kind": "rx", "source": "measurement", "hex": "300d0a", "text": "0\r\n"}
+{"host": 56171.370704, "kind": "tx", "source": "rotation", "text": "SYNC diag0"}
+{"host": 56171.4128194, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56171.4130226, "kind": "rx", "source": "rotation", "hex": "594e4320646961673020363936313939313938203639363230303538300d0a", "text": "YNC diag0 696199198 696200580\r\n"}
+{"host": 56172.0715483, "kind": "tx", "source": "rotation", "text": "SYNC diag1"}
+{"host": 56172.1138968, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56172.1141268, "kind": "rx", "source": "rotation", "hex": "594e4320646961673120363936393030303338203639363930313431310d0a", "text": "YNC diag1 696900038 696901411\r\n"}
+{"host": 56172.77197, "kind": "tx", "source": "rotation", "text": "SYNC diag2"}
+{"host": 56172.8148537, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56172.8151216, "kind": "rx", "source": "rotation", "hex": "594e4320646961673220363937363031323030203639373630323539370d0a", "text": "YNC diag2 697601200 697602597\r\n"}
+{"host": 56173.4724631, "kind": "tx", "source": "rotation", "text": "SYNC diag3"}
+{"host": 56173.5143386, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56173.5145736, "kind": "rx", "source": "rotation", "hex": "594e4320646961673320363938333030363634203639383330323034300d0a", "text": "YNC diag3 698300664 698302040\r\n"}
+{"host": 56174.1731661, "kind": "tx", "source": "rotation", "text": "SYNC diag4"}
+{"host": 56174.216883, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56174.2170338, "kind": "rx", "source": "rotation", "hex": "594e4320646961673420363939303033313231203639393030343532340d0a", "text": "YNC diag4 699003121 699004524\r\n"}
+{"host": 56174.8739833, "kind": "tx", "source": "rotation", "text": "SYNC diag5"}
+{"host": 56174.918247, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56174.9187013, "kind": "rx", "source": "rotation", "hex": "594e4320646961673520363939373034323638203639393730353636330d0a", "text": "YNC diag5 699704268 699705663\r\n"}
+{"host": 56175.5743924, "kind": "tx", "source": "rotation", "text": "SYNC diag6"}
+{"host": 56175.6179736, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56175.6181647, "kind": "rx", "source": "rotation", "hex": "594e4320646961673620373030343034313234203730303430353533370d0a", "text": "YNC diag6 700404124 700405537\r\n"}
+{"host": 56176.2752839, "kind": "tx", "source": "rotation", "text": "SYNC diag7"}
+{"host": 56176.3182102, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56176.3183839, "kind": "rx", "source": "rotation", "hex": "594e4320646961673720373031313034353134203730313130353839380d0a", "text": "YNC diag7 701104514 701105898\r\n"}
+{"host": 56176.9757215, "kind": "tx", "source": "rotation", "text": "SYNC diag8"}
+{"host": 56177.0177998, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56177.0181296, "kind": "rx", "source": "rotation", "hex": "594e4320646961673820373031383034303032203730313830353430310d0a", "text": "YNC diag8 701804002 701805401\r\n"}
+{"host": 56177.67597, "kind": "tx", "source": "rotation", "text": "SYNC diag9"}
+{"host": 56177.7189917, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56177.7195621, "kind": "rx", "source": "rotation", "hex": "594e4320646961673920373032353035313530203730323530363533360d0a", "text": "YNC diag9 702505150 702506536\r\n"}
+{"host": 56178.3763787, "kind": "tx", "source": "rotation", "text": "STATUS"}
+{"host": 56178.4186347, "kind": "rx", "source": "rotation", "hex": "53", "text": "S"}
+{"host": 56178.4188097, "kind": "rx", "source": "rotation", "hex": "544154555320524f544154494f4e5f53594e435f4d505f56335f31204d4f54", "text": "TATUS ROTATION_SYNC_MP_V3_1 MOT"}
+{"host": 56178.4213749, "kind": "rx", "source": "rotation", "hex": "4f", "text": "O"}
+{"host": 56178.4214884, "kind": "rx", "source": "rotation", "hex": "523d3020434f554e543d33362053455353494f4e3d2d204155583d31205458", "text": "R=0 COUNT=36 SESSION=- AUX=1 TX"}
+{"host": 56178.4232111, "kind": "rx", "source": "rotation", "hex": "51", "text": "Q"}
+{"host": 56178.4233243, "kind": "rx", "source": "rotation", "hex": "3d300d0a", "text": "=0\r\n"}

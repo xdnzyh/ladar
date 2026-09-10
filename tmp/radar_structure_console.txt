@@ -1,0 +1,13 @@
+sync_status 双端校时：测距 0/8，旋转 0/8
+sync_diagnostic 旋转端(COM7)忽略无关或重复状态回应：OK OFF（累计 1 条）
+sync_status 双端校时：测距 0/8，旋转 1/8
+sync_status 双端校时：测距 0/8，旋转 2/8
+sync_status 双端校时：测距 0/8，旋转 3/8
+sync_status 双端校时：测距 0/8，旋转 4/8
+sync_status 双端校时：测距 0/8，旋转 5/8
+sync_status 双端校时：测距 0/8，旋转 6/8
+sync_status 双端校时：测距 0/8，旋转 7/8
+sync_status 双端校时：测距 0/8，旋转 8/8
+sync_error 校时失败：测距端(COM6)未收到任何字节（已发送 16 次，有效回应 0/8）；请检查设备供电、无线链路、AUX/MD0/MD1 状态和实际固件
+ARTIFACT tmp\radar_diagnostic_20260910_151940
+VERDICT ['no formal complete scans'] {'sync_status': 9, 'sync_diagnostic': 1, 'sync_error': 1}
