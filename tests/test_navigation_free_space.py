@@ -7,6 +7,45 @@ from navigation_core import HiddenWorld, NavigationEngine, OccupancyGrid, Pose2D
 
 
 class NavigationFreeSpaceTests(unittest.TestCase):
+    def test_hardware_opening_without_return_samples_allows_forward_motion(self):
+        from runtime_config import build_navigation_engine, resolve_runtime_config
+        import json
+        from pathlib import Path
+        config = json.loads((Path(__file__).resolve().parents[1] / 'navigation_config.json').read_text(encoding='utf-8'))
+        navigator = build_navigation_engine(resolve_runtime_config('hardware', 'navigation', config))
+        navigator.set_auto(True)
+        world = HiddenWorld(map_data={
+            'bounds': {'min_x': -5, 'max_x': 5, 'min_y': -5, 'max_y': 5},
+            'start': {'x': 0, 'y': 0, 'yaw_deg': 0},
+            'finish': {'x': 0, 'y': 4},
+            'obstacles': [
+                {'x1': -0.6, 'y1': -0.5, 'x2': -0.6, 'y2': 4},
+                {'x1': 0.6, 'y1': -0.5, 'x2': 0.6, 'y2': 4},
+                {'x1': -0.6, 'y1': -0.5, 'x2': 0.6, 'y2': -0.5},
+            ],
+        })
+        points = []
+        for degree in range(0, 360, 2):
+            angle = math.radians(degree)
+            distance = world.ray_distance(angle, 1.0)
+            if distance < 1.0:
+                points.append(ScanPoint(angle, distance, is_echo=True))
+        import queue
+        output = queue.Queue()
+        runtime = MappingRuntime(navigator, on_result=output.put)
+        try:
+            commands = []
+            for sequence in range(6):
+                runtime.submit('opening', sequence, points)
+                result = output.get(timeout=10)
+                self.assertIsNone(result.error)
+                commands.append(result.command)
+            self.assertEqual(navigator.grid.state(*navigator.grid.world_to_cell(0, 0.8)), OccupancyGrid.FREE)
+            self.assertEqual(navigator.grid.state(*navigator.grid.world_to_cell(0, 1.1)), OccupancyGrid.UNKNOWN)
+            self.assertTrue(any(c and c.forward_mps > 0 for c in commands), (navigator.state, navigator.detail))
+        finally:
+            runtime.stop()
+
     def test_runtime_preserves_open_forward_sector(self):
         world = HiddenWorld(map_data={
             'bounds': {'min_x': -5, 'max_x': 5, 'min_y': -5, 'max_y': 5},

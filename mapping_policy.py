@@ -570,6 +570,36 @@ class TwoSweepWallEvidence:
         )
 
 
+def complete_open_scan(points, clear_range_m, max_range_m, min_range_m, resolution_m):
+    """Apply the hardware's bounded open-space assumption to a completed scan.
+
+    This is an assumption, not measured clearance. Raw returns (including ones
+    rejected by wall fitting) cast a shadow so supplementation cannot erase them.
+    Empty/insufficient scans do not provide a basis for this policy.
+    """
+    valid = [p for p in points if math.isfinite(p.angle_rad)
+             and math.isfinite(p.distance_m) and math.isfinite(p.quality)
+             and p.quality >= 0.25 and min_range_m <= p.distance_m <= max_range_m]
+    if clear_range_m <= 0 or len(valid) < 12:
+        return tuple(points)
+    limit = min(clear_range_m, max_range_m)
+    supplemented = list(points)
+    for degree in range(0, 360, 2):
+        angle = math.radians(degree)
+        distance = limit
+        for point in valid:
+            gap = abs((point.angle_rad - angle + math.pi) % math.tau - math.pi)
+            # Cover scan spacing, cell width and measured angular uncertainty.
+            shadow = (math.radians(3) + math.atan2(math.sqrt(2) * resolution_m, point.distance_m)
+                      + max(0.0, point.angle_error_rad or 0.0))
+            if gap <= shadow:
+                distance = min(distance, point.distance_m - (
+                    math.sqrt(2) * resolution_m if point.has_echo(max_range_m) else 0.0))
+        if distance >= min_range_m:
+            supplemented.append(ScanPoint(angle, distance, is_echo=False, source='assumed_open'))
+    return tuple(supplemented)
+
+
 def prepare_free_space_points(points, max_range_m, min_range_m, resolution_m):
     result = []
     for point in points:

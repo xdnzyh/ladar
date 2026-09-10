@@ -887,9 +887,11 @@ class NavigationEngine:
         safety_stop_distance_m: float = 0.0,
         safety_max_observation_age_s: float = 0.0,
         safety_speed_upper_bound_mps: float | None = None,
+        unobserved_clear_range_m: float = 0.0,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
+        self.unobserved_clear_range_m = min(max_range_m, max(0.0, unobserved_clear_range_m))
         self.min_range_m = min_range_m
         self.robot_radius_m = robot_radius_m
         self.safety_clearance_m = safety_clearance_m

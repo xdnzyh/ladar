@@ -9,7 +9,7 @@ import time
 from typing import Callable, Sequence
 
 from mapping_policy import (TwoSweepWallEvidence, prepare_mapping_points,
-                            prepare_free_space_points, process_radar_debug_scan)
+                            complete_open_scan, prepare_free_space_points, process_radar_debug_scan)
 from navigation_core import NavigationEngine, Pose2D, ScanPoint, VelocityCommand
 
 
@@ -194,7 +194,10 @@ class MappingRuntime:
                 working = deepcopy(self.navigator)
                 wall_evidence = deepcopy(self._wall_evidence)
             try:
-                free_rays = prepare_free_space_points(request.points, working.max_range_m,
+                scan_points = complete_open_scan(
+                    request.points, working.unobserved_clear_range_m, working.max_range_m,
+                    self.min_range_m, working.grid.resolution_m)
+                free_rays = prepare_free_space_points(scan_points, working.max_range_m,
                                                       self.min_range_m, working.grid.resolution_m)
                 selection = prepare_mapping_points(
                     request.points,
@@ -227,7 +230,7 @@ class MappingRuntime:
                     # Wall fitting supplies obstacle evidence, but cannot describe
                     # open directions. Keep explicit, valid max-range observations.
                     clear_rays = tuple(
-                        point for point in request.points
+                        point for point in scan_points
                         if point.is_echo is False
                     )
                     command = working.process_scan(selection.points + clear_rays,

@@ -3,7 +3,7 @@ import queue
 import unittest
 from unittest.mock import Mock
 
-from mapping_policy import prepare_free_space_points
+from mapping_policy import complete_open_scan, prepare_free_space_points
 from mapping_runtime import MappingRuntime
 from measurement_protocol import parse_observation
 from navigation_core import NavigationEngine, OccupancyGrid, Pose2D, ScanPoint
@@ -11,6 +11,23 @@ from scan_acquisition import TimedSweepBuilder
 
 
 class HardwareFreeSpaceTests(unittest.TestCase):
+    def test_assumed_open_space_preserves_raw_wall_shadow_and_one_metre_limit(self):
+        raw = [ScanPoint(math.radians(angle), 0.5, is_echo=True)
+               for angle in range(-12, 13, 2)]
+        points = complete_open_scan(raw, 1, 1, 0.15, 0.02)
+        grid = OccupancyGrid(160, 160, 0.02)
+        for _ in range(4):
+            grid.update_scan(Pose2D(), points, 1, add_only=True)
+        self.assertEqual(grid.state(*grid.world_to_cell(0, 0.5)), grid.OCCUPIED)
+        self.assertEqual(grid.state(*grid.world_to_cell(0, 0.8)), grid.UNKNOWN)
+        self.assertEqual(grid.state(*grid.world_to_cell(0.8, 0)), grid.FREE)
+        self.assertEqual(grid.state(*grid.world_to_cell(1.1, 0)), grid.UNKNOWN)
+
+    def test_open_space_assumption_requires_scan_and_is_disabled_for_simulation(self):
+        self.assertEqual(complete_open_scan([], 1, 1, 0.15, 0.02), ())
+        raw = tuple(ScanPoint(math.radians(a), 0.5, is_echo=True) for a in range(12))
+        self.assertEqual(complete_open_scan(raw, 0, 3, 0.08, 0.04), raw)
+
     def test_valid_no_echo_and_beyond_range_are_free_but_invalid_measurements_are_not(self):
         calibration = Mock()
         calibration.distance.return_value = 2.0

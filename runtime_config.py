@@ -805,6 +805,7 @@ def build_navigation_engine(config: Mapping[str, object]):
         }
     return NavigationEngine(
         grid,
+        unobserved_clear_range_m=1.0 if resolved['runtime_source'] == 'hardware' else 0.0,
         max_range_m=float(resolved["max_range_m"] if resolved["runtime_source"] == "hardware" else resolved["simulation_max_range_m"]),
         robot_radius_m=float(resolved["robot_radius_m"]),
         sensor_offset_x_m=float(resolved["radar_offset_x_m"]),
