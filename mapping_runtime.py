@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import threading
 import time
@@ -188,9 +188,14 @@ class MappingRuntime:
                 if self._stop:
                     return
                 request = self._pending.popleft()
-                if (request.generation != self._generation
-                        or request.base_state_version != self._state_version):
+                if request.generation != self._generation:
                     continue
+                # Queued scans contain sensor observations, not a computation
+                # against the map at submit time. Start each one from the latest
+                # committed map so the preceding scan cannot invalidate it.
+                # Keep the version check at commit to reject work invalidated
+                # by a stop, reset, or pose change while processing.
+                request = replace(request, base_state_version=self._state_version)
                 working = deepcopy(self.navigator)
                 wall_evidence = deepcopy(self._wall_evidence)
             try:
