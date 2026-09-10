@@ -888,10 +888,12 @@ class NavigationEngine:
         safety_max_observation_age_s: float = 0.0,
         safety_speed_upper_bound_mps: float | None = None,
         unobserved_clear_range_m: float = 0.0,
+        prefer_forward_exploration: bool = False,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
         self.unobserved_clear_range_m = min(max_range_m, max(0.0, unobserved_clear_range_m))
+        self.prefer_forward_exploration = bool(prefer_forward_exploration)
         self.min_range_m = min_range_m
         self.robot_radius_m = robot_radius_m
         self.safety_clearance_m = safety_clearance_m
@@ -1282,8 +1284,24 @@ class NavigationEngine:
         self.frontier_count = len(clusters)
         self.reachable_frontier_count = 0
 
+        if self.prefer_forward_exploration:
+            forward = self._forward_exploration_command()
+            if not forward.stopped:
+                self._empty_frontier_scans = 0
+                self._terminal_evidence_scans = 0
+                self._terminal_signature = None
+                self._no_route_turns = 0
+                self._parking_search_attempts = 0
+                self._parking_goal = None
+                self.path_cells = self._motion_cells(forward)
+                self.target_cell = self.path_cells[-1]
+                self.last_progress_angle_world = self.pose.yaw
+                self.state = "直行探索"
+                self.detail = f"前方可通行，优先直行 {self._command_distance(forward):.2f} m，停车后重扫"
+                return forward
+
         if clusters:
-            best: tuple[float, list[tuple[int, int]], tuple[int, int]] | None = None
+            candidates: list[tuple[float, list[tuple[int, int]], tuple[int, int]]] = []
             clearance = self.robot_radius_m + 0.02
             blocked = self.grid.inflated_obstacles(clearance)
             route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
@@ -1302,16 +1320,15 @@ class NavigationEngine:
                 self.reachable_frontier_count += 1
                 progress = route_distances.get(goal, 0.0)
                 score = progress * 1.5 + min(40, len(cluster)) * 0.25 - len(path) * 0.20
-                if best is None or score > best[0]:
-                    best = score, path, goal
-            if best is not None:
+                candidates.append((score, path, goal))
+            for _, path, goal in sorted(candidates, key=lambda item: item[0], reverse=True):
                 self._empty_frontier_scans = 0
                 self._terminal_evidence_scans = 0
                 self._terminal_signature = None
                 self._no_route_turns = 0
                 self._parking_search_attempts = 0
                 self._parking_goal = None
-                _, path, self.target_cell = best
+                self.target_cell = goal
                 straight_path = self.grid.astar(
                     start,
                     self.target_cell,
@@ -1325,7 +1342,12 @@ class NavigationEngine:
                 self.path_cells = self._compress_straight_runs(path)
                 self.state = "探索中"
                 self.detail = f"沿单向通道前进，可达前沿 {self.reachable_frontier_count} 个"
-                return self._command_along_path()
+                command = self._command_along_path()
+                if not command.stopped:
+                    return command
+
+        self.path_cells.clear()
+        self.target_cell = None
 
         probe = self._corridor_probe_command()
         if not probe.stopped:
@@ -1455,6 +1477,29 @@ class NavigationEngine:
             return False
         self._terminal_signature = signature
         return True
+
+    def _forward_exploration_command(self) -> VelocityCommand:
+        capability = self._capability("W")
+        if not capability["enabled"]:
+            return VelocityCommand()
+        maximum = min(float(capability["max_m"]), self.MAX_MOTION_SEGMENT_M)
+        if self.match_score < 0.75:
+            maximum = min(maximum, 0.14 * 0.38)
+        minimum = max(float(capability["min_m"]), min(0.05, maximum))
+        if maximum <= 0 or maximum < minimum:
+            return VelocityCommand()
+        # Test only body-forward translations. A wider side opening must not
+        # deflect a safe straight run. Every step keeps the normal full guard.
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
+        distance = maximum
+        while True:
+            command = VelocityCommand(forward_mps=0.14, duration_s=distance / 0.14)
+            guarded, _ = self._translation_guard(command, blocked)
+            if not guarded.stopped:
+                return guarded
+            if distance <= minimum + 1e-9:
+                return VelocityCommand()
+            distance = max(minimum, distance - self.grid.resolution_m)
 
     def _corridor_probe_command(self) -> VelocityCommand:
         if not self.latest_scan:
