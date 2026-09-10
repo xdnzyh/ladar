@@ -95,6 +95,8 @@ class SynchronizedAcquisition:
         self.ignored_counts = {source: {} for source in self.endpoints}
         self.recent_anomalies = deque(maxlen=8)
         self._last_diagnostic_at = -math.inf
+        self._last_runtime_status_at = -math.inf
+        self._last_runtime_signature = None
         self.stop_status = {source: {"written": False, "confirmed": False} for source in self.endpoints}
         self.stop_pending = set()
         self.stop_deadline = -math.inf
@@ -138,6 +140,8 @@ class SynchronizedAcquisition:
         self.ignored_counts = {source: {} for source in self.endpoints}
         self.recent_anomalies.clear()
         self._last_diagnostic_at = -math.inf
+        self._last_runtime_status_at = -math.inf
+        self._last_runtime_signature = None
         self.stop_pending.clear()
         self.stop_deadline = -math.inf
         self.last_arrival = {source: now for source in self.endpoints}
@@ -211,6 +215,80 @@ class SynchronizedAcquisition:
         if message != self.last_report:
             self.last_report = message
             self.emit("sync_status", message, time.perf_counter())
+
+    @staticmethod
+    def _age_text(now: float, timestamp: float, available: bool = True) -> str:
+        if not available or not math.isfinite(timestamp):
+            return "—"
+        return f"{max(0.0, now - timestamp):.1f}s"
+
+    def _runtime_status(self, now: float) -> str:
+        raw_rotation = self.raw_progress.get("rotation")
+        raw_seq = raw_rotation[0] if raw_rotation is not None else None
+        valid_seq = self.last_sequence.get("rotation")
+        anchor = getattr(self.builder, "anchor", None)
+        anchor_seq = anchor[2] if anchor is not None and len(anchor) >= 3 else None
+        period = getattr(self.builder, "period_s", None)
+        period_text = "—" if period is None or not math.isfinite(period) else f"{period:.3f}s"
+        valid_age = self._age_text(now, self.last_valid_rotation, valid_seq is not None)
+        samples = len(getattr(self.builder, "samples", ()))
+        conflicts = getattr(self.receiver, "timestamp_conflicts", {})
+        measurement_time_bad = (
+            int(self.sync_stats["measurement"].get("invalid_timestamp", 0))
+            + int(conflicts.get("range", 0))
+        )
+        rotation_time_bad = (
+            int(self.sync_stats["rotation"].get("invalid_timestamp", 0))
+            + int(conflicts.get("rotation", 0))
+        )
+        rotation_ignored = sum(self.ignored_counts.get("rotation", {}).values())
+        current = str(getattr(self.builder, "reason", "等待扫描"))
+        last_failure = str(getattr(self.builder, "last_failure_reason", "") or "").strip()
+        seq_text = "/".join("—" if value is None else str(value)
+                            for value in (raw_seq, valid_seq, anchor_seq))
+        lines = [
+            current,
+            f"TRIG 收/有效/锚点 {seq_text} ｜ 距有效TRIG {valid_age} ｜ 周期 {period_text}",
+            (f"本圈 {samples} 点 ｜ 完整/丢弃/预热 {self.receiver.accepted}/"
+             f"{self.receiver.discarded}/{self.receiver.warmup} ｜ 时间异常 测距{measurement_time_bad} "
+             f"零位{rotation_time_bad} ｜ 旋转忽略 {rotation_ignored}"),
+        ]
+        if last_failure and last_failure != current:
+            lines.append(f"最近失败：{last_failure}")
+        return "\n".join(lines)
+
+    def _publish_runtime_status(self, now: float) -> None:
+        raw_rotation = self.raw_progress.get("rotation")
+        raw_seq = raw_rotation[0] if raw_rotation is not None else None
+        valid_seq = self.last_sequence.get("rotation")
+        anchor = getattr(self.builder, "anchor", None)
+        anchor_seq = anchor[2] if anchor is not None and len(anchor) >= 3 else None
+        last_failure = str(getattr(self.builder, "last_failure_reason", "") or "")
+        conflicts = getattr(self.receiver, "timestamp_conflicts", {})
+        age_bucket = None
+        if valid_seq is not None and math.isfinite(self.last_valid_rotation):
+            age_bucket = int(max(0.0, now - self.last_valid_rotation))
+        signature = (
+            str(getattr(self.builder, "reason", "")),
+            last_failure,
+            raw_seq,
+            valid_seq,
+            anchor_seq,
+            self.receiver.accepted,
+            self.receiver.discarded,
+            self.receiver.warmup,
+            int(self.sync_stats["measurement"].get("invalid_timestamp", 0)),
+            int(self.sync_stats["rotation"].get("invalid_timestamp", 0)),
+            int(conflicts.get("range", 0)),
+            int(conflicts.get("rotation", 0)),
+            sum(self.ignored_counts.get("rotation", {}).values()),
+            age_bucket,
+        )
+        if signature == self._last_runtime_signature and now - self._last_runtime_status_at < 1.0:
+            return
+        self._last_runtime_signature = signature
+        self._last_runtime_status_at = now
+        self._status(self._runtime_status(now))
 
     def _sync_progress(self):
         return (f"双端校时：测距 {len(self.exchanges.get('measurement', []))}/{SYNC_REQUIRED_EXCHANGES}，"
@@ -321,7 +399,7 @@ class SynchronizedAcquisition:
                 self._diagnostic(f"扫描诊断：{diagnostic}", timestamp=now)
             if self.builder.period_s is not None:
                 self.emit("sync_period", (self.session, self.builder.period_s), now)
-            self._status(self.builder.reason)
+            self._publish_runtime_status(now)
             missing = []
             if now - self.last_arrival["measurement"] > 2:
                 missing.append(self._endpoint_label("measurement"))
