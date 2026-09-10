@@ -196,11 +196,11 @@ class MappingTests(unittest.TestCase):
         navigator.set_auto(True)
         with patch.object(navigator.matcher, "match", return_value=(Pose2D(), 0.1)) as match:
             navigator.process_scan(points)
-            first = match.call_args.kwargs["window_scale"]
+            first = match.call_args.kwargs["translation_window_scale"]
             from navigation_core import VelocityCommand
             navigator.predict_motion(VelocityCommand(right_mps=0.2, duration_s=1))
             navigator.process_scan(points)
-            second = match.call_args.kwargs["window_scale"]
+            second = match.call_args.kwargs["translation_window_scale"]
         self.assertGreater(second, first)
         self.assertLessEqual(second, 1.5)
 
@@ -210,13 +210,45 @@ class MappingTests(unittest.TestCase):
         navigator.set_auto(True)
         with patch.object(navigator.matcher, "match", return_value=(Pose2D(), 0.1)) as match:
             navigator.process_scan(points)
-            first = match.call_args.kwargs["window_scale"]
+            first = match.call_args.kwargs["translation_window_scale"]
             from navigation_core import VelocityCommand
             navigator.predict_motion(VelocityCommand(forward_mps=0.08, right_mps=0.08, duration_s=0.5))
             navigator.process_scan(points)
-            second = match.call_args.kwargs["window_scale"]
+            second = match.call_args.kwargs["translation_window_scale"]
         self.assertGreater(second, first)
         self.assertLessEqual(second, 1.5)
+
+    def test_execution_uncertainties_expand_only_their_matching_axis(self):
+        def scales(uncertainty_m, uncertainty_rad):
+            grid, points = room_fixture()
+            navigator = NavigationEngine(grid)
+            navigator.set_auto(True)
+            navigator.match_score = 0.95
+            navigator.apply_execution_delta(
+                0.0,
+                0.02,
+                yaw_rad=0.01,
+                uncertainty_m=uncertainty_m,
+                uncertainty_rad=uncertainty_rad,
+            )
+
+            def accept(_grid, predicted, _points, **_kwargs):
+                return predicted, 0.9
+
+            with patch.object(navigator.matcher, "match", side_effect=accept) as match:
+                navigator.process_scan(points)
+            return (
+                match.call_args.kwargs["translation_window_scale"],
+                match.call_args.kwargs["rotation_window_scale"],
+            )
+
+        baseline_translation, baseline_rotation = scales(0.0, 0.0)
+        uncertain_translation, unchanged_rotation = scales(0.04, 0.0)
+        unchanged_translation, uncertain_rotation = scales(0.0, 0.04)
+        self.assertGreater(uncertain_translation, baseline_translation)
+        self.assertAlmostEqual(unchanged_rotation, baseline_rotation)
+        self.assertAlmostEqual(unchanged_translation, baseline_translation)
+        self.assertGreater(uncertain_rotation, baseline_rotation)
 
 
 if __name__ == "__main__":

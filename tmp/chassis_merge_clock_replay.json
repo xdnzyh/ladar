@@ -1,0 +1,115 @@
+{
+  "schema_version": "1.0",
+  "source_type": "offline_replay",
+  "input": "tests\\fixtures\\clock_sync_replay.jsonl",
+  "config": "navigation_config.json",
+  "config_fingerprint": "f43451947c2c6584",
+  "session": "clock",
+  "fixture_header": {
+    "record_type": "header",
+    "schema_version": "1.0",
+    "source_type": "synthetic_dual_clock_replay",
+    "session": "clock",
+    "clock_faults": [
+      "constant_offset",
+      "drift_update",
+      "asymmetric_sync_delay",
+      "long_tail_arrival",
+      "device_restart"
+    ],
+    "sync_exchanges": [
+      {
+        "source": "measurement",
+        "model_version": 0,
+        "t1_s": 0,
+        "t2_us": 130000,
+        "t3_us": 131000,
+        "t4_s": 0.021,
+        "drift_ppm": 180
+      },
+      {
+        "source": "measurement",
+        "model_version": 1,
+        "t1_s": 4,
+        "t2_us": 4135000,
+        "t3_us": 4136000,
+        "t4_s": 4.021,
+        "drift_ppm": 180
+      },
+      {
+        "source": "rotation",
+        "model_version": 0,
+        "t1_s": 1,
+        "t2_us": 930000,
+        "t3_us": 931000,
+        "t4_s": 1.021,
+        "drift_ppm": 220
+      },
+      {
+        "source": "rotation",
+        "model_version": 1,
+        "t1_s": 5,
+        "t2_us": 4935000,
+        "t3_us": 4936000,
+        "t4_s": 5.021,
+        "drift_ppm": 220
+      }
+    ]
+  },
+  "clock_models": {
+    "measurement": [
+      {
+        "offset": 0.12,
+        "uncertainty": 0.01000478,
+        "observed_at": 0.021,
+        "drift_ppm": 180.0,
+        "version": 0
+      },
+      {
+        "offset": 0.12286000000000011,
+        "uncertainty": 0.00786477999999989,
+        "observed_at": 4.021,
+        "drift_ppm": 180.0,
+        "version": 1
+      }
+    ],
+    "rotation": [
+      {
+        "offset": -0.08000000000000002,
+        "uncertainty": 0.010005619999999953,
+        "observed_at": 1.021,
+        "drift_ppm": 220.0,
+        "version": 0
+      },
+      {
+        "offset": -0.07706000000000002,
+        "uncertainty": 0.007945619999999959,
+        "observed_at": 5.021,
+        "drift_ppm": 220.0,
+        "version": 1
+      }
+    ]
+  },
+  "records": 16,
+  "parse_errors": [],
+  "formal_scans": 0,
+  "local_scans": 1,
+  "mapping_scans": 1,
+  "formal_points": 0,
+  "formal_echo_points": 0,
+  "formal_echo_rate": null,
+  "mapped_points": 2,
+  "accepted_mapping_points": 2,
+  "mapping_point_rejection_rate": 0.0,
+  "map_updates": 1,
+  "known_area_m2": 0.0144,
+  "accepted_counter": 0,
+  "warmup_counter": 2,
+  "discarded_counter": 1,
+  "late_packets": 2,
+  "duplicate_packets": 0,
+  "pending_depth_peak": 4,
+  "builder_rejected_points": 0,
+  "diagnostics": [],
+  "elapsed_ms": 0.7543000028817914
+}

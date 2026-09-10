@@ -8,7 +8,7 @@
   "safety_speed_upper_bound_mps": null,
   "safety_stop_distance_m": null,
   "safety_max_angle_error_deg": 15.0,
-  "hardware_sample_rate_hz": 80.0,
+  "hardware_sample_rate_hz": 100.0,
   "exposure_index": 5,
   "actual_exposure_index": 5,
   "calibration_firmware_version": "CCD-PEAK-RAW-CAL-3.0",
@@ -36,7 +36,7 @@
   "chassis_baudrate": 9600,
   "measurement_mode": "fffe",
   "ccd_command": "@c0071#@",
-  "sample_rate_hz": 80.0,
+  "sample_rate_hz": 100.0,
   "min_range_m": 0.15,
   "max_range_m": 1.0,
   "hardware_min_range_m": 0.15,
@@ -49,19 +49,33 @@
   "map_resolution_m": 0.02,
   "map_width_cells": 120,
   "map_height_cells": 120,
+  "hardware_map_resolution_m": 0.02,
+  "hardware_map_width_cells": 120,
+  "hardware_map_height_cells": 120,
+  "simulation_map_resolution_m": 0.04,
+  "simulation_map_width_cells": 180,
+  "simulation_map_height_cells": 280,
   "radar_offset_x_m": 0.0,
   "radar_offset_y_m": 0.0,
   "radar_offset_yaw_deg": 0.0,
   "robot_radius_m": 0.15,
   "path_turn_penalty": 0.75,
-  "chassis_command_template": "",
-  "chassis_stop_command": "",
-  "chassis_feedback_protocol": "",
   "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
+  "chassis_capability_mode": "unknown",
+  "chassis_firmware_confirmed": false,
+  "chassis_preferred_translation_unit": "MM",
+  "chassis_raw_log_enabled": true,
+  "chassis_raw_log_file": "logs/chassis_serial.jsonl",
+  "chassis_rx_silence_before_ping_s": 0.5,
+  "chassis_rx_silence_after_pong_s": 0.25,
+  "chassis_silence_wait_timeout_s": 4.0,
+  "chassis_ping_timeout_s": 2.0,
   "chassis_ack_timeout_s": 2.0,
   "chassis_action_timeout_s": 12.0,
+  "chassis_total_timeout_s": 12.0,
   "chassis_stop_timeout_s": 3.0,
   "chassis_stop_status_delay_s": 0.35,
+  "chassis_tx_max_command_bytes": 47,
   "chassis_max_line_bytes": 1024,
   "chassis_min_counts": 1,
   "chassis_max_counts": 2000,
@@ -69,36 +83,214 @@
   "chassis_max_rotation_rad": 0.5,
   "chassis_speed_validated": false,
   "chassis_braking_validated": false,
-  "chassis_calibration": {
+  "chassis_translation_capabilities": {
     "W": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 71775,
+      "counts_per_mm": 7.1775,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 700,
+      "brake_max_counts": 1400,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "S": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 71317,
+      "counts_per_mm": 7.1317,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 700,
+      "brake_max_counts": 1400,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "A": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 72372,
+      "counts_per_mm": 7.2372,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 700,
+      "brake_max_counts": 1400,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "D": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 73864,
+      "counts_per_mm": 7.3864,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 700,
+      "brake_max_counts": 1400,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "Q": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 101756,
+      "counts_per_mm": 10.1756,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 600,
+      "brake_max_counts": 1200,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "E": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 91232,
+      "counts_per_mm": 9.1232,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 600,
+      "brake_max_counts": 1200,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "Z": {
-      "status": "uncalibrated"
+      "fixed_counts_per_mm": 96476,
+      "counts_per_mm": 9.6476,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 600,
+      "brake_max_counts": 1200,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
     },
     "C": {
-      "status": "uncalibrated"
-    },
+      "fixed_counts_per_mm": 101874,
+      "counts_per_mm": 10.1874,
+      "coefficient_status": "initial",
+      "coefficient_source": "car control_fixed/标定/20260909_现场长距离标定结果.md",
+      "brake_min_counts": 600,
+      "brake_max_counts": 1200,
+      "motion_range_validated": false,
+      "validated_min_mm": null,
+      "validated_max_mm": null,
+      "uncertainty_m": null,
+      "enabled": true
+    }
+  },
+  "chassis_rotation_capabilities": {
     "R": {
-      "status": "uncalibrated"
+      "unit": "CNT",
+      "status": "unvalidated",
+      "enabled": false,
+      "counts_per_rad": null,
+      "uncertainty_rad": null,
+      "validated_min_counts": null,
+      "validated_max_counts": null
     },
     "F": {
-      "status": "uncalibrated"
+      "unit": "CNT",
+      "status": "unvalidated",
+      "enabled": false,
+      "counts_per_rad": null,
+      "uncertainty_rad": null,
+      "validated_min_counts": null,
+      "validated_max_counts": null
+    }
+  },
+  "chassis_calibration": {
+    "W": {
+      "status": "initial",
+      "counts_per_m": 7177.5,
+      "counts_per_unit": 7177.5,
+      "request_bias_counts": 0.0,
+      "min_counts": 700.0,
+      "max_counts": 1400.0,
+      "uncertainty_m": null
+    },
+    "S": {
+      "status": "initial",
+      "counts_per_m": 7131.7,
+      "counts_per_unit": 7131.7,
+      "request_bias_counts": 0.0,
+      "min_counts": 700.0,
+      "max_counts": 1400.0,
+      "uncertainty_m": null
+    },
+    "A": {
+      "status": "initial",
+      "counts_per_m": 7237.2,
+      "counts_per_unit": 7237.2,
+      "request_bias_counts": 0.0,
+      "min_counts": 700.0,
+      "max_counts": 1400.0,
+      "uncertainty_m": null
+    },
+    "D": {
+      "status": "initial",
+      "counts_per_m": 7386.4,
+      "counts_per_unit": 7386.4,
+      "request_bias_counts": 0.0,
+      "min_counts": 700.0,
+      "max_counts": 1400.0,
+      "uncertainty_m": null
+    },
+    "Q": {
+      "status": "initial",
+      "counts_per_m": 10175.6,
+      "counts_per_unit": 10175.6,
+      "request_bias_counts": 0.0,
+      "min_counts": 600.0,
+      "max_counts": 1200.0,
+      "uncertainty_m": null
+    },
+    "E": {
+      "status": "initial",
+      "counts_per_m": 9123.2,
+      "counts_per_unit": 9123.2,
+      "request_bias_counts": 0.0,
+      "min_counts": 600.0,
+      "max_counts": 1200.0,
+      "uncertainty_m": null
+    },
+    "Z": {
+      "status": "initial",
+      "counts_per_m": 9647.6,
+      "counts_per_unit": 9647.6,
+      "request_bias_counts": 0.0,
+      "min_counts": 600.0,
+      "max_counts": 1200.0,
+      "uncertainty_m": null
+    },
+    "C": {
+      "status": "initial",
+      "counts_per_m": 10187.4,
+      "counts_per_unit": 10187.4,
+      "request_bias_counts": 0.0,
+      "min_counts": 600.0,
+      "max_counts": 1200.0,
+      "uncertainty_m": null
+    },
+    "R": {
+      "status": "unvalidated",
+      "counts_per_rad": null,
+      "uncertainty_rad": null
+    },
+    "F": {
+      "status": "unvalidated",
+      "counts_per_rad": null,
+      "uncertainty_rad": null
     }
   },
   "wheel_output_scale": 1000,
@@ -108,7 +300,7 @@
     1,
     1
   ],
-  "simulation_sample_rate_hz": 80.0,
+  "simulation_sample_rate_hz": 100.0,
   "simulation_speed": 1.0,
   "simulation_profile": "IDEAL",
   "simulation_seed": 20260907,

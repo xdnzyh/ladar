@@ -1,11 +1,14 @@
 import math
 import queue
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+from chassis_controller import ChassisMoveRequest, ChassisState
+from mapping_runtime import MappingRequest, MappingResult, MappingSnapshot
 from motion_safety import MotionSafetyGuard
 from navigation_app import NavigationApp
-from navigation_core import VelocityCommand
+from navigation_core import OccupancyGrid, Pose2D, VelocityCommand
 from radar_core import CalibrationModel
 from scan_acquisition import DistanceObservationReceiver, HardwareObservation, ReceivedObservation
 from synchronized_acquisition import ClockEstimate, SynchronizedAcquisition
@@ -104,17 +107,43 @@ class SharedAcquisitionTests(unittest.TestCase):
         app.motion_generation = 0
         app.config = {"synchronized_acquisition": True}
         app.motion_safety = MotionSafetyGuard(app.config)
-        app.protocol_var = Mock(get=lambda: "MOVE {fl} {fr} {rl} {rr} {duration_ms}")
-        app.stop_command_var = Mock(get=lambda: "STOP")
         app.chassis_endpoint = Endpoint()
         app.rotation_endpoint = Endpoint()
-        app.sync = Mock(state="running")
+        app.sync = Mock(state="running", receiver=Mock(), session="session")
         app.events = queue.Queue()
         app.navigator = Mock()
         app.root = Mock()
+        app._log = Mock()
+        app.mapping_generation = 0
+        app.mapping_tasks = queue.Queue()
+        app.mapping_results = queue.Queue()
+        app.mapping_runtime = None
+        app.mapping_snapshot = None
+        app.disconnect_requested = False
+        app.mapping_lock = __import__("threading").RLock()
+        app._action_commands = {}
+        request = ChassisMoveRequest("W", 100, "MM", 718, 0.1, "m")
+        action = SimpleNamespace(action_id=1, request=request, mode="W", request_value=100,
+                                 unit="MM", stop_requested=False, source="auto")
+        controller = Mock(
+            in_flight=False,
+            pending=None,
+            state=ChassisState.IDLE,
+            connection_generation=1,
+        )
+
+        def request_move(*_args, **_kwargs):
+            controller.pending = action
+            controller.in_flight = True
+            return True
+
+        controller.request_move.side_effect = request_move
+        app.chassis_controller = controller
+        app.chassis_adapter = Mock(request_for_command=Mock(return_value=request))
+        app.manual_motion = False
         return app
 
-    def test_movement_keeps_radar_running_and_waits_for_send_event(self):
+    def test_motion_is_registered_before_send_and_pose_waits_for_done(self):
         app = self.app()
         command = VelocityCommand(forward_mps=0.1, duration_s=0.4)
         app._execute_navigation_command(command)
@@ -123,24 +152,222 @@ class SharedAcquisitionTests(unittest.TestCase):
         app.sync.stop.assert_not_called()
         app.sync.begin_after.assert_called_once_with(math.inf)
         app.navigator.predict_motion.assert_not_called()
-        app._handle_event(*app.events.get_nowait())
-        app.navigator.predict_motion.assert_called_once_with(command)
-        app._finish_hardware_motion(app.motion_generation)
-        app._handle_event(*app.events.get_nowait())
-        self.assertAlmostEqual(app.scan_collect_after, 10.2)
-        app._restart_hardware_scan(app.motion_generation)
-        self.assertFalse(app.moving)
-        app.sync.start.assert_not_called()
+        action = app.chassis_controller.pending
+        app._handle_event("chassis_move_sent", (1, action), 10.0)
+        self.assertIs(app.motion_safety.command, command)
+        app.navigator.predict_motion.assert_not_called()
 
-    def test_old_motion_callbacks_cannot_stop_or_resume_new_run(self):
+    def test_old_connection_send_callback_cannot_start_safety(self):
         app = self.app()
-        app.moving = True
-        app.motion_generation = 2
-        app._finish_hardware_motion(1)
-        app._restart_hardware_scan(1)
-        self.assertEqual(app.chassis_endpoint.messages, [])
-        self.assertTrue(app.moving)
-        app.root.after.assert_not_called()
+        command = VelocityCommand(forward_mps=0.1, duration_s=0.4)
+        app._execute_navigation_command(command)
+        action = app.chassis_controller.pending
+        app._handle_event("chassis_move_sent", (0, action), 10.0)
+        self.assertIsNone(app.motion_safety.command)
+
+    def test_sweep_crossing_settle_boundary_is_not_submitted(self):
+        app = self.app()
+        app.scan_collect_after = 10.0
+        app.rotation = SimpleNamespace(period_s=0.0, period_history=[])
+        app._handle_sweep = Mock()
+        points = [
+            SimpleNamespace(timestamp=9.99),
+            SimpleNamespace(timestamp=10.01),
+        ]
+
+        app._handle_event("sync_sweep", ("session", 8, points, 1.2), 10.02)
+
+        app._handle_sweep.assert_not_called()
+        self.assertEqual(app.rotation.period_history, [])
+
+    def test_full_sweep_does_not_unlock_until_mapping_accepts_it(self):
+        app = self.app()
+        app.running = True
+        app.moving = False
+        app.mapping_generation = 2
+        app.scan_collect_after = 10.0
+        app._post_motion_map_revision = 7
+        app._post_motion_scan_count = 4
+        app.view_mode = Mock(get=lambda: "navigation")
+        action = SimpleNamespace(action_id=9)
+        app.chassis_controller.pending = action
+        app.chassis_controller.state = ChassisState.WAITING_SCAN
+        app.chassis_controller.mark_scan_ready.return_value = True
+        app._action_commands = {9: VelocityCommand(forward_mps=0.1, duration_s=1)}
+        grid = OccupancyGrid()
+        request = MappingRequest(2, "session", 8, 10.1, 11.4, "navigation", 3, ())
+        snapshot = MappingSnapshot(
+            2, 4, 8, "session", 8, "navigation", grid, Pose2D(), (), None,
+            VelocityCommand(), "等待规划", "", 5, 0, 0, 0, 0,
+        )
+        app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
+        app._handle_mapping_results()
+        app.chassis_controller.mark_scan_ready.assert_called_once()
+        self.assertNotIn(9, app._action_commands)
+
+    def test_old_or_rejected_mapping_result_cannot_unlock_motion(self):
+        app = self.app()
+        app.running = True
+        app.moving = False
+        app.mapping_generation = 2
+        app.scan_collect_after = 10.0
+        app._post_motion_map_revision = 7
+        app._post_motion_scan_count = 4
+        app.view_mode = Mock(get=lambda: "navigation")
+        app.chassis_controller.pending = SimpleNamespace(action_id=9)
+        app.chassis_controller.state = ChassisState.WAITING_SCAN
+        app.chassis_controller.mark_scan_ready.return_value = True
+        grid = OccupancyGrid()
+        request = MappingRequest(2, "session", 8, 9.9, 11.4, "navigation", 3, ())
+        snapshot = MappingSnapshot(
+            2, 4, 7, "session", 8, "navigation", grid, Pose2D(), (), None,
+            VelocityCommand(), "定位拒绝", "", 4, 0, 1, 0, 0,
+        )
+        app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
+        app._handle_mapping_results()
+        app.chassis_controller.mark_scan_ready.assert_not_called()
+
+    def test_waiting_scan_requires_both_boundaries_and_both_map_counters(self):
+        cases = (
+            ("other", 10.1, 11.4, 8, 5),
+            ("session", 10.1, 9.9, 8, 5),
+            ("session", 10.1, 11.4, 7, 5),
+            ("session", 10.1, 11.4, 8, 4),
+        )
+        for session, scan_start, scan_end, map_version, completed_scans in cases:
+            with self.subTest(
+                session=session,
+                scan_start=scan_start,
+                scan_end=scan_end,
+                map_version=map_version,
+                completed_scans=completed_scans,
+            ):
+                app = self.app()
+                app.mapping_generation = 2
+                app.scan_collect_after = 10.0
+                app._post_motion_map_revision = 7
+                app._post_motion_scan_count = 4
+                app.view_mode = Mock(get=lambda: "navigation")
+                app.chassis_controller.pending = SimpleNamespace(action_id=9)
+                app.chassis_controller.state = ChassisState.WAITING_SCAN
+                app.chassis_controller.mark_scan_ready.return_value = True
+                request = MappingRequest(2, session, 8, scan_start, scan_end, "navigation", 3, ())
+                snapshot = MappingSnapshot(
+                    2, 4, map_version, session, 8, "navigation", OccupancyGrid(), Pose2D(), (), None,
+                    VelocityCommand(), "定位检查", "", completed_scans, 0, 0, 0, 0,
+                )
+                app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
+
+                app._handle_mapping_results()
+
+                app.chassis_controller.mark_scan_ready.assert_not_called()
+
+    def test_target_done_applies_report_prior_once_without_command_prediction(self):
+        app = self.app()
+        action = app.chassis_controller.pending = SimpleNamespace(
+            action_id=3,
+            source="auto",
+            stop_requested=False,
+        )
+        app._action_commands[3] = VelocityCommand(forward_mps=0.1, duration_s=1.0)
+        app.mapping_snapshot = SimpleNamespace(map_version=12, completed_scans=6)
+        estimate = SimpleNamespace(
+            local_x_m=0.01,
+            local_y_m=0.09,
+            yaw_rad=0.02,
+            uncertainty_m=0.015,
+            uncertainty_rad=0.01,
+            trusted=True,
+        )
+        app.chassis_adapter.execution_from_report.return_value = estimate
+        report = SimpleNamespace(
+            mode="W", reason="TARGET", request_value=100, unit="MM", target_counts=718,
+            brake=44.0, enc=646.0, dx=0.0, dy=646.0, dr=0.0, ds=646.0,
+            wheels=(646, 646, 646, 646),
+        )
+
+        app._handle_chassis_done(1, action, report, 10.0)
+
+        app.navigator.apply_execution_delta.assert_called_once_with(0.01, 0.09, 0.02, 0.015, 0.01)
+        app.navigator.predict_motion.assert_not_called()
+        self.assertTrue(app.running)
+        self.assertEqual(app._post_motion_map_revision, 12)
+        self.assertEqual(app._post_motion_scan_count, 6)
+
+    def test_abnormal_done_applies_report_prior_but_never_resumes_automatic_motion(self):
+        app = self.app()
+        action = app.chassis_controller.pending = SimpleNamespace(
+            action_id=4,
+            source="auto",
+            stop_requested=False,
+        )
+        estimate = SimpleNamespace(
+            local_x_m=0.0,
+            local_y_m=0.04,
+            yaw_rad=0.0,
+            uncertainty_m=0.03,
+            uncertainty_rad=0.0,
+            trusted=False,
+        )
+        app.chassis_adapter.execution_from_report.return_value = estimate
+        app._stop_radar_only = Mock()
+        report = SimpleNamespace(
+            mode="W", reason="EMERGENCY", request_value=100, unit="MM", target_counts=718,
+            brake=40.0, enc=287.0, dx=0.0, dy=287.0, dr=0.0, ds=287.0,
+            wheels=(287, 287, 287, 287),
+        )
+
+        app._handle_chassis_done(1, action, report, 10.0)
+
+        app.navigator.apply_execution_delta.assert_called_once_with(0.0, 0.04, 0.0, 0.03, 0.0)
+        app.navigator.predict_motion.assert_not_called()
+        self.assertFalse(app.running)
+        self.assertIn("禁止自动续航", app.navigator.detail)
+        app._stop_radar_only.assert_called_once()
+        scheduled = app.root.after.call_args.args[1]
+        app.chassis_controller.complete_settle.return_value = True
+        scheduled()
+        app.chassis_controller.complete_settle.assert_called_once_with(resume_auto=False)
+
+    def test_in_flight_blocks_reset_clear_disconnect_and_window_close(self):
+        app = self.app()
+        app.chassis_controller.in_flight = True
+        app.chassis_controller.request_stop.return_value = True
+        app.latest_points = []
+        app.current_pixel = None
+        app.latest_bias = 0.0
+        app.connected = True
+        app.simulation = None
+        app.mapping_snapshot = object()
+        app._complete_disconnect = Mock()
+        app.stop = Mock()
+        app.chassis_endpoint = Mock(is_open=True)
+        app.measure_endpoint = Mock()
+        app.rotation_endpoint = Mock()
+        app.connection_label = Mock()
+        app._closed = False
+        app._close_requested = False
+        app._close_deadline = None
+        app.config["chassis_stop_timeout_s"] = 0.5
+        app._finalize_close = Mock()
+
+        app.reset()
+        app.clear_local_map()
+        app.disconnect()
+        app.on_close()
+        app._close_deadline = 0.0
+        app._poll_close()
+
+        self.assertEqual(app.chassis_controller.request_stop.call_count, 2)
+        app.navigator.reset.assert_not_called()
+        app._complete_disconnect.assert_not_called()
+        app.chassis_endpoint.close.assert_not_called()
+        app._finalize_close.assert_not_called()
+        self.assertTrue(app._close_requested)
+        self.assertGreaterEqual(app.root.after.call_count, 2)
+        app.connection_label.configure.assert_any_call(
+            text="●  停止未确认，保持底盘连接", fg="#ff6b6b"
+        )
 
     def test_parking_completion_stops_radar_and_preserves_success_state(self):
         app = self.app()

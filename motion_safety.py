@@ -8,6 +8,7 @@ class MotionSafetyGuard:
         self.started_at = None
         self.last_observation = None
         self.speed_mps = None
+        self.direction_speed_mps = None
 
     def start(self, command, timestamp):
         self.command = command
@@ -20,15 +21,17 @@ class MotionSafetyGuard:
             configured_speed = None
         if configured_speed is not None and not math.isfinite(configured_speed):
             configured_speed = None
+        self.direction_speed_mps = math.hypot(command.right_mps, command.forward_mps)
         if str(self.config.get("runtime_source", "")).lower() == "hardware":
-            self.speed_mps = configured_speed
+            self.speed_mps = configured_speed if configured_speed is not None and configured_speed > 0 else None
         else:
-            self.speed_mps = math.hypot(command.right_mps, command.forward_mps)
+            self.speed_mps = self.direction_speed_mps
 
     def clear(self):
         self.command = None
         self.started_at = self.last_observation = None
         self.speed_mps = None
+        self.direction_speed_mps = None
 
     def observe(self, packet, estimate, now):
         if self.command is None or self.started_at is None:
@@ -47,10 +50,15 @@ class MotionSafetyGuard:
         if speed is None:
             return "底盘实际速度上界未标定，停止自动运动"
         speed = max(0.0, speed)
+        configured_stop_distance = self.config.get("safety_stop_distance_m")
+        if configured_stop_distance is None:
+            if str(self.config.get("runtime_source", "")).lower() == "hardware":
+                return "底盘制动距离未标定，停止自动运动"
+            configured_stop_distance = 0.0
         try:
-            stop_distance = float(self.config.get("safety_stop_distance_m", 0.0))
+            stop_distance = float(configured_stop_distance)
         except (TypeError, ValueError, OverflowError):
-            stop_distance = 0.0
+            return "底盘制动距离配置无效，停止自动运动"
         if not math.isfinite(stop_distance) or stop_distance < 0:
             return "底盘制动距离配置无效，停止自动运动"
         if estimate is None or estimate[1] > math.radians(float(self.config.get("safety_max_angle_error_deg", 15))):
@@ -68,11 +76,13 @@ class MotionSafetyGuard:
         limit = radius + clearance + speed * age + stop_distance
         if point_distance > limit + margin:
             return None
-        if abs(self.command.yaw_rps) > 1e-6 or speed < 1e-6:
+        direction_speed = self.direction_speed_mps or 0.0
+        if abs(self.command.yaw_rps) > 1e-6 or direction_speed < 1e-6:
             if point_distance <= limit + margin:
                 return "转向范围内存在近距离障碍，紧急停车"
             return None
-        ux, uy = self.command.right_mps / speed, self.command.forward_mps / speed
+        ux = self.command.right_mps / direction_speed
+        uy = self.command.forward_mps / direction_speed
         along = x * ux + y * uy
         lateral = abs(x * uy - y * ux)
         if along + margin >= 0 and along <= speed * age + radius + clearance + stop_distance + margin and lateral <= radius + margin:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import ctypes
+from collections import deque
 from ctypes import wintypes
-import queue
+from dataclasses import dataclass, field
 import sys
 import threading
 import time
@@ -11,6 +12,37 @@ from typing import Callable
 
 DataCallback = Callable[[bytes, float], None]
 ErrorCallback = Callable[[str], None]
+
+
+class PartialWriteError(OSError):
+    def __init__(self, written: int, total: int) -> None:
+        super().__init__(f"串口只写入 {written}/{total} 字节")
+        self.written = int(written)
+        self.total = int(total)
+
+
+@dataclass
+class SerialWriteTicket:
+    write_id: int
+    session_id: int
+    payload: bytes
+    on_sent: Callable[[float], None] | None = None
+    on_written: Callable[[float], None] | None = None
+    on_failed: Callable[[float, int, int, str], None] | None = None
+    on_cancelled: Callable[[float], None] | None = None
+    state: str = "queued"
+    bytes_written: int = 0
+
+
+@dataclass
+class _WriteSession:
+    session_id: int
+    stop: threading.Event
+    transport: object
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    pending: deque[SerialWriteTicket] = field(default_factory=deque)
+    active: SerialWriteTicket | None = None
+    closing: bool = False
 
 
 def list_serial_ports() -> list[str]:
@@ -64,9 +96,10 @@ class SerialEndpoint:
         self._writer_thread: threading.Thread | None = None
         self._faulted = threading.Event()
         self._transport_lock = threading.Lock()
-        self._write_queue: queue.Queue = queue.Queue()
         self._session_stop: threading.Event | None = None
+        self._write_session: _WriteSession | None = None
         self._session_id = 0
+        self._write_id = 0
         self._active_on_data = on_data
         self._active_on_error = on_error
 
@@ -74,7 +107,14 @@ class SerialEndpoint:
     def is_open(self) -> bool:
         with self._transport_lock:
             transport = self._transport
-        return not self._faulted.is_set() and transport is not None and transport.is_open
+            session = self._write_session
+        return (
+            not self._faulted.is_set()
+            and transport is not None
+            and session is not None
+            and not session.stop.is_set()
+            and bool(transport.is_open)
+        )
 
     def open(
         self,
@@ -91,16 +131,14 @@ class SerialEndpoint:
         self._faulted.clear()
         transport = _open_transport(port, baudrate)
         stop = threading.Event()
-        write_queue: queue.Queue = queue.Queue()
         with self._transport_lock:
             self._session_id += 1
             session_id = self._session_id
+            session = _WriteSession(session_id, stop, transport)
             self._session_stop = stop
-            self._write_queue = write_queue
+            self._write_session = session
             self._active_on_data = on_data or self.on_data
             self._active_on_error = on_error or self.on_error
-        self._write_queue = write_queue
-        with self._transport_lock:
             self._transport = transport
         self._reader_thread = threading.Thread(
             target=self._read_loop,
@@ -110,7 +148,7 @@ class SerialEndpoint:
         )
         self._writer_thread = threading.Thread(
             target=self._write_loop,
-            args=(session_id, stop, transport, write_queue, self._active_on_error),
+            args=(session, self._active_on_error),
             name=f"{self.name}-writer",
             daemon=True,
         )
@@ -121,17 +159,28 @@ class SerialEndpoint:
         with self._transport_lock:
             transport, self._transport = self._transport, None
             stop, self._session_stop = self._session_stop, None
-            write_queue = self._write_queue
+            session, self._write_session = self._write_session, None
             self._session_id += 1
+        cancelled: list[SerialWriteTicket] = []
         if stop is not None:
             stop.set()
-        self._cancel_queue(write_queue)
-        write_queue.put(None)
+        if session is not None:
+            with session.condition:
+                session.closing = True
+                while session.pending:
+                    ticket = session.pending.popleft()
+                    if ticket.state == "queued":
+                        ticket.state = "cancelled"
+                        cancelled.append(ticket)
+                session.condition.notify_all()
         if transport is not None:
             try:
                 transport.close()
             except Exception:
                 pass
+        stamp = time.perf_counter()
+        for ticket in cancelled:
+            self._invoke(ticket.on_cancelled, stamp)
         for thread in (self._reader_thread, self._writer_thread):
             if thread and thread.is_alive() and thread is not threading.current_thread():
                 thread.join(timeout=0.4)
@@ -145,32 +194,74 @@ class SerialEndpoint:
         on_sent: Callable[[float], None] | None = None,
         on_written: Callable[[float], None] | None = None,
         priority: bool = False,
+        *,
+        on_failed: Callable[[float, int, int, str], None] | None = None,
+        on_cancelled: Callable[[float], None] | None = None,
+        discard_pending: bool = False,
     ) -> bool:
+        return self.write_ticket(
+            data,
+            on_sent=on_sent,
+            on_written=on_written,
+            priority=priority,
+            on_failed=on_failed,
+            on_cancelled=on_cancelled,
+            discard_pending=discard_pending,
+        ) is not None
+
+    def write_ticket(
+        self,
+        data: bytes | str,
+        on_sent: Callable[[float], None] | None = None,
+        on_written: Callable[[float], None] | None = None,
+        priority: bool = False,
+        *,
+        on_failed: Callable[[float, int, int, str], None] | None = None,
+        on_cancelled: Callable[[float], None] | None = None,
+        discard_pending: bool = False,
+    ) -> SerialWriteTicket | None:
         if isinstance(data, str):
-            data = data.encode("ascii", "ignore")
-        item = (bytes(data), on_sent, on_written)
+            data = data.encode("ascii")
+        payload = bytes(data)
+        cancelled: list[SerialWriteTicket] = []
         with self._transport_lock:
             transport = self._transport
-            write_queue = self._write_queue
-            session_stop = self._session_stop
-        if transport is None or session_stop is None or session_stop.is_set() or not transport.is_open:
-            return False
-        if priority:
-            pending = []
-            while True:
-                try:
-                    pending.append(write_queue.get_nowait())
-                except queue.Empty:
-                    break
-            for old_item in pending:
-                write_queue.task_done()
-            write_queue.put(item)
-            for old_item in pending:
-                if old_item is not None:
-                    write_queue.put(old_item)
-        else:
-            write_queue.put(item)
-        return True
+            session = self._write_session
+            if (
+                transport is None
+                or session is None
+                or session.stop.is_set()
+                or not transport.is_open
+            ):
+                return None
+            self._write_id += 1
+            ticket = SerialWriteTicket(
+                self._write_id,
+                session.session_id,
+                payload,
+                on_sent,
+                on_written,
+                on_failed,
+                on_cancelled,
+            )
+            with session.condition:
+                if session.closing or session.stop.is_set():
+                    return None
+                if discard_pending:
+                    while session.pending:
+                        old = session.pending.popleft()
+                        if old.state == "queued":
+                            old.state = "cancelled"
+                            cancelled.append(old)
+                if priority:
+                    session.pending.appendleft(ticket)
+                else:
+                    session.pending.append(ticket)
+                session.condition.notify()
+        stamp = time.perf_counter()
+        for old in cancelled:
+            self._invoke(old.on_cancelled, stamp)
+        return ticket
 
     def write_line(
         self,
@@ -178,59 +269,82 @@ class SerialEndpoint:
         on_sent: Callable[[float], None] | None = None,
         on_written: Callable[[float], None] | None = None,
         priority: bool = False,
+        **kwargs,
     ) -> bool:
-        return self.write(text.rstrip("\r\n") + "\r\n", on_sent, on_written, priority)
+        return self.write(
+            text.rstrip("\r\n") + "\r\n",
+            on_sent,
+            on_written,
+            priority,
+            **kwargs,
+        )
 
     def cancel_pending(self) -> int:
         with self._transport_lock:
-            write_queue = self._write_queue
-        return self._cancel_queue(write_queue)
+            session = self._write_session
+        if session is None:
+            return 0
+        cancelled: list[SerialWriteTicket] = []
+        with session.condition:
+            while session.pending:
+                ticket = session.pending.popleft()
+                if ticket.state == "queued":
+                    ticket.state = "cancelled"
+                    cancelled.append(ticket)
+            session.condition.notify_all()
+        stamp = time.perf_counter()
+        for ticket in cancelled:
+            self._invoke(ticket.on_cancelled, stamp)
+        return len(cancelled)
 
-    @staticmethod
-    def _cancel_queue(write_queue: queue.Queue) -> int:
-        cancelled = 0
-        while True:
-            try:
-                item = write_queue.get_nowait()
-            except queue.Empty:
-                break
-            write_queue.task_done()
-            if item is not None:
-                cancelled += 1
-        return cancelled
+    def cancel_write(self, ticket: SerialWriteTicket | int) -> str:
+        write_id = ticket.write_id if isinstance(ticket, SerialWriteTicket) else int(ticket)
+        with self._transport_lock:
+            session = self._write_session
+        if session is None:
+            return "not_found"
+        cancelled: SerialWriteTicket | None = None
+        with session.condition:
+            if session.active is not None and session.active.write_id == write_id:
+                return "started"
+            for item in tuple(session.pending):
+                if item.write_id == write_id and item.state == "queued":
+                    session.pending.remove(item)
+                    item.state = "cancelled"
+                    cancelled = item
+                    break
+        if cancelled is not None:
+            self._invoke(cancelled.on_cancelled, time.perf_counter())
+            return "cancelled"
+        return "not_found"
 
     def flush(self, timeout: float = 0.5) -> bool:
         if timeout < 0:
             raise ValueError("发送等待时间不能为负数")
         with self._transport_lock:
-            write_queue = self._write_queue
+            session = self._write_session
+        if session is None:
+            return False
         deadline = time.perf_counter() + timeout
-        while write_queue.unfinished_tasks:
-            if time.perf_counter() >= deadline:
-                return False
-            time.sleep(min(0.01, max(0.0, deadline - time.perf_counter())))
+        with session.condition:
+            while session.pending or session.active is not None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    return False
+                session.condition.wait(min(0.05, remaining))
         return self.is_open
 
     def stop_and_flush(self, lines: list[str], timeout: float = 0.5) -> bool:
-        self.cancel_pending()
-        for line in lines:
-            if not self.write_line(line, priority=True):
-                return False
+        payload = "".join(line.rstrip("\r\n") + "\r\n" for line in lines)
+        if not self.write(payload, priority=True, discard_pending=True):
+            return False
         return self.flush(timeout)
 
     def _mark_faulted(self) -> None:
-        self._faulted.set()
         with self._transport_lock:
-            transport, self._transport = self._transport, None
-            stop = self._session_stop
-            self._session_stop = None
-        if stop is not None:
-            stop.set()
-        if transport is not None:
-            try:
-                transport.close()
-            except Exception:
-                pass
+            session = self._write_session
+        if session is not None:
+            self._mark_faulted_for_session(session)
 
     def _read_loop(self, session_id, stop, transport, on_data, on_error) -> None:
         try:
@@ -238,51 +352,118 @@ class SerialEndpoint:
                 if transport is None or not transport.is_open:
                     break
                 data = transport.read(4096)
-                if data:
+                if data and not stop.is_set() and self._session_is_current(session_id, transport):
                     on_data(data, time.perf_counter())
         except Exception as exc:
             if not stop.is_set():
-                self._mark_faulted_for_session(session_id, transport, stop)
-                on_error(f"{self.name}读取失败：{exc}")
+                current = self._mark_faulted_for_session(session_id, transport, stop)
+                if current:
+                    self._invoke(on_error, f"{self.name}读取失败：{exc}")
 
-    def _write_loop(self, session_id, stop, transport, write_queue, on_error) -> None:
-        try:
-            while not stop.is_set():
-                try:
-                    data = write_queue.get(timeout=0.1)
-                except queue.Empty:
+    def _write_loop(self, session: _WriteSession, on_error) -> None:
+        while True:
+            with session.condition:
+                while not session.pending and not session.stop.is_set():
+                    session.condition.wait(0.1)
+                if session.stop.is_set():
+                    break
+                ticket = session.pending.popleft()
+                if ticket.state != "queued":
                     continue
-                if data is None:
-                    write_queue.task_done()
-                    break
-                if transport is None or not transport.is_open:
-                    write_queue.task_done()
-                    break
-                payload, on_sent, on_written = data
-                if on_sent is not None:
-                    on_sent(time.perf_counter())
-                transport.write(payload)
-                if on_written is not None:
-                    on_written(time.perf_counter())
-                write_queue.task_done()
-        except Exception as exc:
-            if not stop.is_set():
-                self._mark_faulted_for_session(session_id, transport, stop)
-                on_error(f"{self.name}发送失败：{exc}")
+                ticket.state = "started"
+                session.active = ticket
+            self._invoke(ticket.on_sent, time.perf_counter())
+            failure: Exception | None = None
+            try:
+                count = session.transport.write(ticket.payload)
+                written = len(ticket.payload) if count is None else int(count)
+                ticket.bytes_written = max(0, written)
+                if written != len(ticket.payload):
+                    raise PartialWriteError(written, len(ticket.payload))
+            except Exception as exc:
+                failure = exc
+                if isinstance(exc, PartialWriteError):
+                    ticket.bytes_written = exc.written
+            current = self._session_is_current(session.session_id, session.transport)
+            if failure is None:
+                ticket.state = "completed"
+                if current and not session.stop.is_set():
+                    self._invoke(ticket.on_written, time.perf_counter())
+            else:
+                ticket.state = "failed"
+                stamp = time.perf_counter()
+                if current and not session.stop.is_set():
+                    self._invoke(
+                        ticket.on_failed,
+                        stamp,
+                        ticket.bytes_written,
+                        len(ticket.payload),
+                        str(failure),
+                    )
+            with session.condition:
+                if session.active is ticket:
+                    session.active = None
+                session.condition.notify_all()
+            if failure is not None and current:
+                current = self._mark_faulted_for_session(session)
+                if current:
+                    self._invoke(on_error, f"{self.name}发送失败：{failure}")
+                break
 
-    def _mark_faulted_for_session(self, session_id, transport, stop) -> None:
+    def _session_is_current(self, session_id: int, transport: object) -> bool:
         with self._transport_lock:
-            current = self._session_id == session_id and self._transport is transport
+            return bool(
+                self._session_id == session_id
+                and self._transport is transport
+                and self._write_session is not None
+                and self._write_session.session_id == session_id
+            )
+
+    def _mark_faulted_for_session(self, session_or_id, transport=None, stop=None) -> bool:
+        if isinstance(session_or_id, _WriteSession):
+            session = session_or_id
+        else:
+            with self._transport_lock:
+                session = self._write_session
+            if session is None or session.session_id != session_or_id or session.transport is not transport:
+                if stop is not None:
+                    stop.set()
+                return False
+        cancelled: list[SerialWriteTicket] = []
+        with self._transport_lock:
+            current = self._session_id == session.session_id and self._transport is session.transport
             if current:
                 self._transport = None
                 self._session_stop = None
-        stop.set()
+                self._write_session = None
+                self._faulted.set()
+        session.stop.set()
+        with session.condition:
+            session.closing = True
+            while session.pending:
+                ticket = session.pending.popleft()
+                if ticket.state == "queued":
+                    ticket.state = "cancelled"
+                    cancelled.append(ticket)
+            session.condition.notify_all()
+        stamp = time.perf_counter()
+        for ticket in cancelled:
+            self._invoke(ticket.on_cancelled, stamp)
         if current:
-            self._faulted.set()
             try:
-                transport.close()
+                session.transport.close()
             except Exception:
                 pass
+        return current
+
+    @staticmethod
+    def _invoke(callback, *args) -> None:
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception:
+            pass
 
 
 def _open_transport(port: str, baudrate: int):
@@ -307,10 +488,9 @@ class _PySerialTransport:
     def read(self, size: int) -> bytes:
         return self.serial_port.read(max(1, min(size, self.serial_port.in_waiting)))
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes) -> int:
         count = self.serial_port.write(data)
-        if count is not None and count != len(data):
-            raise OSError(f"串口只写入 {count}/{len(data)} 字节")
+        return len(data) if count is None else int(count)
 
     def close(self) -> None:
         if self.serial_port:
@@ -431,7 +611,7 @@ class _Win32SerialTransport:
             raise ctypes.WinError(error)
         return buffer.raw[: count.value]
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes) -> int:
         if not self.handle:
             raise RuntimeError("串口已关闭")
         count = wintypes.DWORD()
@@ -439,8 +619,7 @@ class _Win32SerialTransport:
         ok = self.kernel32.WriteFile(self.handle, buffer, len(data), ctypes.byref(count), None)
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
-        if count.value != len(data):
-            raise OSError(f"串口只写入 {count.value}/{len(data)} 字节")
+        return int(count.value)
 
     def close(self) -> None:
         handle, self.handle = getattr(self, "handle", None), None

@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
     "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
     "pixel_min": CCD_PIXEL_MIN,
     "pixel_max": CCD_PIXEL_MAX,
-    "sample_rate_hz": 80.0,
+    "sample_rate_hz": 100.0,
     "max_range_m": 1.0,
     "min_range_m": 0.15,
     "angle_offset_deg": 0.0,
@@ -189,7 +189,7 @@ class Simulator:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.period_s = 2.5
-        self.rate_hz = 28.0
+        self.rate_hz = 100.0
         self.p0 = 740.0
         self.k = 120.0
 
@@ -538,7 +538,7 @@ class RadarApp:
         parser_mode = str(self.config.get("ccd_parser", "fffe"))
         self.parser_var.set(CCDFrameParser.MODES.get(parser_mode, CCDFrameParser.MODES["fffe"]))
         self.exposure_var.set(5)
-        self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 80.0)))
+        self.sample_rate_var.set(float(self.config.get("sample_rate_hz", 100.0)))
         self.min_range_var.set(float(self.config.get("min_range_m", 0.08)))
         self.max_range_var.set(float(self.config.get("max_range_m", 3.0)))
         self.angle_offset_var.set(float(self.config.get("angle_offset_deg", 0.0)))
@@ -573,7 +573,7 @@ class RadarApp:
     def _sync_config(self) -> dict:
         config = dict(self.config)
         config["measurement_mode"] = config.get("ccd_parser", "fffe")
-        config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 80.0))
+        config["hardware_sample_rate_hz"] = float(config.get("sample_rate_hz", 100.0))
         config["exposure_index"] = 5
         config["actual_exposure_index"] = 5
         config["pixel_min"] = CCD_PIXEL_MIN
@@ -722,7 +722,7 @@ class RadarApp:
         try:
             self.simulator.set_rate_hz(float(self.sample_rate_var.get()))
         except (ValueError, tk.TclError):
-            self.simulator.set_rate_hz(50.0)
+            self.simulator.set_rate_hz(100.0)
         self.simulator.start()
         self._log("模拟雷达已启动")
 

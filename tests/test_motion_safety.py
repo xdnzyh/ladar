@@ -19,6 +19,28 @@ class MotionSafetyTests(unittest.TestCase):
     def point(self, distance=0.2, stamp=10.1):
         return HardwareObservation("range", 1, stamp, distance)
 
+    def test_hardware_speed_bound_does_not_change_motion_direction(self):
+        guard = MotionSafetyGuard({
+            "runtime_source": "hardware",
+            "safety_speed_upper_bound_mps": 0.30,
+            "safety_stop_distance_m": 0.04,
+        })
+        guard.start(VelocityCommand(forward_mps=0.10, duration_s=1), 10)
+        self.assertIsNone(guard.observe(self.point(distance=0.30), (math.pi / 2, 0), 10.1))
+        self.assertIsNotNone(guard.observe(self.point(distance=0.30), (0, 0), 10.1))
+
+    def test_missing_hardware_stop_distance_fails_closed(self):
+        guard = MotionSafetyGuard({
+            "runtime_source": "hardware",
+            "safety_speed_upper_bound_mps": 0.30,
+            "safety_stop_distance_m": None,
+        })
+        guard.start(VelocityCommand(forward_mps=0.10, duration_s=1), 10)
+        self.assertEqual(
+            guard.observe(self.point(distance=2.0), (0, 0), 10.1),
+            "底盘制动距离未标定，停止自动运动",
+        )
+
     def test_forward_near_obstacle_stops_without_a_complete_sweep(self):
         guard = self.guard(forward_mps=0.14)
         self.assertIsNotNone(guard.observe(self.point(), (0, 0.001), 10.11))

@@ -247,7 +247,7 @@ class HardwareSimulation:
         self.parameters = simulation_parameters(config)
         seed = int(config.get("simulation_seed", 20260907))
         period = float(config.get("radar_period_s", 1.5))
-        rate = float(config.get("simulation_sample_rate_hz", 80))
+        rate = float(config.get("simulation_sample_rate_hz", 100))
         minimum = float(config.get("simulation_min_range_m", 0.08))
         maximum = float(config.get("simulation_max_range_m", 3.0))
         if not all(math.isfinite(v) and v > 0 for v in (period, rate, maximum)):

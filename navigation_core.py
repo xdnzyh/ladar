@@ -626,9 +626,14 @@ class CorrelativeScanMatcher:
         points: Sequence[ScanPoint],
         *,
         window_scale: float = 1.0,
+        translation_window_scale: float | None = None,
+        rotation_window_scale: float | None = None,
         minimum_evidence: float = 4.0,
     ) -> ScanMatchResult:
-        if not math.isfinite(window_scale) or window_scale < 0:
+        translation_scale = window_scale if translation_window_scale is None else translation_window_scale
+        rotation_scale = window_scale if rotation_window_scale is None else rotation_window_scale
+        if not all(math.isfinite(value) and value >= 0 for value in (
+                window_scale, translation_scale, rotation_scale)):
             raise ValueError("搜索窗口倍率必须为非负有限数")
         valid = [p for p in points if math.isfinite(p.angle_rad) and math.isfinite(p.distance_m)
                  and math.isfinite(p.quality) and p.quality >= grid.MIN_QUALITY and p.distance_m > 0]
@@ -639,8 +644,8 @@ class CorrelativeScanMatcher:
         if len(ordered) > 64:
             ordered = [ordered[index * len(ordered) // 64] for index in range(64)]
         sampled = [(p.x, p.y, p.evidence_weight(grid.resolution_m)) for p in ordered]
-        translation = min(self.MAX_TRANSLATION_WINDOW_M, self.translation_window_m * window_scale)
-        rotation = min(self.MAX_ROTATION_WINDOW_RAD, self.rotation_window_rad * window_scale)
+        translation = min(self.MAX_TRANSLATION_WINDOW_M, self.translation_window_m * translation_scale)
+        rotation = min(self.MAX_ROTATION_WINDOW_RAD, self.rotation_window_rad * rotation_scale)
         levels = ((translation, rotation, 0.05, math.radians(2.5), 0.12),
                   (0.05, math.radians(2.5), 0.02, math.radians(1), 0.08),
                   (0.015, math.radians(0.8), 0.005, math.radians(0.2), self.LIKELIHOOD_SIGMA_M))
@@ -777,7 +782,8 @@ class NavigationEngine:
     MAP_UPDATE_MIN_CONFIDENCE = 0.55
     LOST_AFTER_FAILURES = 3
     BOOTSTRAP_SCANS = 3
-    MAX_MOTION_SEGMENT_M = 0.24
+    TRANSLATION_MODES = tuple("WSADQEZC")
+    MAX_MOTION_SEGMENT_M = 0.20
     DIAGONAL_MOTION_SPEED_MPS = 0.11
     MAX_DIAGONAL_SEGMENT_M = 0.10
     DIAGONAL_PROBE_SEGMENT_M = 0.08
@@ -799,6 +805,7 @@ class NavigationEngine:
         sensor_offset_yaw_rad: float = 0.0,
         min_range_m: float = 0.08,
         path_turn_penalty: float = PATH_TURN_PENALTY,
+        translation_capabilities: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         self.grid = grid or OccupancyGrid()
         self.max_range_m = max_range_m
@@ -808,6 +815,7 @@ class NavigationEngine:
         self.sensor_offset_y_m = sensor_offset_y_m
         self.sensor_offset_yaw_rad = sensor_offset_yaw_rad
         self.path_turn_penalty = max(0.0, float(path_turn_penalty))
+        self.translation_capabilities = self._normalize_translation_capabilities(translation_capabilities)
         self.pose = Pose2D()
         self.start_pose = Pose2D()
         self.matcher = CorrelativeScanMatcher()
@@ -830,6 +838,8 @@ class NavigationEngine:
         self._predicted_travel_m = 0.0
         self._predicted_strafe_m = 0.0
         self._predicted_motion_uncertainty_m = 0.0
+        self._predicted_rotation_rad = 0.0
+        self._predicted_motion_uncertainty_rad = 0.0
         self._diagonal_motion_since_last_scan = False
         self._last_scan_had_diagonal_motion = False
         self._motion_since_last_scan = False
@@ -843,8 +853,46 @@ class NavigationEngine:
         self._no_route_turns = 0
         self._parking_search_attempts = 0
         self._parking_goal: tuple[int, int] | None = None
+        self._last_motion_rejection_reason = ""
         self.last_progress_angle_world = 0.0
         self.trajectory: list[tuple[float, float]] = [(0.0, 0.0)]
+
+    @classmethod
+    def _normalize_translation_capabilities(
+        cls,
+        capabilities: Mapping[str, Mapping[str, object]] | None,
+    ) -> dict[str, dict[str, float | bool]]:
+        if capabilities is None:
+            return {
+                mode: {"enabled": True, "min_m": 0.0, "max_m": cls.MAX_MOTION_SEGMENT_M}
+                for mode in cls.TRANSLATION_MODES
+            }
+        normalized: dict[str, dict[str, float | bool]] = {}
+        for mode in cls.TRANSLATION_MODES:
+            raw = capabilities.get(mode)
+            if not isinstance(raw, Mapping):
+                normalized[mode] = {"enabled": False, "min_m": 0.0, "max_m": 0.0}
+                continue
+            enabled = raw.get("enabled", False)
+            if not isinstance(enabled, bool):
+                raise ValueError(f"底盘 {mode} 方向 enabled 必须是布尔值")
+            minimum = raw.get("min_m", raw.get("min_distance_m", 0.0))
+            maximum = raw.get("max_m", raw.get("max_distance_m", cls.MAX_MOTION_SEGMENT_M))
+            try:
+                minimum = float(minimum)
+                maximum = float(maximum)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"底盘 {mode} 方向距离范围必须是有限数值") from exc
+            if not all(math.isfinite(value) for value in (minimum, maximum)):
+                raise ValueError(f"底盘 {mode} 方向距离范围必须是有限数值")
+            if minimum < 0 or maximum < minimum or minimum > cls.MAX_MOTION_SEGMENT_M:
+                raise ValueError(f"底盘 {mode} 方向距离范围无效")
+            normalized[mode] = {
+                "enabled": enabled,
+                "min_m": minimum,
+                "max_m": min(maximum, cls.MAX_MOTION_SEGMENT_M),
+            }
+        return normalized
 
     def reset(self) -> None:
         self.grid.clear()
@@ -868,6 +916,8 @@ class NavigationEngine:
         self._predicted_travel_m = 0.0
         self._predicted_strafe_m = 0.0
         self._predicted_motion_uncertainty_m = 0.0
+        self._predicted_rotation_rad = 0.0
+        self._predicted_motion_uncertainty_rad = 0.0
         self._diagonal_motion_since_last_scan = False
         self._last_scan_had_diagonal_motion = False
         self._motion_since_last_scan = False
@@ -881,6 +931,7 @@ class NavigationEngine:
         self._no_route_turns = 0
         self._parking_search_attempts = 0
         self._parking_goal = None
+        self._last_motion_rejection_reason = ""
         self.last_progress_angle_world = 0.0
         self.trajectory = [(0.0, 0.0)]
 
@@ -908,6 +959,7 @@ class NavigationEngine:
         self._translation_since_last_scan = self._translation_since_last_scan or math.hypot(local_x, local_y) > 1e-6
         self._predicted_travel_m += math.hypot(local_x, local_y)
         self._predicted_strafe_m += abs(local_x)
+        self._predicted_rotation_rad += abs(command.yaw_rps * command.duration_s)
         world_x, world_y = self.pose.local_to_world(local_x, local_y)
         self.pose.x = world_x
         self.pose.y = world_y
@@ -921,10 +973,12 @@ class NavigationEngine:
         local_y_m: float,
         yaw_rad: float = 0.0,
         uncertainty_m: float = 0.0,
+        uncertainty_rad: float = 0.0,
     ) -> None:
         """Apply one calibrated hardware execution result as a scan-match prior."""
-        values = (local_x_m, local_y_m, yaw_rad, uncertainty_m)
-        if not all(math.isfinite(float(value)) for value in values) or uncertainty_m < 0:
+        values = (local_x_m, local_y_m, yaw_rad, uncertainty_m, uncertainty_rad)
+        if (not all(math.isfinite(float(value)) for value in values)
+                or uncertainty_m < 0 or uncertainty_rad < 0):
             raise ValueError("执行位姿先验必须是有限数值")
         translation = math.hypot(local_x_m, local_y_m)
         if translation <= 1e-9 and abs(yaw_rad) <= 1e-9:
@@ -936,6 +990,8 @@ class NavigationEngine:
         self._predicted_travel_m += translation
         self._predicted_strafe_m += abs(local_x_m)
         self._predicted_motion_uncertainty_m += max(0.0, uncertainty_m)
+        self._predicted_rotation_rad += abs(yaw_rad)
+        self._predicted_motion_uncertainty_rad += max(0.0, uncertainty_rad)
         world_x, world_y = self.pose.local_to_world(local_x_m, local_y_m)
         self.pose.x = world_x
         self.pose.y = world_y
@@ -992,11 +1048,24 @@ class NavigationEngine:
             corrected, score = self._body_pose_from_sensor(corrected_sensor), 1.0
         else:
             predicted_sensor = self._sensor_pose()
-            scale = min(1.5, 0.6 + self._predicted_travel_m * 2 + self._predicted_strafe_m * 3
-                        + self._predicted_motion_uncertainty_m * 6
-                        + max(0.0, 0.85 - self.match_score) + self.match_failures * 0.15)
+            common_scale = 0.6 + max(0.0, 0.85 - self.match_score) + self.match_failures * 0.15
+            translation_scale = min(
+                1.5,
+                common_scale + self._predicted_travel_m * 2 + self._predicted_strafe_m * 3
+                + self._predicted_motion_uncertainty_m * 6,
+            )
+            rotation_scale = min(
+                1.5,
+                common_scale + self._predicted_rotation_rad / max(self.matcher.rotation_window_rad, 1e-9)
+                + self._predicted_motion_uncertainty_rad / max(self.matcher.rotation_window_rad, 1e-9),
+            )
             match_result = self.matcher.match(
-                self.grid, predicted_sensor, matching_points, window_scale=0.0 if initializing else scale,
+                self.grid,
+                predicted_sensor,
+                matching_points,
+                window_scale=0.0 if initializing else 1.0,
+                translation_window_scale=0.0 if initializing else translation_scale,
+                rotation_window_scale=0.0 if initializing else rotation_scale,
                 minimum_evidence=0.25 if initializing else 4.0)
             if isinstance(match_result, ScanMatchResult):
                 corrected_sensor, score = match_result.corrected_sensor_pose, match_result.data_score
@@ -1013,7 +1082,7 @@ class NavigationEngine:
             correction_yaw = abs(wrap_angle(corrected_sensor.yaw - predicted_sensor.yaw))
             prior_aligned = (
                 correction_distance <= max(2.0 * self.grid.resolution_m, 0.05) + self._predicted_motion_uncertainty_m
-                and correction_yaw <= math.radians(3.0)
+                and correction_yaw <= math.radians(3.0) + self._predicted_motion_uncertainty_rad
             )
             if not initializing and match_result.degenerate and not prior_aligned:
                 return self._reject_scan(score, match_result.rejection_reason or "本圈几何定位不充分，停车重扫")
@@ -1024,6 +1093,8 @@ class NavigationEngine:
         self.match_failures = 0
         self._predicted_travel_m = self._predicted_strafe_m = 0.0
         self._predicted_motion_uncertainty_m = 0.0
+        self._predicted_rotation_rad = 0.0
+        self._predicted_motion_uncertainty_rad = 0.0
         summary = self.grid.update_scan(self._sensor_pose(), valid, self.max_range_m, scan_confidence=score)
         if summary.out_of_bounds_points:
             self.detail = f"本圈有 {summary.out_of_bounds_points} 个回波超出地图范围"
@@ -1187,8 +1258,12 @@ class NavigationEngine:
             self._terminal_evidence_scans = 0
             self._terminal_signature = None
         if self._empty_frontier_scans < 3 or self._terminal_evidence_scans < 3:
-            self.state = "终点确认"
-            self.detail = "全向雷达固定姿态连续复测"
+            if self._last_motion_rejection_reason:
+                self.state = "无可执行安全动作"
+                self.detail = self._last_motion_rejection_reason
+            else:
+                self.state = "终点确认"
+                self.detail = "全向雷达固定姿态连续复测"
             return VelocityCommand()
 
         self._parking_goal = start
@@ -1225,9 +1300,24 @@ class NavigationEngine:
             return VelocityCommand()
         distance, angle = candidates[0]
         travel = min(self.PARKING_SEARCH_STEP_M, max(0.0, distance - 0.28))
-        if travel < 0.02:
-            return VelocityCommand()
         speed = self.PARKING_SEARCH_SPEED_MPS
+        preview = VelocityCommand(
+            forward_mps=speed * math.cos(angle),
+            right_mps=speed * math.sin(angle),
+            duration_s=1.0,
+        )
+        mode = self._translation_mode(preview)
+        capability = self._capability(mode) if mode is not None else {"enabled": False, "min_m": 0.0, "max_m": 0.0}
+        if not capability["enabled"]:
+            self._last_motion_rejection_reason = f"{mode or '当前'} 方向尚未开放停车搜索"
+            return VelocityCommand()
+        travel = min(travel, float(capability["max_m"]))
+        minimum = float(capability["min_m"])
+        if travel < max(0.02, minimum) - 1e-9:
+            self._last_motion_rejection_reason = (
+                f"{mode} 方向停车搜索 {travel:.3f} m 小于已验证最小步长 {minimum:.3f} m"
+            )
+            return VelocityCommand()
         command = VelocityCommand(
             forward_mps=speed * math.cos(angle),
             right_mps=speed * math.sin(angle),
@@ -1267,10 +1357,12 @@ class NavigationEngine:
     def _corridor_probe_command(self) -> VelocityCommand:
         if not self.latest_scan:
             return VelocityCommand()
+        self._last_motion_rejection_reason = ""
         previous_local = wrap_angle(self.last_progress_angle_world - self.pose.yaw)
         route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
         current_cell = self.grid.world_to_cell(self.pose.x, self.pose.y)
-        route_distances = self._free_distance_field(route_start)
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
+        route_distances, _ = self.grid.reachable_tree(route_start, blocked)
         current_progress = route_distances.get(current_cell)
         candidates: list[tuple[float, float, float]] = []
         for index in range(-10, 11):
@@ -1320,29 +1412,36 @@ class NavigationEngine:
                 diagonal = self._safe_diagonal_command(
                     forward_hint,
                     right_hint,
+                    blocked=blocked,
                     max_distance_m=self.DIAGONAL_PROBE_SEGMENT_M,
                 )
                 if diagonal is not None:
                     commands.append(diagonal)
             forward, right = self._cardinal_translation(forward_hint, right_hint, speed)
-            commands.append(VelocityCommand(forward, right, 0.0, 0.42))
+            mode = self._translation_mode(VelocityCommand(forward, right, 0.0, 1.0))
+            capability = self._capability(mode) if mode is not None else {"max_m": 0.0}
+            cardinal_distance = min(speed * 0.42, float(capability["max_m"]))
+            if cardinal_distance > 1e-9:
+                commands.append(VelocityCommand(forward, right, 0.0, cardinal_distance / speed))
             if not self._is_diagonal_heading(forward_hint, right_hint):
                 diagonal = self._safe_diagonal_command(
                     forward_hint,
                     right_hint,
+                    blocked=blocked,
                     max_distance_m=self.DIAGONAL_PROBE_SEGMENT_M,
                 )
                 if diagonal is not None:
                     commands.append(diagonal)
             for command in commands:
-                if not self._command_has_clearance(command):
+                guarded, _ = self._translation_guard(command, blocked)
+                if guarded.stopped:
                     continue
                 chosen_world = wrap_angle(
-                    self.pose.yaw + math.atan2(command.right_mps, command.forward_mps)
+                    self.pose.yaw + math.atan2(guarded.right_mps, guarded.forward_mps)
                 )
                 if abs(wrap_angle(chosen_world - self.last_progress_angle_world)) >= math.radians(60):
                     self.last_progress_angle_world = chosen_world
-                return command
+                return guarded
         return VelocityCommand()
 
     @staticmethod
@@ -1422,6 +1521,7 @@ class NavigationEngine:
     def _command_along_path(self) -> VelocityCommand:
         if len(self.path_cells) < 2:
             return VelocityCommand()
+        self._last_motion_rejection_reason = ""
         lookahead_index = self._straight_run_end(self.path_cells)
         world_x, world_y = self.grid.cell_to_world(*self.path_cells[lookahead_index])
         local_x, local_y = self.pose.world_to_local(world_x, world_y)
@@ -1448,34 +1548,55 @@ class NavigationEngine:
                 return diagonal
         axis_distance = max(abs(local_y), abs(local_x))
         forward, right = self._cardinal_translation(forward_hint, right_hint, speed)
-        short_travel = min(axis_distance, speed * 0.38)
-        command = VelocityCommand(forward, right, 0.0, short_travel / speed)
+        mode = self._translation_mode(VelocityCommand(forward, right, 0.0, 1.0))
+        if mode is None:
+            return self._set_motion_blocked("规划结果无法分解为受支持的平移方向")
+        capability = self._capability(mode)
+        if not capability["enabled"]:
+            return self._set_motion_blocked(f"{mode} 方向尚未开放")
+        minimum = float(capability["min_m"])
+        maximum = min(axis_distance, float(capability["max_m"]), self.MAX_MOTION_SEGMENT_M)
+        short_travel = min(maximum, speed * 0.38)
+        candidates: list[VelocityCommand] = []
         if self.match_score >= 0.75:
-            travel = min(axis_distance, self.MAX_MOTION_SEGMENT_M)
+            travel = maximum
             while travel > short_travel + 0.01:
-                candidate = VelocityCommand(forward, right, 0.0, travel / speed)
-                if self._grid_segment_is_clear(candidate, blocked) and self._command_has_clearance(candidate):
-                    command = candidate
-                    break
+                if travel + 1e-9 >= minimum:
+                    candidates.append(VelocityCommand(forward, right, 0.0, travel / speed))
                 travel *= 0.7
-        guarded = self._collision_guard(command)
-        if guarded.stopped:
+        if short_travel + 1e-9 >= minimum and short_travel > 1e-9:
+            candidates.append(VelocityCommand(forward, right, 0.0, short_travel / speed))
+        elif self.match_score >= 0.75 and maximum + 1e-9 >= minimum and not candidates:
+            candidates.append(VelocityCommand(forward, right, 0.0, maximum / speed))
+        last_reason = None
+        for candidate in candidates:
+            guarded, last_reason = self._translation_guard(candidate, blocked)
+            if not guarded.stopped:
+                path_direction = wrap_angle(
+                    self.pose.yaw + math.atan2(guarded.right_mps, guarded.forward_mps)
+                )
+                if abs(wrap_angle(path_direction - self.last_progress_angle_world)) >= math.radians(60):
+                    self.last_progress_angle_world = path_direction
+                return guarded
+        if not candidates:
+            last_reason = (
+                f"{mode} 方向目标 {maximum:.3f} m 小于已验证最小步长 {minimum:.3f} m"
+            )
+            self._last_motion_rejection_reason = last_reason
+        if candidates or self._is_diagonal_heading(forward_hint, right_hint):
             diagonal = self._safe_diagonal_command(forward_hint, right_hint, blocked=blocked)
             if diagonal is None:
                 diagonal = self._safe_diagonal_command(
                     forward_hint,
                     right_hint,
+                    blocked=blocked,
                     max_distance_m=self.DIAGONAL_RECOVERY_SEGMENT_M,
                 )
             if diagonal is not None:
                 self.state = "探索中"
                 self.detail = "保守45°平移，下一圈重新定位"
-                guarded = diagonal
-        if not guarded.stopped:
-            path_direction = wrap_angle(self.pose.yaw + math.atan2(guarded.right_mps, guarded.forward_mps))
-            if abs(wrap_angle(path_direction - self.last_progress_angle_world)) >= math.radians(60):
-                self.last_progress_angle_world = path_direction
-        return guarded
+                return diagonal
+        return self._set_motion_blocked(last_reason)
 
     @staticmethod
     def _compress_straight_runs(path: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -1535,6 +1656,124 @@ class NavigationEngine:
             return math.copysign(speed_mps, forward_mps), 0.0
         return 0.0, math.copysign(speed_mps, right_mps)
 
+    @staticmethod
+    def _translation_mode(command: VelocityCommand) -> str | None:
+        if command.stopped or abs(command.yaw_rps) > 1e-9:
+            return None
+        forward = command.forward_mps
+        right = command.right_mps
+        if abs(right) <= 1e-9:
+            return "W" if forward > 0 else "S"
+        if abs(forward) <= 1e-9:
+            return "D" if right > 0 else "A"
+        dominant = max(abs(forward), abs(right))
+        if abs(abs(forward) - abs(right)) > dominant * 0.04:
+            return None
+        if forward > 0:
+            return "E" if right > 0 else "Q"
+        return "C" if right > 0 else "Z"
+
+    def _capability(self, mode: str) -> Mapping[str, float | bool]:
+        return self.translation_capabilities.get(
+            mode,
+            {"enabled": False, "min_m": 0.0, "max_m": 0.0},
+        )
+
+    @staticmethod
+    def _command_distance(command: VelocityCommand) -> float:
+        return math.hypot(command.forward_mps, command.right_mps) * command.duration_s
+
+    def _motion_cells(self, command: VelocityCommand) -> list[tuple[int, int]]:
+        target = self.pose.local_to_world(
+            command.right_mps * command.duration_s,
+            command.forward_mps * command.duration_s,
+        )
+        return self.grid._line_cells(
+            self.grid.world_to_cell(self.pose.x, self.pose.y),
+            self.grid.world_to_cell(*target),
+        )
+
+    def _swept_body_cells(self, center_cells: Sequence[tuple[int, int]]) -> set[tuple[int, int]]:
+        radius_cells = max(1, math.ceil(self.robot_radius_m / self.grid.resolution_m))
+        limit = self.robot_radius_m + self.grid.resolution_m * 0.5
+        swept: set[tuple[int, int]] = set()
+        for center_col, center_row in center_cells:
+            for delta_row in range(-radius_cells, radius_cells + 1):
+                for delta_col in range(-radius_cells, radius_cells + 1):
+                    if math.hypot(delta_col, delta_row) * self.grid.resolution_m > limit:
+                        continue
+                    cell = center_col + delta_col, center_row + delta_row
+                    swept.add(cell)
+        return swept
+
+    def _translation_guard(
+        self,
+        command: VelocityCommand,
+        blocked: set[tuple[int, int]] | None = None,
+    ) -> tuple[VelocityCommand, str | None]:
+        if command.stopped:
+            return command, None
+        if abs(command.yaw_rps) > 1e-9:
+            reason = "当前底盘能力未开放旋转动作"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        mode = self._translation_mode(command)
+        if mode is None:
+            reason = "平移动作必须是轴向或等幅 45° 方向"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        capability = self._capability(mode)
+        if not capability["enabled"]:
+            reason = f"{mode} 方向尚未开放"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        distance = self._command_distance(command)
+        minimum = float(capability["min_m"])
+        maximum = float(capability["max_m"])
+        if distance + 1e-9 < minimum:
+            reason = f"{mode} 方向目标 {distance:.3f} m 小于已验证最小步长 {minimum:.3f} m"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        if distance > maximum + 1e-9:
+            reason = f"{mode} 方向目标 {distance:.3f} m 超过当前上限 {maximum:.3f} m"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02) if blocked is None else blocked
+        cells = self._motion_cells(command)
+        swept_cells = self._swept_body_cells(cells)
+        unknown = [cell for cell in swept_cells if self.grid.state(*cell) != self.grid.FREE]
+        if unknown:
+            reason = "动作扫过区域包含未知空间"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        if any(cell in blocked for cell in cells):
+            reason = "动作扫过区域进入膨胀障碍边界"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        if len(self.latest_scan) < 12:
+            reason = "最新完整雷达回波不足"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        if not self._command_has_clearance(command):
+            reason = "最新雷达回波显示车体扫过距离不足"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
+        route_distances, _ = self.grid.reachable_tree(route_start, blocked)
+        current = self.grid.world_to_cell(self.pose.x, self.pose.y)
+        current_progress = route_distances.get(current)
+        if current_progress is None or not self._is_forward_path(cells, route_distances, current_progress):
+            reason = "动作不满足单向路线进度约束"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        self._last_motion_rejection_reason = ""
+        return command, None
+
+    def _set_motion_blocked(self, reason: str | None = None) -> VelocityCommand:
+        self.state = "无可执行安全动作"
+        self.detail = reason or self._last_motion_rejection_reason or "当前规划步长或路径不满足底盘能力与安全约束"
+        return VelocityCommand()
+
     @classmethod
     def _is_diagonal_heading(cls, forward_mps: float, right_mps: float) -> bool:
         dominant = max(abs(forward_mps), abs(right_mps))
@@ -1557,16 +1796,40 @@ class NavigationEngine:
                     ranked.append((alignment, forward_sign, right_sign))
         ranked.sort(reverse=True)
         speed = self.DIAGONAL_MOTION_SPEED_MPS
-        distance = self.MAX_DIAGONAL_SEGMENT_M if max_distance_m is None else min(
+        requested_distance = self.MAX_DIAGONAL_SEGMENT_M if max_distance_m is None else min(
             self.MAX_DIAGONAL_SEGMENT_M,
             max_distance_m,
         )
-        duration = distance / speed
         component = speed / math.sqrt(2.0)
-        return tuple(
-            VelocityCommand(component * forward_sign, component * right_sign, 0.0, duration)
-            for _, forward_sign, right_sign in ranked
-        )
+        commands = []
+        for _, forward_sign, right_sign in ranked:
+            mode = (
+                "E" if forward_sign > 0 and right_sign > 0
+                else "Q" if forward_sign > 0
+                else "C" if right_sign > 0
+                else "Z"
+            )
+            capability = self._capability(mode)
+            if not capability["enabled"]:
+                self._last_motion_rejection_reason = f"{mode} 方向尚未开放"
+                continue
+            distance = min(requested_distance, float(capability["max_m"]))
+            minimum = float(capability["min_m"])
+            if distance + 1e-9 < minimum:
+                self._last_motion_rejection_reason = (
+                    f"{mode} 方向目标 {distance:.3f} m 小于已验证最小步长 {minimum:.3f} m"
+                )
+                continue
+            if distance <= 1e-9:
+                self._last_motion_rejection_reason = f"{mode} 方向没有可执行的正距离"
+                continue
+            commands.append(VelocityCommand(
+                component * forward_sign,
+                component * right_sign,
+                0.0,
+                distance / speed,
+            ))
+        return tuple(commands)
 
     def _safe_diagonal_command(
         self,
@@ -1576,13 +1839,14 @@ class NavigationEngine:
         blocked: set[tuple[int, int]] | None = None,
         max_distance_m: float | None = None,
     ) -> VelocityCommand | None:
-        if blocked is None and len(self.latest_scan) < 12:
+        if len(self.latest_scan) < 12:
+            self._last_motion_rejection_reason = "最新完整雷达回波不足"
             return None
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02) if blocked is None else blocked
         for command in self._diagonal_command_candidates(forward_hint, right_hint, max_distance_m):
-            if blocked is not None and not self._grid_segment_is_clear(command, blocked):
-                continue
-            if self._command_has_clearance(command):
-                return command
+            guarded, _ = self._translation_guard(command, blocked)
+            if not guarded.stopped:
+                return guarded
         return None
 
     def _command_has_clearance(self, command: VelocityCommand) -> bool:
@@ -1607,11 +1871,11 @@ class NavigationEngine:
         if command.stopped:
             return command
         blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
-        if not self._grid_segment_is_clear(command, blocked) or not self._command_has_clearance(command):
+        guarded, reason = self._translation_guard(command, blocked)
+        if guarded.stopped:
             self.state = "避障重规划"
-            self.detail = "车体扫过区域距离不足，停车更新障碍边界"
-            return VelocityCommand()
-        return command
+            self.detail = reason or "车体扫过区域距离不足，停车更新障碍边界"
+        return guarded
 
     def _grid_segment_is_clear(self, command: VelocityCommand, blocked: set[tuple[int, int]]) -> bool:
         if command.stopped:

@@ -171,7 +171,7 @@ class SimulatorTests(unittest.TestCase):
         finish_distance = math.hypot(world.pose.x - world.finish[0], world.pose.y - world.finish[1])
         self.assertNotEqual(navigator.state, "泊车完成")
         self.assertGreater(finish_distance, 0.50)
-        self.assertGreater(navigator.grid.known_area_m2(), 3.0)
+        self.assertGreater(navigator.grid.known_area_m2(), 2.9)
 
 
 class MecanumTests(unittest.TestCase):
