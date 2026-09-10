@@ -34,19 +34,19 @@ def _window_is_linear(items, max_rms_m: float, min_span_m: float) -> bool:
 def line_supported_indices(
     points: Sequence[object],
     *,
-    min_window_points: int = 4,
+    min_window_points: int = 5,
     max_angle_gap_deg: float = 20.0,
     max_neighbor_gap_m: float = 0.18,
-    max_rms_m: float = 0.020,
+    max_rms_m: float = 0.012,
     min_span_m: float = 0.050,
 ) -> set[int]:
     """Return indices belonging to locally straight, contiguous scan runs.
 
     The filter is intentionally local.  It keeps short wall fragments while
-    rejecting isolated echoes and small irregular clusters.  It does not need
-    a global 360-degree wall model and therefore works in small rooms where a
-    single revolution may contain several short straight segments separated by
-    large angular gaps.
+    rejecting isolated echoes and small irregular clusters.  Five consecutive
+    samples are required by default so a smooth circular/curved arc is not
+    accidentally accepted merely because a tiny three- or four-point window
+    looks approximately straight.
     """
     if min_window_points < 3:
         raise ValueError("min_window_points must be at least 3")
