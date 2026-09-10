@@ -1150,14 +1150,23 @@ class NavigationApp:
         target = "navigation" if view == "navigation" else "radar"
         if target == "navigation":
             if self.running and not self._navigation_preflight(show=True):
-                target = "radar"
+                self.stop()
         elif self.running and (
             self.moving
             or bool(getattr(getattr(self, "chassis_controller", None), "in_flight", False))
         ):
             self._stop_motion_for_mode_switch()
         self.view_mode.set(target)
-        self.navigator.set_auto(target == "navigation" and self.running)
+        # A worker processes a copy of the navigator outside this lock. Invalidate
+        # that copy before changing modes so its commit cannot restore radar mode.
+        with self.mapping_lock:
+            self.mapping_generation += 1
+            self._clear_mapping_tasks()
+            self.navigator.set_auto(target == "navigation" and self.running)
+            self.mapping_snapshot = None
+            if target == "navigation" and not self.running:
+                self.navigator.state = "自动导航待启动"
+                self.navigator.detail = "已选择自动导航；点击开始，预检通过后启动建图与导航"
         self.nav_state_var.set(self.navigator.state)
         self.nav_detail_var.set(self.navigator.detail)
 
