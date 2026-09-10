@@ -65,6 +65,7 @@ class TimedSweepBuilder:
         self.period_s = None
         self.rejected_points = 0
         self.last_closed_points = []
+        self.last_display_points = []
         self.last_closed_period = None
         self.last_outcome = "waiting_for_zero"
         self.last_failure_reason = ""
@@ -73,6 +74,7 @@ class TimedSweepBuilder:
         self.samples.clear()
         self.collect_after = timestamp
         self.reason = "等待停车后完整零位圈"
+        self.last_display_points = []
         self.last_failure_reason = ""
 
     def sample(self, timestamp, uncertainty, pixel, distance, is_echo=True,
@@ -86,6 +88,7 @@ class TimedSweepBuilder:
 
     def trigger(self, timestamp, uncertainty, count):
         self.last_closed_points = []
+        self.last_display_points = []
         self.last_closed_period = None
         anchor, samples = self.anchor, self.samples
         self.anchor = (timestamp, uncertainty, count)
@@ -102,6 +105,43 @@ class TimedSweepBuilder:
             self.last_failure_reason = self.reason
             self.last_outcome = "timing_failure"
             return []
+
+        # The display path is deliberately independent from mapping confidence.
+        # As soon as a revolution is bounded by two consecutive real TRIG events,
+        # every finite range sample inside that physical revolution is projected
+        # with the actual adjacent-zero period and retained for visualization.
+        # Confidence/uncertainty filters below still govern localization and map
+        # writes; they must never make real measured points disappear from view.
+        direction = 1 if self.config.get("clockwise", True) else -1
+        offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
+        display_lower_period = period - start_error - uncertainty
+        display_points = []
+        for stamp, error, pixel, distance, is_echo, distance_error_m, calibration_version, source_session in samples:
+            if (not math.isfinite(stamp) or not math.isfinite(distance)
+                    or not start <= stamp < timestamp):
+                continue
+            phase = (stamp - start) / period
+            angle_error = None
+            if math.isfinite(error) and error >= 0 and display_lower_period > 0:
+                angle_error = math.tau * (
+                    error + (1 - phase) * start_error + phase * uncertainty
+                ) / display_lower_period
+            display_points.append(PolarPoint(
+                distance,
+                (offset + direction * math.tau * phase) % math.tau,
+                stamp,
+                pixel,
+                bool(is_echo),
+                time_error_s=error if math.isfinite(error) and error >= 0 else None,
+                angle_error_rad=angle_error,
+                distance_error_m=distance_error_m,
+                calibration_version=calibration_version,
+                source="range",
+                session=source_session,
+            ))
+        self.last_display_points = display_points
+        self.last_closed_period = period
+
         previous = self.previous_period
         self.previous_period = self.period_s = period
         if previous is not None and abs(period / previous - 1) > float(self.config.get("period_tolerance", 0.05)):
@@ -128,8 +168,6 @@ class TimedSweepBuilder:
             self.last_outcome = "timing_failure"
             return []
         result = []
-        direction = 1 if self.config.get("clockwise", True) else -1
-        offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         error_limit = float(self.config.get("max_timing_position_error_m", 0.04))
         for stamp, error, pixel, distance, is_echo, distance_error_m, calibration_version, source_session in samples:
             if (not all(math.isfinite(v) for v in (stamp, error, distance)) or error < 0
@@ -155,7 +193,6 @@ class TimedSweepBuilder:
                 session=source_session,
             ))
         self.last_closed_points = result
-        self.last_closed_period = period
         if self.stable_periods < 2:
             self.reason = "转速稳定中"
             self.last_outcome = "warmup"
@@ -525,14 +562,14 @@ class DistanceObservationReceiver:
                     if self.builder.stable_periods < 2 and had_anchor:
                         self.warmup += 1
                     continue
-                if self.builder.last_closed_points:
-                    local_results.append((packet.sequence - 1, list(self.builder.last_closed_points),
-                                          self.builder.last_closed_period))
-                if points:
-                    self.accepted += 1
-                    results.append((packet.sequence - 1, points, self.builder.period_s))
+
+                # Visualization and mapping are intentionally separated.  A
+                # closed physical revolution replaces the radar display with
+                # every measured point from that revolution, even when none of
+                # those points is trustworthy enough for map/localization use.
+                if self.builder.last_closed_period is not None:
                     self._preview.clear()
-                    for point in points:
+                    for point in self.builder.last_display_points:
                         self._preview.append(PreviewObservation(
                             point.timestamp,
                             point.angle_rad,
@@ -542,6 +579,13 @@ class DistanceObservationReceiver:
                             point.time_error_s,
                             point.angle_error_rad,
                         ))
+
+                if self.builder.last_closed_points:
+                    local_results.append((packet.sequence - 1, list(self.builder.last_closed_points),
+                                          self.builder.last_closed_period))
+                if points:
+                    self.accepted += 1
+                    results.append((packet.sequence - 1, points, self.builder.period_s))
                 elif had_anchor:
                     if self.builder.last_outcome == "warmup":
                         self.warmup += 1
