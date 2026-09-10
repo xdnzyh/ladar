@@ -771,26 +771,46 @@ class CorrelativeScanMatcher:
         if inliers < self.MIN_HIT_POINTS or len(sectors) < 3:
             confidence = 0.0
         candidate_scores = []
+        ambiguous_candidates = []
         for candidate in centers:
             score = pose_score(candidate)
             separation = math.hypot(candidate.x - best.x, candidate.y - best.y)
             yaw_separation = abs(wrap_angle(candidate.yaw - best.yaw))
             if separation >= 2 * grid.resolution_m or yaw_separation >= math.radians(2):
                 candidate_scores.append(score)
+                if abs(best_raw_score - score) < 0.025:
+                    # Nearby search samples can belong to one broad optimum.
+                    # A second solution needs a valley between the poses, or
+                    # a high-score ridge spanning a substantial pose interval.
+                    bridge_scores = [pose_score(Pose2D(
+                        best.x + fraction * (candidate.x - best.x),
+                        best.y + fraction * (candidate.y - best.y),
+                        wrap_angle(best.yaw + fraction * wrap_angle(candidate.yaw - best.yaw)),
+                    )) for fraction in (0.25, 0.5, 0.75)]
+                    valley = min(bridge_scores) < min(best_raw_score, score) - 0.015
+                    wide_ridge = (separation >= max(4 * grid.resolution_m, 2 * self.LIKELIHOOD_SIGMA_M)
+                                  or yaw_separation >= math.radians(5))
+                    if valley or wide_ridge:
+                        ambiguous_candidates.append(score)
         second_score = max(candidate_scores) if candidate_scores else None
         boundary = (
             abs(best.x - predicted.x) >= max(translation - grid.resolution_m * 0.5, 0.0)
             or abs(best.y - predicted.y) >= max(translation - grid.resolution_m * 0.5, 0.0)
             or abs(wrap_angle(best.yaw - predicted.yaw)) >= max(rotation - math.radians(0.3), 0.0)
         )
-        separated_ambiguity = confidence >= 0.75 and second_score is not None and abs(best_raw_score - second_score) < 0.025
+        separated_ambiguity = confidence >= 0.75 and bool(ambiguous_candidates)
         local_probe_scores = [
             pose_score(Pose2D(best.x + dx * grid.resolution_m, best.y + dy * grid.resolution_m,
                               wrap_angle(best.yaw + yaw)))
             for dx, dy, yaw in ((-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0),
                                 (0, 0, -math.radians(1)), (0, 0, math.radians(1)))
         ]
-        flat_platform = confidence >= 0.75 and max(local_probe_scores) - min(local_probe_scores) < 0.008
+        # A corridor may constrain lateral position while leaving forward
+        # position unobservable; test each axis, not the spread of all axes.
+        flat_platform = confidence >= 0.75 and any(
+            max(abs(left - best_raw_score), abs(right - best_raw_score)) < 0.008
+            for left, right in zip(local_probe_scores[::2], local_probe_scores[1::2])
+        )
         return ScanMatchResult(
             corrected_sensor_pose=best,
             data_score=confidence,
@@ -803,7 +823,8 @@ class CorrelativeScanMatcher:
             known_overlap=observed_weight / max(total_weight, 1e-9),
             touched_search_boundary=boundary,
             degenerate=separated_ambiguity or flat_platform,
-            rejection_reason="几何支持不足或存在近似等分候选" if separated_ambiguity or flat_platform else "",
+            rejection_reason=("存在相互分离的近似等分位置" if separated_ambiguity
+                              else "某个方向缺少可定位的几何约束" if flat_platform else ""),
         )
 
     @staticmethod
