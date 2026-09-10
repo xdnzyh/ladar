@@ -79,7 +79,7 @@ class RobustSweepTests(unittest.TestCase):
             builder.sample(6.025 + n * 0.05, 0, n, 1)
         self.assertEqual(len(builder.trigger(7.5, 0, 6)), 30)
 
-    def test_zero_loss_cannot_be_finished_by_poll_using_predicted_period(self):
+    def test_zero_loss_waits_for_next_real_trigger_instead_of_poll_timeout(self):
         receiver = DistanceObservationReceiver({"observation_reorder_s": 0})
         for n in range(4):
             receiver.feed(ReceivedObservation(HardwareObservation("rotation", n + 1, n * 1.5), n * 1.5))
@@ -88,17 +88,41 @@ class RobustSweepTests(unittest.TestCase):
             t = 4.525 + n * 0.05
             receiver.feed(ReceivedObservation(HardwareObservation("range", n + 1, t, 1), t))
             self.assertFalse(receiver.poll(t))
+        anchor = receiver.builder.anchor
+        sample_count = len(receiver.builder.samples)
         self.assertFalse(receiver.poll(7))
+        self.assertEqual(receiver.builder.anchor, anchor)
+        self.assertEqual(len(receiver.builder.samples), sample_count)
+        self.assertIn("下一真实零位", receiver.builder.reason)
+        receiver.feed(ReceivedObservation(HardwareObservation("rotation", 6, 7.5), 7.5))
+        receiver.poll(7.5)
+        self.assertEqual(receiver.builder.anchor[2], 6)
         self.assertFalse(receiver.builder.samples)
-        self.assertIn("超时", receiver.builder.reason)
+        self.assertIn("零位不连续", receiver.builder.reason)
 
-    def test_true_timestamp_rollback_invalidates_but_reordering_does_not(self):
+    def test_range_timestamp_rollback_drops_only_bad_packet(self):
         receiver = DistanceObservationReceiver({})
-        for seq, stamp in [(2, 1.2), (1, 1.1), (3, 1.3)]:
-            self.assertTrue(receiver.feed(ReceivedObservation(HardwareObservation("range", seq, stamp, 1), 1.4)))
-        self.assertFalse(receiver.feed(ReceivedObservation(HardwareObservation("range", 4, 1.0, 1), 1.5)))
+        first = HardwareObservation("range", 1, 1.2, 1, raw_timestamp_us=1_200_000)
+        bad = HardwareObservation("range", 2, 1.1, 1, raw_timestamp_us=1_100_000)
+        self.assertTrue(receiver.feed(ReceivedObservation(first, 1.2)))
+        pending_before = list(receiver.pending)
+        self.assertFalse(receiver.feed(ReceivedObservation(bad, 1.3)))
+        self.assertEqual(receiver.pending, pending_before)
+        self.assertEqual(receiver.timestamp_conflicts["range"], 1)
+        self.assertNotIn("倒退", receiver.builder.reason)
+
+    def test_rotation_timestamp_rollback_invalidates_angle_baseline(self):
+        receiver = DistanceObservationReceiver({})
+        receiver.builder.trigger(1, 0, 1)
+        receiver.builder.sample(1.1, 0, 800, 1)
+        first = HardwareObservation("rotation", 1, 1.2, raw_timestamp_us=1_200_000)
+        bad = HardwareObservation("rotation", 2, 1.1, raw_timestamp_us=1_100_000)
+        self.assertTrue(receiver.feed(ReceivedObservation(first, 1.2)))
+        self.assertFalse(receiver.feed(ReceivedObservation(bad, 1.3)))
         self.assertFalse(receiver.pending)
-        self.assertIn("倒退", receiver.builder.reason)
+        self.assertIsNone(receiver.builder.anchor)
+        self.assertEqual(receiver.timestamp_conflicts["rotation"], 1)
+        self.assertIn("等待新的真实零位", receiver.builder.reason)
 
     def test_late_range_does_not_reset_angle_baseline(self):
         receiver = DistanceObservationReceiver({})
@@ -108,6 +132,26 @@ class RobustSweepTests(unittest.TestCase):
         receiver.feed(ReceivedObservation(HardwareObservation("range", 1, 1.1, 1), 1.6))
         self.assertEqual(receiver.builder.anchor, anchor)
         self.assertEqual(receiver.late, 1)
+
+    def test_timed_preview_uses_last_finalized_sweep_not_open_sweep(self):
+        receiver = DistanceObservationReceiver({"observation_reorder_s": 0})
+        for n in range(4):
+            receiver.feed(ReceivedObservation(HardwareObservation("rotation", n + 1, n * 1.5), n * 1.5))
+            receiver.poll(n * 1.5)
+        for n in range(30):
+            t = 4.5 + (n + 0.5) * 1.5 / 30
+            receiver.feed(ReceivedObservation(HardwareObservation("range", 100 + n, t, 1, pixel=n), t))
+            receiver.poll(t)
+        self.assertFalse(receiver.preview_points)
+        receiver.feed(ReceivedObservation(HardwareObservation("rotation", 5, 6.0), 6.0))
+        receiver.poll(6.0)
+        finalized = receiver.preview_points
+        self.assertEqual(len(finalized), 30)
+        for n in range(10):
+            t = 6.0 + (n + 0.5) * 1.53 / 30
+            receiver.feed(ReceivedObservation(HardwareObservation("range", 200 + n, t, 1, pixel=100 + n), t))
+            receiver.poll(t)
+        self.assertEqual(receiver.preview_points, finalized)
 
     def test_direct_distance_and_pixel_adapter_have_same_standard_output(self):
         clock = ClockEstimate(100, 0.001, 2, 0)

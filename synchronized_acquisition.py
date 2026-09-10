@@ -572,7 +572,13 @@ class SynchronizedAcquisition:
             seq, tick = previous
             if (raw.sequence > seq and raw.timestamp_us < tick or
                     raw.sequence < seq and raw.timestamp_us > tick):
-                self._fail(f"{source} 设备时间倒退")
+                self._stat(source, "invalid_timestamp")
+                if source == "rotation":
+                    self.receiver.invalidate("零位设备时间异常，当前扫描失效，等待新的真实零位")
+                    reason = "零位时间/序号异常，当前扫描丢弃"
+                else:
+                    reason = "测距时间/序号异常，单帧丢弃"
+                self._record_ignored(source, line, reason, arrival)
                 return
         if previous is None or raw.sequence > previous[0]:
             self.raw_progress[source] = raw.sequence, raw.timestamp_us

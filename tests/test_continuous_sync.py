@@ -108,13 +108,32 @@ class ContinuousSyncTests(unittest.TestCase):
         self.assertEqual(acquisition.receiver.late, 1)
         self.assertTrue(any(kind == "sync_observation" for kind, _, _ in output))
 
-    def test_raw_timestamp_rollback_fails_safe(self):
+    def test_raw_measurement_timestamp_rollback_drops_one_packet_and_recovers(self):
         acquisition, endpoints, output = self.running()
-        for sequence, stamp in [(1, 100500000), (2, 100400000)]:
-            acquisition.feed("measurement", f"PIX {acquisition.session} {sequence} {stamp} {stamp} 800\n".encode(), 0.6)
+        acquisition.last_arrival["measurement"] = 0.6
+        acquisition.feed("measurement", f"PIX {acquisition.session} 1 100500000 100500000 800\n".encode(), 0.6)
         acquisition.poll(0.6)
-        self.assertEqual(acquisition.state, "stopped")
-        self.assertTrue(any(kind == "sync_error" and "倒退" in value for kind, value, _ in output))
+        acquisition.feed("measurement", f"PIX {acquisition.session} 2 100400000 100400000 800\n".encode(), 0.61)
+        acquisition.poll(0.61)
+        self.assertEqual(acquisition.state, "running")
+        self.assertFalse(any(kind == "sync_error" and "倒退" in value for kind, value, _ in output))
+        self.assertEqual(acquisition.raw_progress["measurement"], (1, 100500000.0))
+        self.assertGreaterEqual(acquisition.sync_stats["measurement"]["invalid_timestamp"], 1)
+        acquisition.feed("measurement", f"PIX {acquisition.session} 3 100700000 100700000 800\n".encode(), 0.7)
+        acquisition.poll(0.7)
+        self.assertEqual(acquisition.raw_progress["measurement"], (3, 100700000.0))
+
+    def test_raw_rotation_timestamp_rollback_resets_scan_but_keeps_session(self):
+        acquisition, endpoints, output = self.running()
+        acquisition.last_arrival["measurement"] = 0.6
+        acquisition.feed("rotation", f"TRIG {acquisition.session} 1 250500000\n".encode(), 0.6)
+        acquisition.poll(0.6)
+        acquisition.feed("rotation", f"TRIG {acquisition.session} 2 250400000\n".encode(), 0.61)
+        acquisition.poll(0.61)
+        self.assertEqual(acquisition.state, "running")
+        self.assertFalse(any(kind == "sync_error" and "倒退" in value for kind, value, _ in output))
+        self.assertIsNone(acquisition.builder.anchor)
+        self.assertIn("等待新的真实零位", acquisition.builder.reason)
 
     def test_observations_remain_immutable_after_online_model_update(self):
         acquisition, endpoints, output = self.running()
