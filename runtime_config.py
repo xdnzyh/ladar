@@ -424,6 +424,7 @@ def resolve_runtime_config(
     overrides: Mapping[str, object] | None = None,
     *,
     prefer_mode_defaults: bool = False,
+    validate_port_assignments: bool = True,
 ) -> dict:
     source = str(source).strip().lower()
     view = str(view).strip().lower()
@@ -573,7 +574,7 @@ def resolve_runtime_config(
         for key in ("measurement_port", "rotation_port", "chassis_port")
         if config[key]
     ]
-    if len({value for _, value in selected_ports}) != len(selected_ports):
+    if validate_port_assignments and len({value for _, value in selected_ports}) != len(selected_ports):
         raise RuntimeConfigError("测距、旋转和底盘串口不能重复选择")
 
     legacy_baudrate = config.get("baudrate", RUNTIME_DEFAULTS["radar_baudrate"])
@@ -750,6 +751,9 @@ def build_navigation_engine(config: Mapping[str, object]):
         str(config.get("runtime_source", "simulation")),
         str(config.get("runtime_view", "navigation")),
         config,
+        # The engine has no serial transport; validate device assignments when
+        # connecting, so its construction cannot prevent configuration editing.
+        validate_port_assignments=False,
     )
     grid = OccupancyGrid(
         int(resolved["map_width_cells"]),

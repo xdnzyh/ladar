@@ -163,6 +163,9 @@ def load_configuration(
         view,
         config,
         prefer_mode_defaults=str(source).lower() == "simulation",
+        # Load saved selections so the UI can correct conflicts. connect() and
+        # parameter application still validate ports before opening devices.
+        validate_port_assignments=False,
     )
 
 
