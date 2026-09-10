@@ -69,10 +69,14 @@ RUNTIME_DEFAULTS = {
     "sync_interval_s": 0.5,
     "sync_max_age_s": 8.0,
     "keepalive_interval_s": 5.0,
+    "formal_scan_stable_periods": 1,
+    "min_scan_points": 40,
     "period_tolerance": 0.05,
     "max_scan_gap_deg": 25.0,
     "scan_gap_factor": 2.5,
     "scan_gap_hard_limit_deg": 45.0,
+    "display_preview_min_points": 40,
+    "display_preview_min_ratio": 0.70,
     "measurement_port": "",
     "rotation_port": "",
     "chassis_port": "",
@@ -477,6 +481,7 @@ def resolve_runtime_config(
         "mapping_resolution_weight", "mapping_poll_budget_ms", "max_scan_gap_deg",
         "scan_gap_factor", "scan_gap_hard_limit_deg", "safety_max_angle_error_deg",
         "fusion_delay_ms", "sync_interval_s", "sync_max_age_s", "keepalive_interval_s",
+        "display_preview_min_ratio",
     ):
         _set_number(config, key, nonnegative=True)
     for key in ("min_range_m", "max_range_m", "hardware_min_range_m", "hardware_max_range_m"):
@@ -551,6 +556,18 @@ def resolve_runtime_config(
     config["actual_exposure_index"] = _strict_int(
         config.get("actual_exposure_index", config["exposure_index"]),
         "实际曝光档位", minimum=0, maximum=13,
+    )
+    config["min_scan_points"] = _strict_int(
+        config.get("min_scan_points", RUNTIME_DEFAULTS["min_scan_points"]),
+        "完整扫描最少点数",
+        minimum=3,
+        maximum=1000,
+    )
+    config["display_preview_min_points"] = _strict_int(
+        config.get("display_preview_min_points", RUNTIME_DEFAULTS["display_preview_min_points"]),
+        "预览显示最少点数",
+        minimum=1,
+        maximum=1000,
     )
     signs = config.get("wheel_signs")
     if not isinstance(signs, (list, tuple)) or len(signs) != 4:

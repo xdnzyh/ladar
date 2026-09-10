@@ -220,7 +220,8 @@ class TimedSweepBuilder:
                 session=source_session,
             ))
         self.last_closed_points = result
-        if self.stable_periods < 2:
+        required_stable_periods = max(1, int(self.config.get("formal_scan_stable_periods", 1)))
+        if self.stable_periods < required_stable_periods:
             self.reason = "转速稳定中"
             self.last_outcome = "warmup"
             return []

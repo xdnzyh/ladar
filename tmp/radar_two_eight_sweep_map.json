@@ -1,0 +1,55 @@
+{
+  "2": {
+    "completed_scans": 2,
+    "local_map_updates": 2,
+    "occupied_cells": 26,
+    "free_cells": 0,
+    "known_area_m2": 0.0616,
+    "detail": "固定姿态薄墙建图：线段 1 条，直线回波 24/26，忽略孤立噪声 2 个"
+  },
+  "8": {
+    "completed_scans": 8,
+    "local_map_updates": 8,
+    "occupied_cells": 26,
+    "free_cells": 119,
+    "known_area_m2": 0.0616,
+    "detail": "固定姿态薄墙建图：线段 1 条，直线回波 26/26，忽略孤立噪声 0 个"
+  },
+  "overall": {
+    "range_events": 698,
+    "formal_sweep_lengths": [
+      25,
+      26,
+      25,
+      26,
+      24,
+      25,
+      25,
+      26
+    ],
+    "avg_period_s": 0.7830835971999018,
+    "serial_errors": [],
+    "sync_stats": {
+      "measurement": {
+        "sent": 22,
+        "success": 20,
+        "timeout": 2,
+        "token_mismatch": 0,
+        "format_error": 3,
+        "missing_send_time": 0,
+        "invalid_timestamp": 0,
+        "ignored": 5
+      },
+      "rotation": {
+        "sent": 22,
+        "success": 22,
+        "timeout": 0,
+        "token_mismatch": 0,
+        "format_error": 0,
+        "missing_send_time": 0,
+        "invalid_timestamp": 0,
+        "ignored": 2
+      }
+    }
+  }
+}

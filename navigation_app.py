@@ -55,6 +55,29 @@ NAV_CONFIG_PATH = APP_DIR / "navigation_config.json"
 DEFAULT_CONFIG = deepcopy(RUNTIME_DEFAULTS)
 
 
+def preview_item_angle_distance(item) -> tuple[float, float]:
+    angle = item.angle_rad if hasattr(item, "angle_rad") else item[1]
+    distance = item.distance_m if hasattr(item, "distance_m") else item[2]
+    return float(angle), float(distance)
+
+
+def preview_is_stable_for_display(
+    preview,
+    latest_points,
+    *,
+    min_points: int = 40,
+    min_ratio_to_latest: float = 0.70,
+) -> bool:
+    preview_count = len(preview)
+    if preview_count <= 0:
+        return False
+    latest_count = len(latest_points)
+    if latest_count <= 0:
+        return preview_count >= min_points
+    required = max(min_points, math.ceil(latest_count * min_ratio_to_latest))
+    return preview_count >= required
+
+
 def load_configuration(
     source: str = "hardware",
     view: str = "radar",
@@ -2266,24 +2289,30 @@ class NavigationApp:
         if self._closed:
             return
         radar_points = [(point.x, point.y, 1.0) for point in self.latest_points]
+        displayed_radar_count = len(self.latest_points)
         receiver = self.simulation.hardware.receiver if self.simulation is not None else self.sync.receiver
         if receiver is not None:
             preview = receiver.preview_points
-            radar_points = []
-            for item in preview:
-                angle = item.angle_rad if hasattr(item, "angle_rad") else item[1]
-                distance = item.distance_m if hasattr(item, "distance_m") else item[2]
-                radar_points.append((distance * math.sin(angle), distance * math.cos(angle), 1.0))
-            if preview:
+            if preview_is_stable_for_display(
+                preview,
+                self.latest_points,
+                min_points=int(self.config.get("display_preview_min_points", 40)),
+                min_ratio_to_latest=float(self.config.get("display_preview_min_ratio", 0.70)),
+            ):
+                radar_points = []
+                for item in preview:
+                    angle, distance = preview_item_angle_distance(item)
+                    radar_points.append((distance * math.sin(angle), distance * math.cos(angle), 1.0))
+                displayed_radar_count = len(preview)
                 nearest = min(
                     preview,
-                    key=lambda point: point.distance_m if hasattr(point, "distance_m") else point[2],
+                    key=lambda point: preview_item_angle_distance(point)[1],
                 )
-                angle = nearest.angle_rad if hasattr(nearest, "angle_rad") else nearest[1]
+                angle, distance = preview_item_angle_distance(nearest)
                 self.latest_angle = math.degrees(angle) % 360
-                self.latest_distance = nearest.distance_m if hasattr(nearest, "distance_m") else nearest[2]
+                self.latest_distance = distance
                 self.current_pixel = nearest.pixel if hasattr(nearest, "pixel") else self.current_pixel
-            elif self.running:
+            elif self.running and not self.latest_points:
                 self.latest_angle = None
                 self.latest_distance = None
                 self.current_pixel = None
@@ -2329,7 +2358,7 @@ class NavigationApp:
         self.metric_vars["period"].set("—" if not self.rotation.period_history else f"{period:.2f}")
         frequency = self.measurement_rate.value()
         self.metric_vars["frequency"].set("—" if frequency <= 0 else f"{frequency:.1f}")
-        self.metric_vars["points"].set(str(len(receiver.preview_points)) if receiver is not None else str(len(self.latest_points)))
+        self.metric_vars["points"].set(str(displayed_radar_count))
         self.metric_vars["scans"].set(str(completed_scans))
         self.metric_vars["local_maps"].set(str(local_map_updates))
         self.metric_vars["drift"].set("—")

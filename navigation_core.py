@@ -255,6 +255,27 @@ class OccupancyGrid:
                 y0 += sy
         return result
 
+    def _snap_thin_wall_hit(self, cell: tuple[int, int]) -> tuple[int, int]:
+        col, row = cell
+        if not self.in_bounds(col, row):
+            return cell
+        best = cell
+        best_score = self.value(col, row)
+        for delta_row in (-1, 0, 1):
+            for delta_col in (-1, 0, 1):
+                candidate = (col + delta_col, row + delta_row)
+                if candidate == cell or not self.in_bounds(*candidate):
+                    continue
+                value = self.value(*candidate)
+                if value <= 0:
+                    continue
+                distance_penalty = 0.1 * (abs(delta_col) + abs(delta_row))
+                score = value - distance_penalty
+                if score > best_score:
+                    best = candidate
+                    best_score = score
+        return best
+
     def update_scan(
         self,
         pose: Pose2D,
@@ -282,12 +303,15 @@ class OccupancyGrid:
                 continue
             endpoint = pose.local_to_world(point.x, point.y)
             end = self.world_to_cell(*endpoint)
+            if point.source == "thin_wall":
+                end = self._snap_thin_wall_hit(end)
             cells = self._line_cells(start, end)
             has_hit = point.has_echo(max_range_m)
             for cell in cells[:-1] if has_hit else cells:
                 frees[cell] = max(frees.get(cell, 0.0), weight)
             if has_hit:
-                hits[end] = max(hits.get(end, 0.0), weight)
+                hit_log_odds = 2.25 if point.source == "thin_wall" else self.HIT_LOG_ODDS
+                hits[end] = max(hits.get(end, 0.0), hit_log_odds * weight)
             if not self.in_bounds(*end):
                 out_of_bounds += 1
         if not hits and not frees:
@@ -302,9 +326,9 @@ class OccupancyGrid:
                     changed.add(cell)
                     if self.state(*cell) != before:
                         state_changed.add(cell)
-        for cell, weight in hits.items():
+        for cell, amount in hits.items():
             before = self.state(*cell)
-            if self._add(*cell, self.HIT_LOG_ODDS * weight):
+            if self._add(*cell, amount):
                 changed.add(cell)
                 if self.state(*cell) != before:
                     state_changed.add(cell)

@@ -60,6 +60,13 @@ class RobustSweepTests(unittest.TestCase):
                 builder.sample(4.5 + (n + 0.5) * 0.05, 0, n, 1)
         self.assertEqual(builder.trigger(6, 0, 5), [])
 
+    def test_configured_minimum_rejects_sparse_closed_sweep(self):
+        builder = self.builder(min_scan_points=40)
+        for n in range(20):
+            builder.sample(4.5 + (n + 0.5) * 1.5 / 20, 0, n, 1)
+        self.assertEqual(builder.trigger(6, 0, 5), [])
+        self.assertIn("有效测距不足", builder.reason)
+
     def test_missing_zero_and_severe_period_change_reject_current_scan(self):
         for end, count in [(6, 6), (6.9, 5), (4.4, 5)]:
             builder = self.builder()

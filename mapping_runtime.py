@@ -193,6 +193,7 @@ class MappingRuntime:
                     request.points,
                     working.max_range_m,
                     self.min_range_m,
+                    working.grid.resolution_m,
                 )
                 if request.mode == "local":
                     command = working.process_local_scan(

@@ -1,0 +1,38 @@
+{
+  "completed_scans": 2,
+  "local_map_updates": 2,
+  "occupied_cells": 27,
+  "free_cells": 0,
+  "known_area_m2": 0.0616,
+  "map_version": 302,
+  "range_events": 287,
+  "formal_sweep_lengths": [
+    27,
+    26
+  ],
+  "avg_period_s": 0.7895071046254004,
+  "wall_detail": "固定姿态薄墙建图：线段 1 条，直线回波 25/26，忽略孤立噪声 1 个",
+  "serial_errors": [],
+  "sync_stats": {
+    "measurement": {
+      "sent": 12,
+      "success": 9,
+      "timeout": 2,
+      "token_mismatch": 1,
+      "format_error": 3,
+      "missing_send_time": 0,
+      "invalid_timestamp": 0,
+      "ignored": 4
+    },
+    "rotation": {
+      "sent": 14,
+      "success": 14,
+      "timeout": 0,
+      "token_mismatch": 0,
+      "format_error": 0,
+      "missing_send_time": 0,
+      "invalid_timestamp": 0,
+      "ignored": 1
+    }
+  }
+}
