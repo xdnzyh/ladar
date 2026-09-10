@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import random
 from typing import Mapping, Sequence
+from scan_geometry import range_tolerance_scale
 
 
 CARDINAL_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -740,10 +741,10 @@ class CorrelativeScanMatcher:
                         break
         best = centers[0]
         field = grid.likelihood_field(self.LIKELIHOOD_SIGMA_M, minimum_evidence)
-        def pose_score(pose):
+        def pose_score(pose, *, range_adaptive=True):
             sine, cosine = math.sin(pose.yaw), math.cos(pose.yaw)
             endpoints = [(x * cosine + y * sine, -x * sine + y * cosine, weight) for x, y, weight in sampled]
-            return self._field_score(grid, field, pose.x, pose.y, endpoints)
+            return self._field_score(grid, field, pose.x, pose.y, endpoints, range_adaptive=range_adaptive)
         best_raw_score = pose_score(best)
         predicted_score = pose_score(predicted)
         if best_raw_score - predicted_score < self.MIN_SCORE_GAIN:
@@ -800,16 +801,20 @@ class CorrelativeScanMatcher:
             or abs(wrap_angle(best.yaw - predicted.yaw)) >= max(rotation - math.radians(0.3), 0.0)
         )
         separated_ambiguity = confidence >= 0.75 and bool(ambiguous_candidates)
+        # Judge geometric observability at the original spatial scale; the
+        # broader noise kernel alone must not turn a constrained wall into
+        # an apparently flat corridor axis.
+        geometric_score = pose_score(best, range_adaptive=False)
         local_probe_scores = [
             pose_score(Pose2D(best.x + dx * grid.resolution_m, best.y + dy * grid.resolution_m,
-                              wrap_angle(best.yaw + yaw)))
+                              wrap_angle(best.yaw + yaw)), range_adaptive=False)
             for dx, dy, yaw in ((-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0),
                                 (0, 0, -math.radians(1)), (0, 0, math.radians(1)))
         ]
         # A corridor may constrain lateral position while leaving forward
         # position unobservable; test each axis, not the spread of all axes.
         flat_platform = confidence >= 0.75 and any(
-            max(abs(left - best_raw_score), abs(right - best_raw_score)) < 0.008
+            max(abs(left - geometric_score), abs(right - geometric_score)) < 0.008
             for left, right in zip(local_probe_scores[::2], local_probe_scores[1::2])
         )
         return ScanMatchResult(
@@ -836,7 +841,8 @@ class CorrelativeScanMatcher:
         return [window * index / count for index in range(-count, count + 1)]
 
     @staticmethod
-    def _field_score(grid: OccupancyGrid, field: Sequence[float], x: float, y: float, endpoints) -> float:
+    def _field_score(grid: OccupancyGrid, field: Sequence[float], x: float, y: float, endpoints,
+                     *, range_adaptive: bool = True) -> float:
         width, height = grid.width, grid.height
         inverse = 1 / grid.resolution_m
         origin_col = grid.origin_col + x * inverse
@@ -852,6 +858,11 @@ class CorrelativeScanMatcher:
             index = top * width + left
             value = ((1 - fx) * (1 - fy) * field[index] + fx * (1 - fy) * field[index + 1]
                      + (1 - fx) * fy * field[index + width] + fx * fy * field[index + width + 1])
+            # Scale Gaussian variance with range (sigma grows by sqrt(scale)).
+            # Local endpoint radius is rotation invariant: each return gets
+            # its own tolerance in search, confidence and ambiguity checks.
+            scale = range_tolerance_scale(math.hypot(px, py)) if range_adaptive else 1.0
+            value = value ** (1.0 / scale)
             total += weight * value
         return total / max(weight_sum, 1e-9)
 

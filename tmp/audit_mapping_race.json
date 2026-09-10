@@ -1,0 +1,7 @@
+{
+  "before_y": 0.01,
+  "predicted_y": 0.10998766324816606,
+  "committed_y": 0.01,
+  "motion_pending_after_commit": false,
+  "prediction_lost": true
+}
