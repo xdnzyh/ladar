@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Callable, Sequence
 
+from mapping_policy import prepare_mapping_points, process_radar_debug_scan
 from navigation_core import NavigationEngine, Pose2D, ScanPoint, VelocityCommand
 
 
@@ -188,11 +189,24 @@ class MappingRuntime:
                     continue
                 working = deepcopy(self.navigator)
             try:
-                command = (
-                    working.process_local_scan(request.points, min_range_m=self.min_range_m)
-                    if request.mode == "local"
-                    else working.process_scan(request.points)
+                selection = prepare_mapping_points(
+                    request.points,
+                    working.max_range_m,
+                    self.min_range_m,
                 )
+                if request.mode == "local":
+                    command = working.process_local_scan(
+                        selection.points,
+                        min_range_m=self.min_range_m,
+                    )
+                elif not working.auto_enabled:
+                    command = process_radar_debug_scan(
+                        working,
+                        selection,
+                        self.min_range_m,
+                    )
+                else:
+                    command = working.process_scan(selection.points)
             except BaseException as exc:
                 result = MappingResult(request, None, None, exc)
             else:
