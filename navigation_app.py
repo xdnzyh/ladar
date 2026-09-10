@@ -2473,6 +2473,15 @@ class NavigationApp:
     def _draw(self) -> None:
         if self._closed:
             return
+        try:
+            self._draw_frame()
+        finally:
+            if not self._closed:
+                self.root.after(50, self._draw)
+
+    def _draw_frame(self) -> None:
+        if self._closed:
+            return
         radar_points = [(point.x, point.y, point.quality) for point in self.latest_raw_points]
         displayed_radar_count = len(self.latest_raw_points)
         receiver = self.simulation.hardware.receiver if self.simulation is not None else self.sync.receiver
@@ -2558,16 +2567,17 @@ class NavigationApp:
         self.nav_detail_var.set(nav_detail)
         pose = map_pose
         self.pose_var.set(f"x {pose.x:+.2f} m   y {pose.y:+.2f} m   θ {math.degrees(pose.yaw):+.1f}°")
-        score = "—" if self.navigator.match_score == 0 else f"{self.navigator.match_score:.2f}"
+        match_score = snapshot.match_score if snapshot is not None else self.navigator.match_score
+        frontier_count = snapshot.frontier_count if snapshot is not None else self.navigator.frontier_count
+        reachable_frontier_count = (snapshot.reachable_frontier_count if snapshot is not None
+                                    else self.navigator.reachable_frontier_count)
+        score = "—" if match_score == 0 else f"{match_score:.2f}"
         self.frontier_var.set(
-            f"可达前沿 {self.navigator.reachable_frontier_count}/{self.navigator.frontier_count}   匹配 {score}"
+            f"可达前沿 {reachable_frontier_count}/{frontier_count}   匹配 {score}"
         )
         if self.simulation is not None:
             receiver = self.simulation.hardware.receiver
             self.sim_status_var.set(f"有效 {receiver.accepted} 圈 · 丢弃 {receiver.discarded} 圈 · 迟到 {receiver.late} 包\n{receiver.builder.reason}")
-        if not self._closed:
-            self.root.after(50, self._draw)
-
     def _log(self, message: str) -> None:
         self.status_history.append(f"{datetime.now():%H:%M:%S}  {message}")
         logging.getLogger("navigation.runtime").info(message)

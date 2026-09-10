@@ -47,6 +47,9 @@ class MappingSnapshot:
     queue_depth: int
     scan_accepted: bool = False
     accepted_input_points: int = 0
+    match_score: float = 0.0
+    frontier_count: int = 0
+    reachable_frontier_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -267,8 +270,7 @@ class MappingRuntime:
                         continue
                     scan_accepted = (request.mode == "navigation" and working.auto_enabled
                                      and working.completed_scans > self.navigator.completed_scans)
-                    self.navigator.__dict__.clear()
-                    self.navigator.__dict__.update(deepcopy(working.__dict__))
+                    self.navigator.__dict__ = deepcopy(working.__dict__)
                     self._wall_evidence = wall_evidence
                     self._state_version += 1
                     snapshot = self._snapshot_locked(
@@ -307,4 +309,7 @@ class MappingRuntime:
             self._dropped_requests,
             len(self._pending),
             scan_accepted,
+            match_score=self.navigator.match_score,
+            frontier_count=self.navigator.frontier_count,
+            reachable_frontier_count=self.navigator.reachable_frontier_count,
         )
