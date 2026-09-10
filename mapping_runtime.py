@@ -45,6 +45,8 @@ class MappingSnapshot:
     rejected_scans: int
     dropped_requests: int
     queue_depth: int
+    scan_accepted: bool = False
+    accepted_input_points: int = 0
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,20 @@ class MappingRuntime:
     def set_mode(self, mode: str) -> MappingSnapshot:
         return self.invalidate(reason="模式已切换")
 
+    def predict_motion(self, command: VelocityCommand) -> None:
+        with self.lock:
+            self._state_version += 1
+            self._pending.clear()
+            self._wall_evidence.reset()
+            self.navigator.predict_motion(command)
+
+    def apply_execution_delta(self, *args: float) -> None:
+        with self.lock:
+            self._state_version += 1
+            self._pending.clear()
+            self._wall_evidence.reset()
+            self.navigator.apply_execution_delta(*args)
+
     def stop(self, timeout: float = 1.0) -> None:
         with self.lock:
             self._stop = True
@@ -249,19 +265,28 @@ class MappingRuntime:
                             or request.base_state_version != self._state_version
                             or self._stop):
                         continue
+                    scan_accepted = (request.mode == "navigation" and working.auto_enabled
+                                     and working.completed_scans > self.navigator.completed_scans)
                     self.navigator.__dict__.clear()
                     self.navigator.__dict__.update(deepcopy(working.__dict__))
                     self._wall_evidence = wall_evidence
                     self._state_version += 1
                     snapshot = self._snapshot_locked(
-                        request.session, request.scan_sequence, request.mode, command,
+                        request.session, request.scan_sequence, request.mode, command, scan_accepted,
                     )
+                    if scan_accepted:
+                        clear_count = sum(not point.has_echo(working.max_range_m) for point in request.points
+                                          if math.isfinite(point.distance_m) and math.isfinite(point.angle_rad)
+                                          and point.quality >= working.grid.MIN_QUALITY
+                                          and self.min_range_m <= point.distance_m <= working.max_range_m)
+                        snapshot = replace(snapshot, accepted_input_points=min(
+                            len(request.points), selection.supported_echoes + clear_count))
                 result = MappingResult(request, snapshot, command)
             if self.on_result is not None:
                 self.on_result(result)
 
     def _snapshot_locked(self, session: str, sequence: int | None, mode: str,
-                         command: VelocityCommand) -> MappingSnapshot:
+                         command: VelocityCommand, scan_accepted: bool = False) -> MappingSnapshot:
         return MappingSnapshot(
             self._generation,
             self._state_version,
@@ -281,4 +306,5 @@ class MappingRuntime:
             self.navigator.rejected_scans,
             self._dropped_requests,
             len(self._pending),
+            scan_accepted,
         )

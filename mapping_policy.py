@@ -611,7 +611,8 @@ def prepare_free_space_points(points, max_range_m, min_range_m, resolution_m):
         if point.has_echo(max_range_m):
             distance -= math.sqrt(2) * resolution_m
         if distance >= min_range_m:
-            result.append(replace(point, distance_m=distance, is_echo=False, source="free_space"))
+            result.append(replace(point, distance_m=distance, is_echo=False,
+                                  source="assumed_open" if point.source == "assumed_open" else "free_space"))
     return tuple(result)
 
 

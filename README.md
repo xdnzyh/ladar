@@ -127,7 +127,7 @@ CNT： @MOVE,<W/S/A/D/Q/E/Z/C/R/F>,<正整数计数>,CNT\r\n
 
 停止使用经当前字节解析规则验证的 `!\r\nX\r\n`，先使可能存在的半行协议命令无效，再结束该行并发送 `X`；这不是断链后的机械停车保证。ACK 缺失不能作为重发依据，MOVE 在任何情况下都不会自动重发。完整匹配且编码器一致性合法的 DONE 可以在缺 ACK 时结束当前动作；DONE 缺失、异常终态、复位、断连或报告归属不明都会锁定后续动作。有效 DONE 后应用一次编码器执行先验，再经过停稳等待和动作后的新完整扫描，才允许继续建图与规划。
 
-配置保存了 W/S/A/D/Q/E/Z/C 八方向 CNT/mm 初值及来源，但初值不等于现场验证。默认状态下底盘能力、车上固件版本、每个方向的可用范围与不确定度、实际速度上界和完整停止距离均未确认，因此自动实车 MOVE 保持锁止。现场只开放证据完整的平移方向；R/F 没有旋转标定，人工与自动入口均禁用，规划器不得生成旋转动作。人工 MM/CNT 单步也必须由现场操作人明确授权，动作后应清图或重新定位。
+配置保存 W/S/A/D/Q/E/Z/C 八方向 CNT/mm 系数及来源。当前项目启用 `chassis_distance_control=true`：自动导航发送方向和距离指令，不要求先填写速度、制动和运动误差实测数据。连接、固件能力、参数同步、单次 MOVE、完成反馈、停稳和新扫描准入仍然生效。该开关表示支持距离目标，不表示地面位移、滑移和制动误差已经测定；未提供的不确定度仍采用软件保守默认值。关闭距离控制时，自动入口恢复速度、制动与各方向验证要求。R/F 没有旋转标定，人工与自动入口均禁用，规划器不得生成旋转动作。人工 MM/CNT 单步也必须由现场操作人明确授权，动作后应清图或重新定位。
 
 完整协议、状态机与证据边界见 [底盘融合上位机接入说明](底盘融合上位机接入说明.md)；从接入三路设备到分阶段开放导航的具体操作见 [底盘与雷达现场联调操作说明](底盘与雷达现场联调操作说明.md)。
 
@@ -148,9 +148,9 @@ IDEAL 为理想器件；NOMINAL 包含距离相关噪声、慢漂移、非匀速
 
 真值层独立维护车体姿态、射线原点和旋转角度。测距误差发生于距离输出，旋转纹波发生于真实运动，链路只改变到达时间与投递行为。导航依据命令进行运动预测，不接收真实位移或测距零偏。碰撞保护属于隐藏物理层。暂停冻结仿真时间并停止驱动；重新开始保留场景，重置重新建立同种子的场景。
 
-`HardwareObservation` 是协议无关的距离/零位接口，不是串口字符串协议。当前仿真假设设备时间已映射到共同时间域，旋转仅输出零位计数和时间戳；时钟偏移、漂移估计及设备重启尚未纳入虚拟链路。正式扫描使用 `TRIG n -> TRIG n+1` 的实际周期回算该圈角度；最近最多五圈的平均周期只服务实时预览和近障方位估计。单零位仍不能观测圈内非匀速。有限重排窗口之外的迟到包被拒绝，缺失零位和过大的角度空缺会丢弃扫描。预热期间等待连续稳定周期，单独统计预热圈数。
+`HardwareObservation` 是协议无关的距离/零位接口，不是串口字符串协议。当前仿真假设设备时间已映射到共同时间域，旋转仅输出零位计数和时间戳；时钟偏移、漂移估计及设备重启尚未纳入虚拟链路。实物正式扫描使用 `TRIG n -> TRIG n+1` 的实际周期回算该圈角度。默认模拟组圈使用稳定周期估计相位；`simulation_estimated_sweeps=false` 时改用相邻零位闭合。单零位仍不能观测圈内非匀速。有限重排窗口之外的迟到包被拒绝，缺失零位和过大的角度空缺会丢弃扫描。预热期间等待连续稳定周期，单独统计预热圈数。
 
-模拟与默认实物导航共用 `HardwareObservation -> DistanceObservationReceiver -> TimedSweepBuilder -> ScanPoint -> NavigationEngine`。`EstimatedSweepBuilder` 仅保留兼容接口，不参与正式组圈；旧 `arbitrary_phase_scans` 配置不再切换建图扫描来源。仓库旧实物固件仍走像素标定协议；真实测距仪直接输出距离的最终串口格式确认后，可将解析结果接入距离观测接口。现有固件没有被改成未经确认的协议。材质、反射率、三维倾斜和平面外回波尚未建模；当前 wobble 为平面内周期角度扰动。
+模拟与实物导航共用 `HardwareObservation -> DistanceObservationReceiver -> SweepBuilder -> ScanPoint -> MappingRuntime -> NavigationEngine`。模拟默认选择 `EstimatedSweepBuilder`，实物选择 `TimedSweepBuilder`；`arbitrary_phase_scans` 决定接收器采用哪种组圈方式。两者均经过墙段拟合、连续两圈确认和只累计障碍策略。材质、反射率、三维倾斜和平面外回波尚未建模；`simulation_parameters.failure_probability` 可注入漏测以检查缺少回波时的行为，不能等同于特定材质的实测模型。
 
 ## 仿真评估
 
@@ -159,7 +159,7 @@ python evaluate_simulation.py --seconds 120 --seeds 1 2 3 --output simulation_me
 python -m unittest discover -s tests -v
 ```
 
-评估程序在导航外部对照隐藏真值，按档位汇总限时到达率，并记录终点距离、位置与偏航 RMSE、已知栅格分类误差、碰撞接触次数、扫描丢弃率、预热圈数、迟到/重复/丢包数量和导航目标变更次数。到达定义为距地图参考终点不超过 0.20 米；超时不代表永久不可达。Pose RMSE 在有效扫描校正后采样，已知栅格误差不覆盖未知区域；目标变更次数不等同于所有 A* 重算次数。地图参考终点只供评估，导航仍自行探索。只有多种子且足够长的运行才能用于比较到达成功率。
+评估程序通过实际 `MappingRuntime` 工作线程处理扫描，默认采用模拟界面的命令预测及近障恢复策略。`approached_goal`（兼容字段 `reached_goal`）仅表示曾距参考点不超过 0.20 m；`correct_parking` 要求导航确认“泊车完成”且结束位置在参考点 0.20 m 内，`wrong_parking` 表示在其他位置确认泊车。接近参考点不会提前结束评估。`timed_out`、`safety_stopped` 分别记录限时未完成与不可恢复安全停止，汇总 `success_rate` 使用正确泊车。Pose RMSE 仅在成功接受扫描后采样；`accepted_points` 统计被接受扫描中获支持的输入回波和有效无回波点，不累计拟合、补充或重复显示点。隐藏真值只用于评估，不输入导航。短时单种子运行不能证明全程完成或实车可靠性。
 
 离线工具使用同一份运行时配置和同一套观测转换：
 
@@ -236,3 +236,28 @@ python evaluate_simulation.py --config navigation_config.json --seconds 120 --se
 `measurement_protocol.py` 负责解析现有 PIX/TRIG 串口格式、标定距离与规范化时间。`DeviceObservation.normalize()` 将设备域观测转成 `HardwareObservation`；已具有共同时间域的距离数据也可直接构造 `HardwareObservation(source="range", distance=...)` 送入接收器。未来真实距离协议只需补充对应解析适配器，不修改组圈或 `NavigationEngine`。设备时间、到达时间、距离有效性和不确定度必须分开提供。
 
 验证命令：`python -m unittest discover -s tests -v`。回归覆盖孤立异常点、连续缺测、真实圈周期、零位故障、运动扫描隔离、双时钟持续漂移、90 秒连续采集、不对称校时、过期校时、安全层方向判断和协议标准化。软件回放不等于实际无线时延、轮速、停车距离或建图精度验收。
+
+
+## 导航范围、地图修正与停车准入
+
+实物导航地图为 360×560 格、2 cm/格，共 7.2×11.2 m，起点居中；雷达显示半径仍为 1.1 m。导航地图尺寸由 `hardware_map_*` 配置，显示视野由 `display_radius_m` 配置。边界仍不可通行，动作足迹越界时提示“地图边界导致无路”；更大场地需相应扩大地图。
+
+地图棕色区域表示依赖补空闲假设的可通行格，蓝灰色表示已有实际自由射线覆盖；后续真实观测可以替换假设来源。`hardware_unobserved_clear_range_m` 默认 1.0，模拟同名参数默认 0.0；`hardware_prefer_forward_exploration` 默认开启，模拟默认关闭。假设空闲仍参与规划，但不作为终点开口的测量证据。
+
+长期障碍保持只累计策略。需要修正假墙时，先停止采集与运动，点击“局部修正”，再点击地图目标位置。半径 0.30 m 内的栅格恢复为未知，位姿与其他区域保留；继续采集后重新累积两圈墙面证据。清除区域不会直接变为可通行空间。
+
+动作开始使旧建图任务失效；命令预测或执行反馈同时推进建图状态版本。停车后扫描须来自当前代次、当前会话，完整时间窗口在停稳之后，并且该圈定位被接受。饱和栅格无需改变数值即可解除等待。拒收扫描不消耗待定位的运动上下文。
+
+泊车根据最近轨迹确定来路，要求观测覆盖四周且最大角度空缺不超过 45°；所有非来路方向均有封闭回波、至少两侧小于 0.30 m，来路保持足够开口，并连续三圈一致。未知方向、补空闲假设和开放但暂时无法执行动作的方向都不能当作封闭出口。
+
+## 底盘事务及实物策略仿真
+
+```powershell
+python evaluate_simulation.py --profiles IDEAL --seconds 120 --chassis-transactions --output tmp/transactions.json
+python evaluate_simulation.py --profiles IDEAL --seconds 120 --chassis-transactions --drop-chassis-ack --drop-chassis-result --output tmp/lost_feedback.json
+python evaluate_simulation.py --profiles IDEAL NOMINAL STRESS --seconds 120 --navigation-policy hardware --chassis-transactions --output tmp/hardware_policy.json
+```
+
+事务模式使用实际 `ChassisController`、`ChassisMotionAdapter` 和串口帧解析，模拟 PING/PONG、单次 MOVE、ACK、RESULT、丢失结果查询恢复、停稳及新扫描准入。编码器报告来自指令目标计数的合成模型，导航通过报告应用一次先验。此模式的近障保护终止自动运行，与实物策略一致；默认模拟界面仍可按既有策略扫描后避让。
+
+`--navigation-policy hardware` 使用实物量程、地图、直行偏好、补空闲策略及平移能力，并切换为相邻零位组圈。模拟时间戳已处于共同时间域；双端时钟校准、真实像素标定、参数下载、无线链路和实物制动尚需单独验收。事务模拟不打开串口、不烧录固件。

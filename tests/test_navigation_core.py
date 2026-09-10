@@ -118,12 +118,13 @@ class SimulatorTests(unittest.TestCase):
                 (-math.pi / 2, left),
                 (math.pi, rear),
             ):
-                result.extend(ScanPoint(angle + offset, distance) for offset in (-0.1, 0.0, 0.1))
+                result.extend(ScanPoint(angle + offset, distance) for offset in (-0.45, 0.0, 0.45))
             return result
 
         navigator = NavigationEngine(OccupancyGrid(), robot_radius_m=0.15)
         navigator.match_score = 0.8
         navigator.latest_scan = points(0.25, 0.29, 0.60, 0.95)
+        navigator.trajectory = [(0.0, -0.2), (0.0, 0.0)]
         navigator._last_scan_had_translation = True
         self.assertTrue(navigator._terminal_geometry_confirmed())
 

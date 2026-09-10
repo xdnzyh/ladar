@@ -1,0 +1,80 @@
+{
+  "runs": [
+    {
+      "schema_version": "2.0",
+      "source_type": "synthetic_simulation",
+      "config_fingerprint": "561654ddaf6cc711",
+      "profile": "IDEAL",
+      "seed": 20260907,
+      "runtime": {
+        "seconds": 30,
+        "map_width_cells": 360,
+        "map_height_cells": 560,
+        "map_resolution_m": 0.02,
+        "min_range_m": 0.15,
+        "max_range_m": 1.0
+      },
+      "reached_goal": false,
+      "approached_goal": false,
+      "correct_parking": false,
+      "wrong_parking": false,
+      "timed_out": true,
+      "safety_stopped": false,
+      "final_state": "直行探索",
+      "mapping_pipeline": "MappingRuntime",
+      "navigation_policy": "hardware",
+      "sweep_builder": "adjacent_zero",
+      "chassis_model": "MOVE_RESULT",
+      "chassis_fault_injection": {
+        "drop_ack": false,
+        "drop_result": false
+      },
+      "chassis_transaction_state": "waiting_scan",
+      "chassis_moves": 4,
+      "chassis_result_queries": 0,
+      "chassis_priors_applied": 4,
+      "chassis_failure": null,
+      "goal_error_m": 3.9628741063020816,
+      "pose_rmse_m": 0.01853756703182323,
+      "yaw_rmse_deg": 1.728711787558714,
+      "known_cell_map_error_rate": 0.00831353919239905,
+      "known_cells": 4210,
+      "known_area_m2": 2.0620000000000003,
+      "map_coverage": 0.02557043650793651,
+      "target_changes": 5,
+      "mapping_attempts": 6,
+      "mapping_rejected_scans": 1,
+      "mapping_rejection_rate": 0.16666666666666666,
+      "mapping_rejection_reasons": {
+        "有效障碍回波不足，等待重扫": 1
+      },
+      "map_updates": 6,
+      "input_points": 995,
+      "accepted_points": 300,
+      "point_rejection_rate": 0.6984924623115578,
+      "local_scans": 0,
+      "motion_scan_skipped": 0,
+      "safety_stops": 0,
+      "degenerate_matches": 2,
+      "boundary_matches": 0,
+      "timing_ms": {
+        "simulation_mean": 13.82248949999242,
+        "simulation_p50": 13.770550001936499,
+        "simulation_p95": 16.588774992123945,
+        "mapping_mean": 488.53587999765296,
+        "mapping_p50": 275.43869999499293,
+        "mapping_p95": 1005.6310500003746
+      },
+      "simulation_time_s": 29.999999999991413,
+      "accepted_scans": 10,
+      "warmup_scans": 8,
+      "discarded_scans": 0,
+      "scan_discard_rate": 0.0,
+      "late_packets": 0,
+      "duplicate_packets": 0,
+      "dropped_packets": 0,
+      "collisions": 0,
+      "pending_depth_peak": 32
+    }
+  ]
+}

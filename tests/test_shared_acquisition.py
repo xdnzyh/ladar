@@ -198,7 +198,7 @@ class SharedAcquisitionTests(unittest.TestCase):
         request = MappingRequest(2, "session", 8, 10.1, 11.4, "navigation", 3, ())
         snapshot = MappingSnapshot(
             2, 4, 8, "session", 8, "navigation", grid, Pose2D(), (), None,
-            VelocityCommand(), "等待规划", "", 5, 0, 0, 0, 0,
+            VelocityCommand(), "等待规划", "", 5, 0, 0, 0, 0, True,
         )
         app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
         app._handle_mapping_results()
@@ -227,11 +227,10 @@ class SharedAcquisitionTests(unittest.TestCase):
         app._handle_mapping_results()
         app.chassis_controller.mark_scan_ready.assert_not_called()
 
-    def test_waiting_scan_requires_both_boundaries_and_both_map_counters(self):
+    def test_waiting_scan_requires_session_boundaries_and_accepted_scan(self):
         cases = (
             ("other", 10.1, 11.4, 8, 5),
             ("session", 10.1, 9.9, 8, 5),
-            ("session", 10.1, 11.4, 7, 5),
             ("session", 10.1, 11.4, 8, 4),
         )
         for session, scan_start, scan_end, map_version, completed_scans in cases:
@@ -254,13 +253,32 @@ class SharedAcquisitionTests(unittest.TestCase):
                 request = MappingRequest(2, session, 8, scan_start, scan_end, "navigation", 3, ())
                 snapshot = MappingSnapshot(
                     2, 4, map_version, session, 8, "navigation", OccupancyGrid(), Pose2D(), (), None,
-                    VelocityCommand(), "定位检查", "", completed_scans, 0, 0, 0, 0,
+                    VelocityCommand(), "定位检查", "", completed_scans, 0, 0, 0, 0, True,
                 )
                 app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
 
                 app._handle_mapping_results()
 
                 app.chassis_controller.mark_scan_ready.assert_not_called()
+
+    def test_accepted_scan_unlocks_motion_when_map_is_saturated(self):
+        app = self.app()
+        app.mapping_generation = 2
+        app.scan_collect_after = 10.0
+        app._post_motion_scan_count = 4
+        app._post_motion_map_revision = 7
+        app.view_mode = Mock(get=lambda: "navigation")
+        app.chassis_controller.pending = SimpleNamespace(action_id=9)
+        app.chassis_controller.state = ChassisState.WAITING_SCAN
+        app.chassis_controller.mark_scan_ready.return_value = True
+        request = MappingRequest(2, "session", 8, 10.1, 11.4, "navigation", 3, ())
+        snapshot = MappingSnapshot(
+            2, 4, 7, "session", 8, "navigation", OccupancyGrid(), Pose2D(), (), None,
+            VelocityCommand(), "探索中", "", 5, 0, 0, 0, 0, True,
+        )
+        app.mapping_results.put(MappingResult(request, snapshot, VelocityCommand()))
+        app._handle_mapping_results()
+        app.chassis_controller.mark_scan_ready.assert_called_once()
 
     def test_target_done_applies_report_prior_once_without_command_prediction(self):
         app = self.app()

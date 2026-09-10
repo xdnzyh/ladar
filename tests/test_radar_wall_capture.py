@@ -24,7 +24,7 @@ class CapturedWallScanTests(unittest.TestCase):
         result = builder.trigger(end, end_error * uncertainty_scale, next_count)
         return builder, points, result
 
-    def test_actual_front_and_left_walls_survive_and_isolated_echo_does_not(self):
+    def test_acquisition_preserves_walls_and_raw_isolated_echo(self):
         builder, original, selected = self.replay()
         selected_times = {p.timestamp for p in selected}
         front = [p for p in original if p.y > .30 and abs(p.x) < .15]
@@ -34,8 +34,8 @@ class CapturedWallScanTests(unittest.TestCase):
         self.assertGreaterEqual(len(left), 5)
         self.assertEqual(len(noise), 1)
         self.assertTrue(all(p.timestamp in selected_times for p in front + left))
-        self.assertNotIn(noise[0].timestamp, selected_times)
-        self.assertEqual(len(selected), 70)
+        self.assertIn(noise[0].timestamp, selected_times)
+        self.assertEqual(len(selected), 71)
         self.assertEqual(len(builder.last_display_points), 71)
         # Geometry support must not erase the original clock uncertainty.
         self.assertTrue(all(p.angle_error_rad > .3 for p in selected))

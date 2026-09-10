@@ -223,10 +223,11 @@ class MapCanvas(tk.Canvas):
         self.path = list(path)
         self.target = target
         self.enabled = enabled
-        if static_signature != self._static_signature:
+        static_changed = static_signature != self._static_signature
+        if static_changed:
             self._static_signature = static_signature
             self._redraw_static()
-        if dynamic_signature != self._dynamic_signature:
+        if static_changed or dynamic_signature != self._dynamic_signature:
             self._dynamic_signature = dynamic_signature
             self._redraw_dynamic()
 
@@ -257,13 +258,17 @@ class MapCanvas(tk.Canvas):
         cell_size = min((width - margin * 2) / grid.width, (height - margin * 2) / grid.height)
         left = (width - grid.width * cell_size) / 2
         top = (height - grid.height * cell_size) / 2
-        colors = {grid.UNKNOWN: "#0c1929", grid.FREE: "#26394d", grid.OCCUPIED: "#dce9f4"}
+        colors = {grid.UNKNOWN: "#0c1929", grid.FREE: "#26394d", grid.OCCUPIED: "#dce9f4", 2: "#624b27"}
+
+        def display_state(col, row):
+            state = grid.state(col, row)
+            return 2 if state == grid.FREE and (col, row) in grid.assumed_free_cells else state
 
         for row in range(grid.height):
-            run_state = grid.state(0, row)
+            run_state = display_state(0, row)
             run_start = 0
             for col in range(1, grid.width + 1):
-                state = grid.state(col, row) if col < grid.width else None
+                state = display_state(col, row) if col < grid.width else None
                 if state == run_state:
                     continue
                 if run_state != grid.UNKNOWN:
@@ -278,7 +283,7 @@ class MapCanvas(tk.Canvas):
                 run_start = col
                 run_state = state
 
-        self.create_text(16, 14, text="累计栅格地图", anchor="nw", fill=COLORS["muted"], font=("Microsoft YaHei UI", 10))
+        self.create_text(16, 14, text="累计地图 · 棕色：假设空闲", anchor="nw", fill=COLORS["muted"], font=("Microsoft YaHei UI", 10))
 
     def _redraw_dynamic(self) -> None:
         self.delete("dynamic")
@@ -636,8 +641,10 @@ class NavigationApp:
         self.map_percent_var = tk.StringVar(value="0.0%")
         ttk.Label(map_header, textvariable=self.map_percent_var, style="Muted.TLabel").pack(side="right")
         ttk.Button(map_header, text="清空局部地图", command=self.clear_local_map).pack(side="right", padx=(0, 10))
+        ttk.Button(map_header, text="局部修正", command=self._arm_map_repair).pack(side="right", padx=(0, 10))
         self.map_canvas = MapCanvas(self.side_panel, height=210 if self.source == "hardware" else 420)
         self.map_canvas.pack(fill="both", expand=True, padx=1)
+        self.map_canvas.bind("<Button-1>", self._repair_map_at)
 
         status = ttk.Frame(self.side_panel, style="Panel.TFrame", padding=14)
         status.pack(fill="x")
@@ -1411,6 +1418,53 @@ class NavigationApp:
             self.simulation.start()
         self._log("模拟场景已重置")
 
+    def _arm_map_repair(self) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if self.running or self.moving or (controller is not None and controller.in_flight):
+            self._log("请先停止采集与运动，再修正地图")
+            return
+        self._map_repair_armed = True
+        self.map_canvas.configure(cursor="crosshair")
+        self.mapping_snapshot = None
+        self.navigator.state = "选择修正区域"
+        self.navigator.detail = "点击地图，重建所选点半径 0.30 m 内的区域"
+        self._log("点击地图，清除该点半径 0.30 m 内的证据；重新采集后恢复建图")
+
+    def _repair_map_at(self, event) -> None:
+        if not getattr(self, "_map_repair_armed", False):
+            return
+        self._map_repair_armed = False
+        self.map_canvas.configure(cursor="")
+        controller = getattr(self, "chassis_controller", None)
+        if self.running or self.moving or (controller is not None and controller.in_flight):
+            return
+        width = max(160, self.map_canvas.winfo_width())
+        height = max(160, self.map_canvas.winfo_height())
+        grid = self.navigator.grid
+        size = min((width - 40) / grid.width, (height - 40) / grid.height)
+        col = math.floor((event.x - (width - grid.width * size) / 2) / size)
+        row = math.floor((event.y - (height - grid.height * size) / 2) / size)
+        if not grid.in_bounds(col, row):
+            return
+        with self.mapping_lock:
+            self.mapping_generation += 1
+            self._clear_mapping_tasks()
+            grid.clear_region(*grid.cell_to_world(col, row), 0.30)
+            self.navigator.path_cells.clear()
+            self.navigator.target_cell = None
+            self.navigator._terminal_evidence_scans = 0
+            self.navigator._terminal_signature = None
+            self.navigator._empty_frontier_scans = 0
+            self.navigator._parking_goal = None
+            self.navigator._parking_search_attempts = 0
+            self.mapping_snapshot = None
+            self.grid = grid
+            self.navigator.state = "局部地图待重建"
+            self.navigator.detail = "所选区域已恢复为未知，继续采集后重新建图"
+        self.map_canvas.update_scene(grid, self.navigator.pose, [], None, True)
+        self.map_canvas.redraw()
+        self._log("所选区域已恢复为未知，等待新扫描")
+
     def clear_local_map(self) -> None:
         controller = getattr(self, "chassis_controller", None)
         if self.source == "hardware" and controller is not None and controller.in_flight:
@@ -1627,14 +1681,13 @@ class NavigationApp:
                         and request.scan_start_s >= self.scan_collect_after
                         and request.scan_end_s >= self.scan_collect_after
                     )
-                    map_advanced = bool(
+                    scan_accepted = bool(
                         result.snapshot is not None
-                        and self._post_motion_map_revision is not None
+                        and result.snapshot.scan_accepted
                         and self._post_motion_scan_count is not None
-                        and result.snapshot.map_version > self._post_motion_map_revision
                         and result.snapshot.completed_scans > self._post_motion_scan_count
                     )
-                    if not (after_boundary and map_advanced and controller.mark_scan_ready()):
+                    if not (after_boundary and scan_accepted and controller.mark_scan_ready()):
                         continue
                     self.moving = False
                     self.manual_motion = False
@@ -2142,7 +2195,8 @@ class NavigationApp:
             try:
                 estimate = self.chassis_adapter.execution_from_report(report)
                 with self.mapping_lock:
-                    self.navigator.apply_execution_delta(
+                    prior_target = getattr(self, "mapping_runtime", None) or self.navigator
+                    prior_target.apply_execution_delta(
                         estimate.local_x_m,
                         estimate.local_y_m,
                         estimate.yaw_rad,
@@ -2319,10 +2373,14 @@ class NavigationApp:
             self.moving = True
             self.accept_samples = False
             self.motion_generation += 1
+            self.mapping_generation = getattr(self, "mapping_generation", 0) + 1
+            self._clear_mapping_tasks()
+            self.mapping_snapshot = None
             self.motion_safety.start(command, self.simulation.hardware.time)
             self.simulation.execute(command)
             with self.mapping_lock:
-                self.navigator.predict_motion(command)
+                prior_target = getattr(self, "mapping_runtime", None) or self.navigator
+                prior_target.predict_motion(command)
             return
 
         controller = getattr(self, "chassis_controller", None)
