@@ -5,6 +5,7 @@ from collections import deque
 from copy import deepcopy
 from datetime import datetime
 import heapq
+import logging
 import math
 from pathlib import Path
 import queue
@@ -2511,6 +2512,7 @@ class NavigationApp:
 
     def _log(self, message: str) -> None:
         self.status_history.append(f"{datetime.now():%H:%M:%S}  {message}")
+        logging.getLogger("navigation.runtime").info(message)
 
     def _collect_config(self) -> dict:
         result = dict(self.config)
@@ -2593,8 +2595,19 @@ def run_app(source: str, argv: list[str] | None = None) -> None:
     parser.add_argument("--screenshot-delay", type=int, default=2600)
     arguments = parser.parse_args(argv)
     root = tk.Tk()
-    app = NavigationApp(root, source=source, initial_view=arguments.view, simulation_speed=arguments.speed, simulation_profile=arguments.profile)
-    if arguments.screenshot:
-        capture_window(root, arguments.screenshot.resolve(), arguments.screenshot_delay, app.on_close)
-    root.mainloop()
+    diagnostics = None
+    if source == "hardware":
+        from runtime_diagnostics import RuntimeDiagnostics
+        diagnostics = RuntimeDiagnostics(root, APP_DIR / "logs")
+    try:
+        app = NavigationApp(root, source=source, initial_view=arguments.view, simulation_speed=arguments.speed, simulation_profile=arguments.profile)
+        if arguments.screenshot:
+            capture_window(root, arguments.screenshot.resolve(), arguments.screenshot_delay, app.on_close)
+        root.mainloop()
+    except Exception:
+        logging.getLogger("navigation.runtime").exception("程序异常退出")
+        raise
+    finally:
+        if diagnostics is not None:
+            diagnostics.close()
 
