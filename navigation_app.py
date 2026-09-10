@@ -168,7 +168,7 @@ def load_configuration(
 
 def save_configuration(config: dict) -> None:
     persisted = dict(config)
-    for key in ("calibration", "calibration_error", "runtime_source", "runtime_view", "auto_enabled", "config_fingerprint"):
+    for key in ("calibration", "calibration_error", "runtime_source", "runtime_view", "auto_enabled", "config_fingerprint", "chassis_config1_values", "chassis_config1_crc"):
         persisted.pop(key, None)
     save_json(NAV_CONFIG_PATH, persisted)
 
@@ -722,6 +722,10 @@ class NavigationApp:
         action_row.pack(fill="x", pady=(7, 0))
         ttk.Button(action_row, text="发送人工动作", command=self._send_manual_move).pack(side="left", fill="x", expand=True)
         ttk.Button(action_row, text="读取底盘状态", command=self._request_chassis_status).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        config_row = ttk.Frame(controls, style="Panel.TFrame")
+        config_row.pack(fill="x", pady=(7, 0))
+        ttk.Button(config_row, text="读取底盘参数", command=lambda: self._sync_chassis_parameters(False)).pack(side="left", fill="x", expand=True)
+        ttk.Button(config_row, text="重载并同步参数", command=lambda: self._sync_chassis_parameters(True)).pack(side="left", fill="x", expand=True, padx=(6, 0))
         self.chassis_status_var = tk.StringVar(value="底盘未连接")
         ttk.Label(controls, textvariable=self.chassis_status_var, style="Muted.TLabel", wraplength=370).pack(anchor="w", pady=(7, 0))
         self.chassis_capability_var = tk.StringVar(value=self._chassis_capability_summary())
@@ -745,6 +749,23 @@ class NavigationApp:
         else:
             self.hardware_controls_frame.pack_forget()
             self.hardware_toggle_button.configure(text="展开串口与指令")
+
+    def _sync_chassis_parameters(self, apply: bool) -> None:
+        controller = self.chassis_controller
+        if self.running or controller.in_flight or controller.communication_check is not None:
+            self._log("请先停止导航并确认底盘空闲，再读取/同步参数")
+            return
+        try:
+            config = resolve_runtime_config(self.source, self.view_mode.get(), self.config)
+        except (RuntimeConfigError, ValueError, OSError) as exc:
+            messagebox.showerror("底盘参数文件无效", str(exc))
+            return
+        if not config.get("chassis_config1_file"):
+            self._log("请在 navigation_config.json 设置 chassis_config1_file")
+            return
+        self._activate_chassis_config(config, reset_mapping=False)
+        if not controller.request_config_sync(apply=apply):
+            self._log("参数已在电脑重载；请连接底盘并读取空闲状态，再同步")
 
     def _request_chassis_status(self) -> None:
         controller = getattr(self, "chassis_controller", None)
@@ -1069,7 +1090,7 @@ class NavigationApp:
             parent=self.root,
         )
 
-    def _activate_chassis_config(self, config: dict) -> None:
+    def _activate_chassis_config(self, config: dict, *, reset_mapping: bool = True) -> None:
         self.config = config
         self.chassis_adapter.update_config(config)
         self.chassis_controller.update_config(config)
@@ -1083,11 +1104,13 @@ class NavigationApp:
             self.navigator.sensor_offset_yaw_rad = configured_navigator.sensor_offset_yaw_rad
             self.navigator.path_turn_penalty = configured_navigator.path_turn_penalty
             self.navigator.translation_capabilities = configured_navigator.translation_capabilities
-            self.navigator.reset()
-            self.mapping_snapshot = None
+            if reset_mapping:
+                self.navigator.reset()
+                self.mapping_snapshot = None
             self.grid = self.navigator.grid
-        self.mapping_generation += 1
-        self._clear_mapping_tasks()
+        if reset_mapping:
+            self.mapping_generation += 1
+            self._clear_mapping_tasks()
         raw_log_path = Path(str(config.get("chassis_raw_log_file", "logs/chassis_serial.jsonl")))
         if not raw_log_path.is_absolute():
             raw_log_path = APP_DIR / raw_log_path
@@ -1131,13 +1154,15 @@ class NavigationApp:
             (bool(self.config.get("synchronized_acquisition", True)), "采集模式不支持导航", "自动导航需要同步观测和实时安全检测。"),
             (chassis_open, "底盘未连接", "自动导航需要连接底盘串口。"),
             (chassis_confirmed, "底盘状态未确认", "请先读取底盘状态，并核对或保存固件能力。"),
+            (not self.config.get("chassis_config1_file") or bool(getattr(controller, "config_verified", False)),
+             "底盘参数未同步", "请停止导航，在展开串口与指令中点击重载并同步参数，等待不同项为 0。"),
             (adapter_ready, "底盘标定未完成", adapter_detail),
         )
         for ok, title, detail in checks:
             if ok:
                 continue
             if show:
-                if title in {"底盘未连接", "底盘状态未确认", "底盘标定未完成"}:
+                if title in {"底盘未连接", "底盘状态未确认", "底盘标定未完成", "底盘参数未同步"}:
                     self._set_hardware_controls(True)
                 messagebox.showwarning(title, detail)
             return False

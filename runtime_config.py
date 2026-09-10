@@ -40,7 +40,7 @@ CHASSIS_BRAKE_COUNT_RANGES = {
     "Z": (600, 1200),
     "C": (600, 1200),
 }
-CHASSIS_CALIBRATION_SOURCE = "car control_fixed/标定/20260909_现场长距离标定结果.md"
+CHASSIS_CALIBRATION_SOURCE = "control/标定/20260909_现场长距离标定结果.md"
 
 
 RUNTIME_DEFAULTS = {
@@ -106,7 +106,11 @@ RUNTIME_DEFAULTS = {
     "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
     "chassis_capability_mode": "unknown",
     "chassis_firmware_confirmed": False,
+    "chassis_result_recovery": False,
+    "chassis_idle_preflight": False,
     "chassis_preferred_translation_unit": "MM",
+    "chassis_config1_file": "",
+    "chassis_tx_padding_spaces": 0,
     "chassis_raw_log_enabled": True,
     "chassis_raw_log_file": "logs/chassis_serial.jsonl",
     "chassis_rx_silence_before_ping_s": 0.5,
@@ -430,10 +434,39 @@ def resolve_runtime_config(
     supplied = dict(overrides or {})
     config = deepcopy(RUNTIME_DEFAULTS)
     config.update(supplied)
+    profile_file = config.get("chassis_config1_file", "")
+    if not isinstance(profile_file, str):
+        raise RuntimeConfigError("chassis_config1_file 必须是项目内相对路径")
+    config["chassis_tx_padding_spaces"] = _strict_int(
+        config.get("chassis_tx_padding_spaces", 0), "发送前导空格", minimum=0, maximum=64
+    )
+    if profile_file:
+        from chassis_config1 import load_profile, values_crc
+        try:
+            values, coefficients = load_profile(profile_file)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeConfigError(f"底盘参数文件加载失败：{exc}") from exc
+        config["chassis_config1_values"] = values
+        config["chassis_config1_crc"] = values_crc(values)
+        config["chassis_preferred_translation_unit"] = "CNT"
+        table = deepcopy(config["chassis_translation_capabilities"])
+        for index, mode in enumerate("WSADQEZC"):
+            table[mode]["counts_per_mm"] = coefficients[mode]
+            table[mode]["fixed_counts_per_mm"] = int(math.floor(coefficients[mode]*10000 + 0.5))
+            table[mode]["brake_min_counts"] = values[44 + 4*index]
+            table[mode]["brake_max_counts"] = values[45 + 4*index]
+        config["chassis_translation_capabilities"] = table
+        timeout = max(float(config["chassis_total_timeout_s"]), 14.0, values[76]/1000 + 6.0)
+        config["chassis_action_timeout_s"] = timeout
+        config["chassis_total_timeout_s"] = timeout
+    else:
+        config.pop("chassis_config1_values", None)
+        config.pop("chassis_config1_crc", None)
 
     for key in (
         "synchronized_acquisition", "clockwise", "chassis_firmware_confirmed",
         "chassis_speed_validated", "chassis_braking_validated", "chassis_raw_log_enabled",
+        "chassis_result_recovery", "chassis_idle_preflight",
     ):
         config[key] = _strict_bool(config, key)
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import secrets
 import statistics
 import threading
 import time
+from chassis_config1 import ConfigExchange, encode as encode_config, values_crc
 from typing import Callable, Mapping
 
 from chassis_protocol import (
@@ -14,12 +15,14 @@ from chassis_protocol import (
     ChassisDone,
     ChassisFrame,
     ChassisProtocolError,
+    ChassisResult,
     ChassisStreamParser,
     EXPECTED_STARTUP_MARKERS,
     STOP_SEQUENCE,
     TRANSLATION_MODES,
     encode_move,
     encode_ping,
+    encode_result_query,
     firmware_mm_to_counts,
     validate_done_kinematics,
     validate_mm_target_counts,
@@ -234,7 +237,7 @@ class ChassisMotionAdapter:
             entry = self._validate_translation_range(mode, distance, automatic=automatic)
             preferred = str(self.config.get("chassis_preferred_translation_unit", "MM"))
             capability = str(self.config.get("chassis_capability_mode", "unknown"))
-            if preferred == "MM":
+            if preferred == "MM" and not self.config.get("chassis_config1_file"):
                 if capability != "mm_ping_v1":
                     raise MotionConversionError("当前底盘能力未确认支持 MM")
                 millimeters = int(math.floor(distance * 1000.0 + 1e-9))
@@ -306,6 +309,13 @@ class ChassisMotionAdapter:
                 raise MotionConversionError("当前底盘能力不支持 MM")
             distance = request_value / 1000.0
             entry = self._validate_translation_range(mode, distance, automatic=False)
+            if self.config.get("chassis_config1_file"):
+                counts = int(math.floor(request_value * float(entry["counts_per_mm"]) + 0.5))
+                minimum = int(self.config.get("chassis_min_counts", 1))
+                maximum = int(self.config.get("chassis_max_counts", 2_147_483_647))
+                if not minimum <= counts <= maximum:
+                    raise MotionConversionError(f"换算后的 CNT 必须在 {minimum}～{maximum} 之间")
+                return ChassisMoveRequest(mode, counts, "CNT", counts, distance, "m")
             try:
                 target_counts = firmware_mm_to_counts(
                     request_value,
@@ -411,7 +421,14 @@ class ChassisAction:
     stop_requested: bool = False
     move_may_have_started: bool = False
     write_ticket: object | None = None
+    ping_write_ticket: object | None = None
     handled_report_raw: str | None = None
+    result_recovery: bool = False
+    result_invalidated: bool = False
+    result_due_at: float | None = None
+    result_queries: int = 0
+    result_query_pending: bool = False
+    result_query_ticket: object | None = None
 
     @property
     def mode(self) -> str:
@@ -432,6 +449,16 @@ class ChassisAction:
     @property
     def counts(self) -> int:
         return self.request.request_value
+
+
+@dataclass
+class IdlePreflight:
+    nonce: str
+    deadline: float
+    sent_at: float | None = None
+    written: bool = False
+    pong_at: float | None = None
+    ticket: object | None = None
 
 
 @dataclass
@@ -491,19 +518,32 @@ class ChassisController:
         self._fault_emitted = False
         self._motion_unconfirmed = False
         self._lock = threading.RLock()
+        self.config_exchange = None
+        self.config_verified = False
+        self._idle_preflight: IdlePreflight | None = None
+        self._idle_preflight_failed = False
+        self._idle_preflight_announced = False
+        self._idle_status_pending = False
+        self._idle_status_deferred = False
+        self._idle_preflight_drain_until = -math.inf
 
     def update_config(self, config: Mapping[str, object]) -> bool:
         with self._lock:
             if self.in_flight or self.communication_check is not None:
                 return False
+            self._invalidate_idle_preflight()
+            same_values = (self.config.get("chassis_config1_file") == config.get("chassis_config1_file")
+                           and self.config.get("chassis_config1_values") == config.get("chassis_config1_values"))
             self.config = config
+            self.config_verified = self.config_verified and same_values
             self.parser.max_line_bytes = int(config.get("chassis_max_line_bytes", 1024))
             return True
 
     @property
     def in_flight(self) -> bool:
         return bool(
-            self.pending is not None
+            self.config_exchange is not None
+            or self.pending is not None
             or self._motion_unconfirmed
             or self.state in {
                 ChassisState.WAITING_SILENCE,
@@ -546,11 +586,142 @@ class ChassisController:
             and self.state == ChassisState.IDLE
             and self.pending is None
             and self.communication_check is None
+            and self.config_exchange is None and not self._idle_status_pending
+            and (not self.config.get("chassis_config1_file") or self.config_verified)
         )
 
     @property
     def can_scan(self) -> bool:
         return self.state in {ChassisState.IDLE, ChassisState.CONNECTED_WAITING}
+
+    def _idle_preflight_safe(self) -> bool:
+        return bool(
+            self.config.get("chassis_idle_preflight", False)
+            and getattr(self.endpoint, "is_open", False)
+            and self.state == ChassisState.IDLE and self.confirmed
+            and self.pending is None and not self._motion_unconfirmed
+            and self.config_exchange is None and self.communication_check is None
+            and not self._idle_status_pending
+            and (not self.config.get("chassis_config1_file") or self.config_verified)
+            and self._effective_capability_mode() == "mm_ping_v1"
+            and callable(getattr(self.endpoint, "write_ticket", None))
+            and callable(getattr(self.endpoint, "cancel_write", None))
+        )
+
+    @property
+    def idle_preflight_ready(self) -> bool:
+        with self._lock:
+            return self._idle_preflight_ready_at(self.clock())
+
+    def _idle_preflight_ready_at(self, stamp: float) -> bool:
+        prep = self._idle_preflight
+        return bool(self._idle_preflight_safe() and prep is not None
+                    and prep.pong_at is not None and prep.written
+                    and stamp - self._last_rx_at >= self._silence_after_pong())
+
+    def _report_idle_preflight(self, ready: bool, stamp: float) -> None:
+        if ready != self._idle_preflight_announced:
+            self._idle_preflight_announced = ready
+            self._emit("chassis_status", (
+                self.connection_generation, f"IDLE_PREFLIGHT={int(ready)}"
+            ), stamp)
+
+    def _invalidate_idle_preflight(self) -> None:
+        prep = self._idle_preflight
+        self._idle_preflight = None
+        self._idle_preflight_failed = False
+        if prep is not None:
+            # Epochs suppress callbacks, but do not remove bytes from the queue.
+            # Cancel the actual ticket before any replacement transaction.
+            self._tx_epoch += 1
+            cancelled = None
+            if prep.ticket is not None:
+                cancelled = self.endpoint.cancel_write(prep.ticket)
+            if prep.pong_at is None and (prep.sent_at is not None or cancelled == "started"):
+                deadline = prep.deadline
+                if not prep.written:
+                    deadline = max(deadline, self.clock() + self._ping_timeout())
+                self._idle_preflight_drain_until = max(self._idle_preflight_drain_until, deadline)
+        self._report_idle_preflight(False, self.clock())
+
+    def _idle_preflight_draining(self, stamp: float) -> bool:
+        if self._idle_preflight_drain_until == -math.inf:
+            return False
+        # A started PING cannot be unsent. Let its response window expire,
+        # then leave a full quiet interval before another protocol transaction.
+        if stamp - max(self._idle_preflight_drain_until, self._last_rx_at) < self._silence_before_ping():
+            return True
+        self._idle_preflight_drain_until = -math.inf
+        return False
+
+    def _fail_idle_preflight(self, stamp: float) -> None:
+        prep = self._idle_preflight
+        self._invalidate_idle_preflight()
+        self._idle_preflight_failed = True
+        action = self.pending
+        if prep is not None and action is not None and action.nonce == prep.nonce:
+            action.nonce = None
+            action.ping_sent_at = None
+            self._phase_deadline = stamp + self._silence_wait_timeout()
+            self._state(ChassisState.WAITING_SILENCE, "空闲 PING 失效，执行常规握手", stamp)
+
+    def _poll_idle_preflight(self, stamp: float) -> None:
+        if self._idle_preflight_draining(stamp):
+            return
+        if not self._idle_preflight_safe():
+            self._invalidate_idle_preflight()
+            return
+        prep = self._idle_preflight
+        if prep is not None:
+            ready = self._idle_preflight_ready_at(stamp)
+            self._report_idle_preflight(ready, stamp)
+            if ready:
+                prep.deadline = math.inf
+            if not ready and stamp >= prep.deadline:
+                self._fail_idle_preflight(stamp)
+            return
+        if self._idle_preflight_failed or stamp - self._last_rx_at < self._silence_before_ping():
+            return
+        nonce = self.nonce_factory()
+        try:
+            payload = encode_ping(nonce, max_command_bytes=int(
+                self.config.get("chassis_tx_max_command_bytes", 47)))
+        except ChassisProtocolError:
+            self._idle_preflight_failed = True
+            return
+        prep = IdlePreflight(nonce, stamp + self._ping_timeout())
+        self._idle_preflight = prep
+        self._tx_epoch += 1
+        epoch = self._tx_epoch
+
+        def sent(sent_at):
+            with self._lock:
+                if self._idle_preflight is prep:
+                    prep.sent_at = sent_at
+                    prep.deadline = sent_at + self._ping_timeout()
+                    if self.pending is not None and self.pending.nonce == prep.nonce:
+                        self.pending.ping_sent_at = sent_at
+                        self._phase_deadline = prep.deadline
+
+        def written(written_at):
+            with self._lock:
+                if self._idle_preflight is prep:
+                    prep.written = True
+                    prep.ticket = None
+
+        def failed(failed_at, *_args):
+            with self._lock:
+                if self._idle_preflight is prep:
+                    self._fail_idle_preflight(failed_at)
+
+        ticket = self._queue_write(
+            payload, action_id=None, epoch=epoch, return_ticket=True,
+            on_sent=sent, on_written=written, on_failed=failed, on_cancelled=failed,
+        )
+        if ticket is None:
+            failed(stamp)
+        elif self._idle_preflight is prep and not prep.written:
+            prep.ticket = ticket
 
     def _now(self, value: float | None) -> float:
         return self.clock() if value is None else float(value)
@@ -564,6 +735,12 @@ class ChassisController:
 
     def begin_connection(self) -> int:
         with self._lock:
+            self._cancel_motion_ping()
+            self._invalidate_idle_preflight()
+            self._idle_status_pending = False
+            self._idle_status_deferred = False
+            self._invalidate_result_recovery()
+            self._cancel_config_exchange()
             self.connection_generation += 1
             self.parser.reset()
             self.confirmed = False
@@ -591,6 +768,12 @@ class ChassisController:
 
     def disconnect(self) -> None:
         with self._lock:
+            self._cancel_motion_ping()
+            self._invalidate_idle_preflight()
+            self._idle_status_pending = False
+            self._idle_status_deferred = False
+            self._invalidate_result_recovery()
+            self._cancel_config_exchange()
             if self.pending is not None and self.pending.move_may_have_started:
                 self._motion_unconfirmed = True
             self.connection_generation += 1
@@ -613,6 +796,7 @@ class ChassisController:
             if generation != self.connection_generation:
                 return
             self._last_rx_at = float(host_time)
+            self._report_idle_preflight(False, host_time)
             action_id = self.pending.action_id if self.pending is not None else None
             self._emit("chassis_raw_rx", (generation, action_id, bytes(data)), host_time)
             frames = self.parser.feed(data)
@@ -623,11 +807,19 @@ class ChassisController:
         with self._lock:
             if generation != self.connection_generation:
                 return
+            if frame.kind == "config1":
+                if self.config_exchange is not None:
+                    self.config_exchange.feed(frame.raw, host_time)
+                return
+            if self.config_exchange is not None and frame.kind == "error":
+                self.config_exchange.fail(f"配置通信失败：{frame.raw or frame.error}")
+                return
             if frame.kind == "empty":
                 return
             if frame.kind == "invalid":
                 self._emit("chassis_protocol_error", (generation, frame.raw, frame.error), host_time)
-                if self.pending is not None and self.pending.move_may_have_started:
+                if (self.pending is not None and self.pending.move_may_have_started
+                        and not self.pending.result_recovery):
                     self._fault_and_stop(f"底盘报告损坏：{frame.error}", host_time)
                 return
             if frame.kind == "banner":
@@ -649,7 +841,14 @@ class ChassisController:
                 self._handle_ack(frame.value, host_time)
                 return
             if frame.kind == "done":
+                if ((self.pending is not None and self.pending.result_recovery)
+                        or self.config.get("chassis_result_recovery", False)):
+                    self._emit("chassis_status", (generation, "忽略未校验的旧版 DONE"), host_time)
+                    return
                 self._handle_done(frame.value, host_time)
+                return
+            if frame.kind == "result":
+                self._handle_result(frame.value, host_time)
                 return
             if frame.kind == "error":
                 self._handle_error(frame.value, host_time)
@@ -658,6 +857,13 @@ class ChassisController:
                 self._emit("chassis_status", (generation, frame.raw), host_time)
 
     def _handle_startup(self, raw: str, stamp: float) -> None:
+        self._cancel_motion_ping()
+        self._invalidate_idle_preflight()
+        self._idle_status_pending = False
+        self._idle_status_deferred = False
+        self._invalidate_result_recovery()
+        self._cancel_config_exchange()
+        self._tx_epoch += 1
         active = self.pending is not None or self._motion_unconfirmed or self.state not in {
             ChassisState.CONNECTED_WAITING,
             ChassisState.IDLE,
@@ -694,9 +900,12 @@ class ChassisController:
             ), stamp)
 
     def _handle_idle(self, status, stamp: float) -> None:
+        if not self._idle_status_deferred:
+            self._idle_status_pending = False
         self.last_idle = status
         if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE, ChassisState.UNKNOWN}:
             action = self.pending
+            self._cancel_result_query()
             self.pending = None
             self._motion_unconfirmed = False
             self.confirmed = True
@@ -716,6 +925,15 @@ class ChassisController:
         self._fault_and_stop("运动事务期间收到无归属的 IDLE", stamp)
 
     def _handle_pong(self, pong, stamp: float) -> None:
+        prep = self._idle_preflight
+        if prep is not None and prep.nonce == pong.nonce and prep.sent_at is None:
+            return
+        if prep is not None and prep.sent_at is not None and pong.nonce == prep.nonce:
+            if prep.pong_at is None:
+                prep.pong_at = stamp
+                prep.deadline = stamp + self._silence_wait_timeout()
+            if self.pending is None:
+                return
         if self.communication_check is not None and self.state == ChassisState.CHECKING:
             check = self.communication_check
             if check.phase == "waiting_pong" and pong.nonce == check.nonce:
@@ -760,6 +978,8 @@ class ChassisController:
         if self.state in {ChassisState.WAITING_ACK, ChassisState.WAITING_DONE}:
             if action.ack_at is None:
                 action.ack_at = stamp
+                if action.result_recovery and action.result_queries == 0:
+                    action.result_due_at = stamp + 1.8
                 action.ack_missing = False
                 self._ack_deadline = None
                 self._state(ChassisState.WAITING_DONE, "底盘已接受动作，等待 DONE", stamp)
@@ -771,6 +991,49 @@ class ChassisController:
             self._emit("chassis_status", (self.connection_generation, "忽略迟到或重复 ACK"), stamp)
             return
         self._fault_and_stop("ACK 到达时事务尚未发送或已不可完成", stamp)
+
+    def _handle_result(self, result: ChassisResult, stamp: float) -> None:
+        action = self.pending
+        if (action is None or not action.result_recovery or action.result_invalidated
+                or action.connection_generation != self.connection_generation
+                or result.nonce != action.nonce or not action.move_may_have_started
+                or action.done_at is not None
+                or self.state not in {ChassisState.WAITING_ACK, ChassisState.WAITING_DONE,
+                                      ChassisState.STOPPING}):
+            self._emit("chassis_status", (self.connection_generation, "忽略无归属或过期 RESULT"), stamp)
+            return
+        if result.report is None:
+            if result.status == "B" and self.state in {ChassisState.WAITING_ACK, ChassisState.WAITING_DONE}:
+                self._ack_deadline = None
+                self._state(ChassisState.WAITING_DONE, "RESULT 确认动作仍在运行", stamp)
+            self._emit("chassis_status", (self.connection_generation, result.raw), stamp)
+            return
+        report = result.report
+        if not self._matches(action, report.mode, report.request_value, report.unit):
+            self._emit("chassis_protocol_error", (
+                self.connection_generation, result.raw, "RESULT 与当前请求不匹配"
+            ), stamp)
+            return
+        coherent, detail = validate_done_kinematics(report)
+        if not coherent:
+            self._emit("chassis_protocol_error", (self.connection_generation, result.raw, detail), stamp)
+            return
+        if report.unit == "MM":
+            entry = ChassisMotionAdapter(self.config)._translation_entry(report.mode)
+            try:
+                target = firmware_mm_to_counts(
+                    report.request_value, fixed_counts_per_mm=int(entry.get("fixed_counts_per_mm", 0))
+                )
+            except (ChassisProtocolError, TypeError, ValueError, OverflowError) as exc:
+                self._emit("chassis_protocol_error", (self.connection_generation, result.raw, str(exc)), stamp)
+                return
+            if action.target_counts is not None and action.target_counts != target:
+                self._emit("chassis_protocol_error", (
+                    self.connection_generation, result.raw, "RESULT MM 换算与请求不一致"
+                ), stamp)
+                return
+            report = replace(report, target_counts=target)
+        self._handle_done(report, stamp)
 
     def _handle_done(self, report: ChassisDone, stamp: float) -> None:
         action = self.pending
@@ -820,6 +1083,9 @@ class ChassisController:
 
     def _handle_error(self, error, stamp: float) -> None:
         code = getattr(error, "code", "UNKNOWN")
+        if self._idle_preflight is not None and code != "BUSY":
+            self._fail_idle_preflight(stamp)
+            return
         if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE} and code == "BAD_CMD":
             self._emit("chassis_status", (self.connection_generation, "停止清理行返回预期 BAD_CMD"), stamp)
             return
@@ -855,10 +1121,14 @@ class ChassisController:
             if not getattr(self.endpoint, "is_open", False):
                 self._emit("chassis_rejected", (self.connection_generation, "底盘串口未打开"), stamp)
                 return False
+            if self.config.get("chassis_config1_file") and not self.config_verified:
+                self._emit("chassis_rejected", (self.connection_generation,
+                           "参数尚未确认，请先读取或同步一次；后续动作沿用确认状态"), stamp)
+                return False
             if source == "auto" and not self.automatic_ready:
                 self._emit("chassis_rejected", (self.connection_generation, "底盘尚未满足自动动作准入"), stamp)
                 return False
-            if self.state != ChassisState.IDLE or self.pending is not None or self._motion_unconfirmed:
+            if self.config_exchange is not None or self.state != ChassisState.IDLE or self.pending is not None or self._motion_unconfirmed or self._idle_status_pending:
                 self._emit("chassis_rejected", (
                     self.connection_generation, f"底盘状态为 {self.state}，不能发送新动作"
                 ), stamp)
@@ -892,6 +1162,10 @@ class ChassisController:
             except ChassisProtocolError as exc:
                 self._emit("chassis_rejected", (self.connection_generation, str(exc)), stamp)
                 return False
+            if self.config.get("chassis_config1_file") and request.unit == "MM":
+                self._emit("chassis_rejected", (self.connection_generation,
+                           "启用电脑标定后，毫米请求须先经适配器换算为 CNT"), stamp)
+                return False
             if request.unit == "MM" and self._effective_capability_mode() != "mm_ping_v1":
                 self._emit("chassis_rejected", (self.connection_generation, "底盘 MM/PING 能力尚未确认"), stamp)
                 return False
@@ -906,10 +1180,28 @@ class ChassisController:
                 source,
                 stamp,
                 payload,
+                result_recovery=self.config.get("chassis_result_recovery", False) is True,
             )
             self.pending = action
             self.automatic_locked = source != "auto"
             self._fault_emitted = False
+            prep = self._idle_preflight
+            if prep is not None and stamp >= prep.deadline and prep.pong_at is None:
+                self._invalidate_idle_preflight()
+                prep = None
+            if prep is not None:
+                action.nonce = prep.nonce
+                action.ping_sent_at = prep.sent_at
+                self._report_idle_preflight(False, stamp)
+                self._phase_deadline = (stamp + self._silence_wait_timeout()
+                                        if prep.pong_at is not None else prep.deadline)
+                state = (ChassisState.WAITING_POST_PONG_SILENCE if prep.pong_at is not None
+                         else ChassisState.WAITING_PONG)
+                self._state(state, "沿用空闲 PING，等待发送条件", stamp)
+                if prep.pong_at is not None and prep.written and stamp - self._last_rx_at >= self._silence_after_pong():
+                    self._queue_move(action, stamp)
+                return True
+            self._idle_preflight_failed = False
             self._phase_deadline = stamp + self._silence_wait_timeout()
             self._state(ChassisState.WAITING_SILENCE, "动作已登记，等待底盘 RX 静默", stamp)
             return True
@@ -921,6 +1213,8 @@ class ChassisController:
                 and self.confirmed
                 and self.capability_ready
                 and not self._motion_unconfirmed
+                and self.config_exchange is None
+                and (not self.config.get("chassis_config1_file") or self.config_verified)
             ):
                 self.automatic_locked = False
                 return True
@@ -929,6 +1223,10 @@ class ChassisController:
     def request_stop(self, *, reason: str = "用户停止", now: float | None = None) -> bool:
         stamp = self._now(now)
         with self._lock:
+            self._idle_status_deferred = False
+            self._cancel_motion_ping()
+            self._invalidate_idle_preflight()
+            self._cancel_config_exchange()
             self.automatic_locked = True
             if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE}:
                 return True
@@ -973,6 +1271,8 @@ class ChassisController:
     def request_status(self, now: float | None = None) -> bool:
         stamp = self._now(now)
         with self._lock:
+            if self.config_exchange is not None:
+                return False
             if not getattr(self.endpoint, "is_open", False):
                 return False
             if self.state not in {
@@ -985,9 +1285,18 @@ class ChassisController:
                 return False
             if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE} and self._status_sent:
                 return False
+            self._invalidate_idle_preflight()
+            if self.config.get("chassis_idle_preflight", False):
+                self._idle_status_pending = True
+            if self._idle_preflight_draining(stamp):
+                self._idle_status_deferred = True
+                return True
+            self._idle_status_deferred = False
             self._tx_epoch += 1
             epoch = self._tx_epoch
             sent = self._queue_write(b"P\r\n", action_id=None, epoch=epoch, priority=False)
+            if not sent:
+                self._idle_status_pending = False
             if sent:
                 self._status_sent = True
                 self._emit("chassis_status_request", (self.connection_generation, "P"), stamp)
@@ -1003,15 +1312,18 @@ class ChassisController:
                 or self.state != ChassisState.IDLE
                 or self.pending is not None
                 or self.communication_check is not None
+                or self.config_exchange is not None
+                or self._idle_status_pending
             ):
                 return False
             if self._effective_capability_mode() != "mm_ping_v1":
                 self._emit("chassis_rejected", (self.connection_generation, "通信检查需要已确认的 PING 能力"), stamp)
                 return False
+            self._invalidate_idle_preflight()
             self.automatic_locked = True
             self.communication_check = CommunicationCheck(
                 requested=count,
-                wait_started_at=stamp,
+                wait_started_at=max(stamp, self._idle_preflight_drain_until),
             )
             self._state(ChassisState.CHECKING, f"通信检查 0/{count}", stamp)
             return True
@@ -1055,21 +1367,33 @@ class ChassisController:
     def poll(self, now: float | None = None) -> None:
         stamp = self._now(now)
         with self._lock:
+            if self._idle_status_deferred and not self._idle_preflight_draining(stamp):
+                self.request_status(stamp)
+            if self.config_exchange is not None:
+                if not self._idle_preflight_draining(stamp):
+                    self.config_exchange.poll(stamp, self._last_rx_at)
+                return
             if self.communication_check is not None and self.state == ChassisState.CHECKING:
                 self._poll_communication_check(stamp)
+                return
+            if self.state == ChassisState.IDLE:
+                self._poll_idle_preflight(stamp)
                 return
             action = self.pending
             if action is not None and self.state == ChassisState.WAITING_SILENCE:
                 if self._phase_deadline is not None and stamp >= self._phase_deadline:
                     self._abort_before_move("底盘持续有数据，静默等待超时，MOVE 未发送", stamp)
-                elif stamp - self._last_rx_at >= self._silence_before_ping():
-                    if self._effective_capability_mode() == "mm_ping_v1":
+                elif not self._idle_preflight_draining(stamp) and stamp - self._last_rx_at >= self._silence_before_ping():
+                    if action.result_recovery or self._effective_capability_mode() == "mm_ping_v1":
                         self._send_motion_ping(action, stamp)
                     else:
                         self._queue_move(action, stamp)
             elif action is not None and self.state == ChassisState.WAITING_PONG:
                 if self._phase_deadline is not None and stamp >= self._phase_deadline:
-                    self._abort_before_move("PING 超时，MOVE 未发送", stamp)
+                    if self._idle_preflight is not None:
+                        self._fail_idle_preflight(stamp)
+                    else:
+                        self._abort_before_move("PING 超时，MOVE 未发送", stamp)
             elif action is not None and self.state == ChassisState.WAITING_POST_PONG_SILENCE:
                 if self._phase_deadline is not None and stamp >= self._phase_deadline:
                     self._abort_before_move("PONG 后持续有数据，MOVE 未发送", stamp)
@@ -1095,6 +1419,9 @@ class ChassisController:
                     self.connection_generation, action, "动作总时限到达，停止结果不明"
                 ), stamp)
                 self.request_stop(reason="动作总超时", now=stamp)
+            if (action is not None and self.pending is action
+                    and self.state in {ChassisState.WAITING_ACK, ChassisState.WAITING_DONE}):
+                self._poll_result_recovery(action, stamp)
             if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE}:
                 if self._status_due is not None and not self._status_sent and stamp >= self._status_due:
                     self.request_status(stamp)
@@ -1124,6 +1451,70 @@ class ChassisController:
                 return configured
         return "unknown"
 
+    def _cancel_config_exchange(self):
+        ticket = getattr(self, "_config_ticket", None)
+        cancel = getattr(self.endpoint, "cancel_write", None)
+        if ticket is not None and callable(cancel):
+            cancel(ticket)
+        self._config_ticket = None
+        self.config_exchange = None
+        self.config_verified = False
+
+    def request_config_sync(self, *, apply: bool = True, now: float | None = None) -> bool:
+        with self._lock:
+            if (not self.config.get("chassis_config1_file") or self.in_flight
+                    or self._idle_status_pending
+                    or self.communication_check is not None or self.state != ChassisState.IDLE
+                    or not getattr(self.endpoint, "is_open", False)):
+                return False
+            self.automatic_locked = True
+            self._start_config_exchange("apply" if apply else "read", self._now(now))
+            return True
+
+    def _start_config_exchange(self, operation, stamp):
+        self._invalidate_idle_preflight()
+        target = self.config["chassis_config1_values"]
+        self._tx_epoch += 1
+        epoch = self._tx_epoch
+        self.config_verified = False
+
+        def failed(_stamp, _written, _total, detail):
+            with self._lock:
+                if epoch == self._tx_epoch and self.config_exchange is not None:
+                    self.config_exchange.fail(detail)
+
+        def send(payload):
+            ticket = self._queue_write(
+                payload, action_id=None, epoch=epoch,
+                return_ticket=True,
+                on_failed=failed,
+            )
+            self._config_ticket = ticket
+            return ticket is not None
+
+        def finish(actual, error):
+            exchange = self.config_exchange
+            self.config_exchange = None
+            if error:
+                self.automatic_locked = True
+                # Drop queued config writes and abandon our staging transaction.
+                self._tx_epoch += 1
+                if exchange is not None:
+                    self._queue_write(encode_config(f"@CFG,A,{exchange.tag}"),
+                                      action_id=None, epoch=self._tx_epoch,
+                                      priority=True, discard_pending=True)
+                self._emit("chassis_status", (self.connection_generation, error), self.clock())
+                return
+            self.config_verified = actual == list(target)
+            detail = (f"底盘参数 CRC={values_crc(actual)}；"
+                      f"与电脑不同项 {sum(a != b for a, b in zip(actual, target))}")
+            self._emit("chassis_status", (self.connection_generation, detail), self.clock())
+
+        self.config_exchange = ConfigExchange(
+            target, operation, send, finish, max(stamp, self._idle_preflight_drain_until))
+        self._emit("chassis_status", (self.connection_generation,
+                   "正在读取/同步底盘参数，请等待"), stamp)
+
     def _send_motion_ping(self, action: ChassisAction, stamp: float) -> None:
         nonce = self.nonce_factory()
         try:
@@ -1139,17 +1530,30 @@ class ChassisController:
         epoch = self._tx_epoch
         self._phase_deadline = stamp + self._ping_timeout()
         self._state(ChassisState.WAITING_PONG, f"等待 PONG {nonce}", stamp)
-        sent = self._queue_write(
+        ticket = self._queue_write(
             payload,
             action_id=action.action_id,
             epoch=epoch,
+            return_ticket=True,
             on_sent=lambda sent_at: self._set_ping_sent(action, epoch, sent_at),
             on_failed=lambda failed_at, written, total, detail: self._on_preflight_write_failed(
                 action, epoch, failed_at, written, total, detail
             ),
         )
-        if not sent:
+        if ticket is None:
             self._abort_before_move("PING 未能排队，MOVE 未发送", stamp)
+        elif self.pending is action and self._tx_epoch == epoch:
+            action.ping_write_ticket = ticket
+
+    def _cancel_motion_ping(self) -> None:
+        action = self.pending
+        if action is not None and action.ping_write_ticket is not None:
+            ticket = action.ping_write_ticket
+            action.ping_write_ticket = None
+            cancel = getattr(self.endpoint, "cancel_write", None)
+            if callable(cancel):
+                self._tx_epoch += 1
+                cancel(ticket)
 
     def _set_ping_sent(self, action: ChassisAction, epoch: int, stamp: float) -> None:
         with self._lock:
@@ -1160,6 +1564,30 @@ class ChassisController:
     def _queue_move(self, action: ChassisAction, stamp: float) -> None:
         if self.pending is not action:
             return
+        self._cancel_motion_ping()
+        prep = self._idle_preflight
+        if prep is not None:
+            if not prep.written or prep.pong_at is None:
+                return
+            # Consume only after the PING write has completed. An active serial
+            # write cannot be cancelled; the endpoint serializes it before MOVE.
+            self._invalidate_idle_preflight()
+        if self.config.get("chassis_config1_file") and not self.config_verified:
+            self._abort_before_move("参数确认状态已失效，请重新读取或同步", stamp)
+            return
+        if action.result_recovery:
+            try:
+                # The successful idle PING arms this exact ID. Never fall back
+                # to an unchecked MOVE if encoding or firmware acceptance fails.
+                if action.nonce is None:
+                    raise ChassisProtocolError("BAD_CMD", "受保护 MOVE 缺少 PING 标记")
+                action.payload = encode_move(
+                    action.mode, action.request_value, action.unit, nonce=action.nonce,
+                    max_command_bytes=int(self.config.get("chassis_tx_max_command_bytes", 47)),
+                )
+            except ChassisProtocolError as exc:
+                self._abort_before_move(str(exc), stamp)
+                return
         self._tx_epoch += 1
         epoch = self._tx_epoch
         self._phase_deadline = stamp + self._silence_wait_timeout()
@@ -1186,6 +1614,8 @@ class ChassisController:
             if epoch != self._tx_epoch or self.pending is not action:
                 return
             action.send_started_at = stamp
+            if action.result_recovery:
+                action.result_due_at = stamp + 1.8
             action.move_may_have_started = True
             self._motion_unconfirmed = True
             self._phase_deadline = None
@@ -1199,6 +1629,8 @@ class ChassisController:
             if epoch != self._tx_epoch or self.pending is not action:
                 return
             action.write_completed_at = stamp
+            if action.result_recovery and action.result_queries == 0 and action.done_at is None:
+                action.result_due_at = max(action.result_due_at or stamp, stamp + 1.8)
             self._emit("chassis_move_written", (self.connection_generation, action), stamp)
 
     def _on_move_write_failed(
@@ -1268,6 +1700,8 @@ class ChassisController:
         on_failed=None,
         on_cancelled=None,
     ):
+        if payload.startswith((b"@PING,", b"@MOVE,", b"@CFG,", b"@RESULT,")):
+            payload = b" " * int(self.config.get("chassis_tx_padding_spaces", 0)) + payload
         generation = self.connection_generation
 
         def sent(stamp):
@@ -1335,6 +1769,8 @@ class ChassisController:
             self._mark_unknown(detail, stamp)
 
     def _abort_before_move(self, detail: str, stamp: float) -> None:
+        self._cancel_motion_ping()
+        self._invalidate_idle_preflight()
         action = self.pending
         if action is not None and action.move_may_have_started:
             self._fault_and_stop(detail, stamp)
@@ -1352,6 +1788,9 @@ class ChassisController:
             self._emit("chassis_fault", (self.connection_generation, detail), stamp)
 
     def _mark_unknown(self, detail: str, stamp: float) -> None:
+        self._cancel_motion_ping()
+        self._invalidate_idle_preflight()
+        self._cancel_config_exchange()
         self.automatic_locked = True
         self._clear_deadlines()
         self.state = ChassisState.UNKNOWN
@@ -1396,6 +1835,8 @@ class ChassisController:
     def _poll_communication_check(self, stamp: float) -> None:
         check = self.communication_check
         if check is None:
+            return
+        if self._idle_preflight_draining(stamp):
             return
         if check.phase == "waiting_silence":
             if stamp - check.wait_started_at >= self._silence_wait_timeout():
@@ -1477,7 +1918,89 @@ class ChassisController:
         self._state(ChassisState.CONNECTED_WAITING, detail, stamp)
         self._emit("chassis_communication_result", (self.connection_generation, result), stamp)
 
+    def _cancel_result_query(self) -> None:
+        action = self.pending
+        if action is None:
+            return
+        ticket = action.result_query_ticket
+        action.result_query_ticket = None
+        action.result_query_pending = False
+        action.result_due_at = None
+        cancel = getattr(self.endpoint, "cancel_write", None)
+        if ticket is not None and callable(cancel):
+            cancel(ticket)
+
+    def _invalidate_result_recovery(self) -> None:
+        if self.pending is not None:
+            self.pending.result_invalidated = True
+        self._cancel_result_query()
+
+    def _poll_result_recovery(self, action: ChassisAction, stamp: float) -> None:
+        if (not action.result_recovery or action.result_invalidated
+                or action.connection_generation != self.connection_generation
+                or not action.move_may_have_started or action.done_at is not None
+                or action.result_query_pending or action.result_queries >= 5
+                or action.result_due_at is None or stamp < action.result_due_at
+                or stamp - self._last_rx_at < 0.25
+                or self._total_deadline is None or stamp >= self._total_deadline):
+            return
+        # Keep one snapshot query for a long-running move whose automatic
+        # completion may be lost after the first four queries reported busy.
+        if action.result_queries == 4 and stamp < self._total_deadline - 1.5:
+            return
+        payload = encode_result_query(
+            action.nonce, max_command_bytes=int(self.config.get("chassis_tx_max_command_bytes", 47))
+        )
+        # Quiet RX may still contain a result whose terminator was lost. Log
+        # the fragment as invalid and start the queried reply on a fresh line.
+        for frame in self.parser.finalize():
+            self._emit("chassis_frame", (self.connection_generation, frame), stamp)
+        epoch = self._tx_epoch
+        action.result_queries += 1
+        attempt = action.result_queries
+        action.result_query_pending = True
+        action.result_due_at = stamp + 1.2
+
+        def current():
+            return (self.pending is action and epoch == self._tx_epoch
+                    and action.connection_generation == self.connection_generation
+                    and not action.result_invalidated and action.done_at is None
+                    and action.result_query_pending and action.result_queries == attempt)
+
+        def sent(sent_at):
+            with self._lock:
+                if current():
+                    action.result_due_at = sent_at + 1.2
+
+        def finished(finished_at):
+            with self._lock:
+                if current():
+                    action.result_query_pending = False
+                    action.result_query_ticket = None
+                    action.result_due_at = finished_at + 1.2
+                    if action.result_queries == 4 and self._total_deadline is not None:
+                        action.result_due_at = max(action.result_due_at, self._total_deadline - 1.5)
+
+        def failed(failed_at, written, total, detail):
+            with self._lock:
+                if current():
+                    self._emit("chassis_protocol_error", (
+                        self.connection_generation, payload.decode("ascii").strip(),
+                        f"RESULT 查询写入失败 {written}/{total}：{detail}"
+                    ), failed_at)
+                    finished(failed_at)
+
+        ticket = self._queue_write(
+            payload, action_id=action.action_id, epoch=epoch, return_ticket=True,
+            on_sent=sent, on_written=finished, on_failed=failed, on_cancelled=finished,
+        )
+        if ticket is None:
+            finished(stamp)
+        elif current():
+            action.result_query_ticket = ticket
+
     def _clear_action_deadlines(self) -> None:
+        self._cancel_result_query()
         self._phase_deadline = None
         self._ack_deadline = None
         self._total_deadline = None
@@ -1511,7 +2034,9 @@ class ChassisController:
         return max(0.1, self._number("chassis_ack_timeout_s", 2.0))
 
     def _total_timeout(self) -> float:
-        return max(0.5, self._number("chassis_total_timeout_s", 12.0))
+        values = self.config.get("chassis_config1_values", [])
+        configured = self._number("chassis_total_timeout_s", 12.0)
+        return max(configured, 14.0, values[76] / 1000.0 + 6.0) if values else max(0.5, configured)
 
     def _stop_timeout(self) -> float:
         return max(0.5, self._number("chassis_stop_timeout_s", 3.0))

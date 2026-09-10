@@ -8,7 +8,7 @@
 
 - 测距串口：向上层 ESP32 发送激光和 CCD 指令，接收光斑中心坐标。
 - 传动串口：控制下层继电器和电机，接收光电开关的 `TRIG n` 零位信号。
-- 底盘串口：以 9600 baud 接收当前麦轮固件的 `@MOVE/@ACK/@DONE/@ERR` 行协议。
+- 底盘串口：9600 baud，当前使用 CONFIG1 参数同步和 RESULT1 受校验 MOVE/RESULT，兼容旧 ACK/DONE 接口。
 
 程序根据 CCD 标定模型计算距离，根据相邻光电触发的时间计算旋转周期，并将每个测量点转换为平面坐标。
 
@@ -36,7 +36,7 @@ python -m pip install pyserial
 3. 默认 CCD 指令为 `@c0071#@`，返回格式为 `FF FE + 2字节`。
 4. 如果设备明确使用另一种中心像素协议，才选择 `@c0081#@` 和“原始2字节”；当前 V3 基准仍以设备报告的 `fffe`/`raw2` 模式为准。
 5. 点击“连接设备”。底盘能力默认保持 `unknown`；完整启动能力标记或现场版本确认完成前，不会把仅有的 V6.3 主横幅当成 MM/PING 能力证据，也不会自动复位车辆获取横幅。
-6. 对已确认支持 COMM3 的底盘，每次 MOVE 前执行非阻塞握手：底盘 RX 静默 500 ms、发送带随机 nonce 的 `@PING`、收到匹配 `@PONG`、再静默 250 ms，随后只发送一次 MOVE。旧 CNT 固件选择 `cnt_only` 后不使用 PING。
+6. 当前 CONFIG1 + RESULT1 底盘连接后，先点击“重载并同步参数”，等待不同项为 0。空闲期间预先完成 PING/PONG 与接收静默检查；下一次动作沿用该编号，只发送一次受 CRC 保护的 MOVE。RESULT 丢报仅查询停车快照，不重发运动。
 
 ## 距离标定
 
@@ -227,7 +227,7 @@ python evaluate_simulation.py --config navigation_config.json --seconds 120 --se
 | `safety_max_angle_error_deg` | 15 | 近回波超过该方位误差时保守停车 |
 | `hardware_settle_s` | 0.2 | STOP 发出后基础等待，尚无实际停稳反馈 |
 
-底盘控制端已按 `car control_fixed/` 的最新交接源码接入上位机；源码具备 MM、CNT 和 COMM3 PING/PONG，但车上是否已烧录该版本仍待现场确认。底盘没有动作 ID、设备时间戳、CRC、通信看门狗或全局急停抢占；ACK/DONE 超时、错误回复、重复或迟到报告、复位和断连都会锁定自动控制，不会自动重发 MOVE。PC 停止字节不能保证失效无线链路下的机械停车，实车仍需现场独立停机手段、速度/制动测量和逐项验收。
+底盘已从 `car control final/car control final/control/` 融合到根目录 `control/`，八个固件文件与交付版本逐字节一致。配套 Python 已接入 CONFIG1、RESULT1 和空闲预握手；雷达显示、扫描与建图沿用当前 main。最新配置与操作说明以 [本次底盘融合说明](底盘最新固件融合说明.md) 为准；较早的底盘说明描述的是旧协议。
 
 底盘接入的协议、状态机、离线测试和装车步骤见 [底盘融合上位机接入说明](底盘融合上位机接入说明.md)。
 

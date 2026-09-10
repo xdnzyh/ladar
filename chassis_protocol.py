@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import binascii
 import math
 import re
 import struct
@@ -100,6 +101,14 @@ class ChassisDone:
 @dataclass(frozen=True)
 class ChassisError:
     code: str
+    raw: str
+
+
+@dataclass(frozen=True)
+class ChassisResult:
+    nonce: str
+    report: ChassisDone | None
+    status: str | None
     raw: str
 
 
@@ -205,14 +214,26 @@ def encode_move(
     request_value: int,
     unit: str = "CNT",
     *,
+    nonce: str | None = None,
     max_command_bytes: int = FIRMWARE_MAX_COMMAND_BYTES,
 ) -> bytes:
     normalized_mode = _validate_mode(mode)
     normalized_unit = _validate_unit(unit, normalized_mode)
     value = _parse_positive_integer(str(request_value), f"请求 {normalized_unit}")
-    return _encode_command(
-        f"@MOVE,{normalized_mode},{value},{normalized_unit}", max_command_bytes
-    )
+    body = f"@MOVE,{normalized_mode},{value},{normalized_unit}"
+    if nonce is not None:
+        body = _checked_body(f"{body},{validate_nonce(nonce)}")
+    return _encode_command(body, max_command_bytes)
+
+
+def _checked_body(body: str) -> str:
+    return f"{body},{binascii.crc_hqx(body.encode('ascii'), 0xFFFF):04X}"
+
+
+def encode_result_query(
+    nonce: str, *, max_command_bytes: int = FIRMWARE_MAX_COMMAND_BYTES
+) -> bytes:
+    return _encode_command(_checked_body(f"@RESULT,{validate_nonce(nonce)}"), max_command_bytes)
 
 
 def validate_nonce(nonce: str) -> str:
@@ -334,6 +355,44 @@ def parse_done(line: str) -> ChassisDone:
     )
 
 
+def parse_result(line: str) -> ChassisResult:
+    parts = line.split(",")
+    if len(parts) not in {4, 13} or parts[0] != "@RESULT":
+        raise ChassisProtocolError("BAD_RESULT", "RESULT 字段不完整或多余", line)
+    body, check = line.rsplit(",", 1)
+    try:
+        valid_crc = bool(re.fullmatch(r"[0-9A-F]{4}", check)) and (
+            binascii.crc_hqx(body.encode("ascii"), 0xFFFF) == int(check, 16)
+        )
+    except UnicodeEncodeError:
+        valid_crc = False
+    if not valid_crc:
+        raise ChassisProtocolError("BAD_CRC", "RESULT CRC 校验失败", line)
+    nonce = validate_nonce(parts[1])
+    if len(parts) == 4:
+        if parts[2] not in {"N", "B"}:
+            raise ChassisProtocolError("BAD_RESULT", "RESULT 状态无效", line)
+        return ChassisResult(nonce, None, parts[2], line)
+    mode, reason, unit = parts[2], parts[3], parts[5]
+    if mode not in SUPPORTED_MODES or unit not in SUPPORTED_UNITS:
+        raise ChassisProtocolError("BAD_RESULT", "RESULT 模式或单位无效", line)
+    _validate_unit(unit, mode)
+    reasons = {"0": "TARGET", "1": "EMERGENCY", "2": "TIMEOUT", "3": "WRONG_DIRECTION"}
+    if reason not in reasons:
+        raise ChassisProtocolError("BAD_REASON", "RESULT 停止原因无效", line)
+    request = _parse_positive_integer(parts[4], "RESULT REQ")
+    brake = _parse_float(parts[6], "RESULT BRAKE")
+    enc = _parse_float(parts[7], "RESULT ENC")
+    q1, q2, q3, q4 = (_parse_integer(parts[8 + i], f"RESULT Q{i + 1}") for i in range(4))
+    report = ChassisDone(
+        mode, reasons[reason], request, unit, None, brake, enc,
+        (q1 + q2 + q3 + q4) / 4.0, (q1 - q2 + q3 - q4) / 4.0,
+        (-q1 + q2 + q3 - q4) / 4.0, (q1 + q2 - q3 - q4) / 4.0,
+        q1, q2, q3, q4, line,
+    )
+    return ChassisResult(nonce, report, None, line)
+
+
 def validate_mm_target_counts(
     report: ChassisDone,
     counts_per_mm: float | None = None,
@@ -438,6 +497,12 @@ def parse_protocol_line(line: str) -> ChassisFrame:
     raw = line.rstrip("\r\n")
     if not raw:
         return ChassisFrame("empty", None, raw)
+    if raw.startswith("@CFG,"):
+        return ChassisFrame("config1", None, raw)
+    if raw == "CONFIG=1 RAM=1 CRC=CCITT":
+        return ChassisFrame("diagnostic", raw, raw)
+    if raw == "RESULT=1 CRC=CCITT QUERY=1":
+        return ChassisFrame("diagnostic", raw, raw)
     if raw == PROTOCOL_BANNER:
         return ChassisFrame("banner", raw, raw)
     capability = _parse_capability_marker(raw)
@@ -454,6 +519,11 @@ def parse_protocol_line(line: str) -> ChassisFrame:
     if raw.startswith("@DONE"):
         try:
             return ChassisFrame("done", parse_done(raw), raw)
+        except ChassisProtocolError as exc:
+            return ChassisFrame("invalid", None, raw, str(exc))
+    if raw.startswith("@RESULT"):
+        try:
+            return ChassisFrame("result", parse_result(raw), raw)
         except ChassisProtocolError as exc:
             return ChassisFrame("invalid", None, raw, str(exc))
     if raw.startswith("@PONG"):
@@ -510,6 +580,13 @@ class ChassisStreamParser:
                         raw = bytes(self._buffer).decode("ascii", "backslashreplace")
                         frames.append(ChassisFrame("invalid", None, raw, "底盘回复包含非 ASCII 字节"))
                     else:
+                        # A diagnostic may lose its terminator before a complete
+                        # protocol frame. Keep the prefix and validate the frame
+                        # normally; a damaged protocol line is never spliced.
+                        frame_start = line.find("@")
+                        if frame_start > 0:
+                            frames.append(parse_protocol_line(line[:frame_start]))
+                            line = line[frame_start:]
                         frames.append(parse_protocol_line(line))
                 self._buffer.clear()
                 self._discarding = False
