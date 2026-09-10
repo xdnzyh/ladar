@@ -1,0 +1,74 @@
+{
+  "mode_comparison": {
+    "hardware": {
+      "range_m": [
+        0.15,
+        1.0
+      ],
+      "map_size_m": [
+        2.4,
+        2.4
+      ],
+      "front_edge_m": 1.2,
+      "assumed_clear_m": 1.0,
+      "prefer_forward": true,
+      "enabled_modes": [
+        "W",
+        "S",
+        "A",
+        "D",
+        "Q",
+        "E",
+        "Z",
+        "C"
+      ]
+    },
+    "simulation": {
+      "range_m": [
+        0.08,
+        3.0
+      ],
+      "map_size_m": [
+        7.2,
+        11.200000000000001
+      ],
+      "front_edge_m": 5.6000000000000005,
+      "assumed_clear_m": 0.0,
+      "prefer_forward": false,
+      "enabled_modes": [
+        "W",
+        "S",
+        "A",
+        "D",
+        "Q",
+        "E",
+        "Z",
+        "C"
+      ]
+    }
+  },
+  "unvalidated_distance_control": {
+    "readiness": [
+      true,
+      []
+    ],
+    "automatic_request": "ChassisMoveRequest(mode='W', request_value=717, unit='CNT', target_counts=717, target=0.09989550679205851, target_unit='m')"
+  },
+  "terminal_with_left_open_1m": true,
+  "rejected_scan_consumes_translation": {
+    "before": true,
+    "after": false,
+    "subsequent_terminal_can_start": false
+  },
+  "removed_wall_after_50_clear_scans": {
+    "log_odds": 6,
+    "state": 1
+  },
+  "accepted_scan_without_map_revision": {
+    "revision_delta": 0,
+    "update_count_delta": 10
+  },
+  "ui_valid_scan_same_revision": {
+    "mark_scan_ready_called": false
+  }
+}

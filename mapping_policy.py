@@ -5,6 +5,7 @@ import math
 from typing import Sequence
 
 from navigation_core import ScanPoint, VelocityCommand
+from scan_geometry import range_tolerance_scale
 
 
 DEFAULT_MAP_RESOLUTION_M = 0.02
@@ -70,6 +71,10 @@ def _point_quality(point: ScanPoint, resolution_m: float) -> float:
         return 0.0
 
 
+def _segment_tolerance_scale(items: Sequence[_EchoItem]) -> float:
+    return range_tolerance_scale(sum(item.point.distance_m for item in items) / len(items))
+
+
 def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
     if len(items) < MIN_WALL_POINTS:
         return None
@@ -103,16 +108,13 @@ def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
     span = max(projections) - min(projections)
     if span < MIN_WALL_SPAN_M:
         return None
-    projection_gaps = [
-        right - left
-        for left, right in zip(sorted(projections), sorted(projections)[1:])
-    ]
-    if projection_gaps and max(projection_gaps) > MAX_WALL_POINT_GAP_M:
-        return None
+    scale = _segment_tolerance_scale(items)
     rms = math.sqrt(error_sum / total_weight)
     mean_quality = sum(_clamp(float(item.point.quality), 0.0, 1.0) for item in items) / len(items)
-    line_quality = 1.0 / (1.0 + (rms / max(MAX_WALL_RMS_M, 1e-6)) ** 2)
-    quality = _clamp(mean_quality * (0.70 + 0.30 * line_quality), 0.0, 1.0)
+    line_quality = 1.0 / (1.0 + (rms / (MAX_WALL_RMS_M * scale)) ** 2)
+    # An accepted line has quality >= 0.9 of its measured quality. Two
+    # independent sweeps can therefore reach occupied evidence promptly.
+    quality = _clamp(mean_quality * (0.80 + 0.20 * line_quality), 0.0, 1.0)
     return _WallSegment(
         mean_x,
         mean_y,
@@ -129,7 +131,7 @@ def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
 
 def _fit_segment(items: Sequence[_EchoItem]) -> _WallSegment | None:
     segment = _fit_segment_unchecked(items)
-    if segment is None or segment.rms > MAX_WALL_RMS_M:
+    if segment is None or segment.rms > MAX_WALL_RMS_M * _segment_tolerance_scale(items):
         return None
     return segment
 
@@ -144,7 +146,8 @@ def _angle_gap(left: float, right: float, *, wrap: bool = False) -> float:
 def _connected(left: _EchoItem, right: _EchoItem, *, wrap: bool = False) -> bool:
     return (
         _angle_gap(left.angle, right.angle, wrap=wrap) <= math.radians(MAX_WALL_ANGLE_GAP_DEG)
-        and math.hypot(right.x - left.x, right.y - left.y) <= MAX_WALL_NEIGHBOR_GAP_M
+        and math.hypot(right.x - left.x, right.y - left.y) <= MAX_WALL_NEIGHBOR_GAP_M * range_tolerance_scale(
+            min(left.point.distance_m, right.point.distance_m))
     )
 
 
@@ -256,12 +259,22 @@ def _point_to_segment_line_distance(point: _EchoItem, segment: _WallSegment) -> 
 def _fit_chunk_recursive(run: Sequence[_EchoItem]) -> list[_WallSegment]:
     if len(run) < MIN_WALL_POINTS:
         return []
+    loose = _fit_segment_unchecked(run)
+    if loose is not None:
+        projected = sorted(run, key=lambda item: item.x * loose.dx + item.y * loose.dy)
+        gaps = [(right.x - left.x) * loose.dx + (right.y - left.y) * loose.dy
+                for left, right in zip(projected, projected[1:])]
+        gap_index = max(range(len(gaps)), key=gaps.__getitem__)
+        # Split at the actual opening, not a midpoint that discards one jamb.
+        limit = min(0.16, MAX_WALL_POINT_GAP_M * _segment_tolerance_scale(run))
+        if gaps[gap_index] > limit:
+            return (_fit_chunk_recursive(projected[:gap_index + 1])
+                    + _fit_chunk_recursive(projected[gap_index + 1:]))
     segment = _fit_segment(run)
     if segment is not None:
         return [segment]
     if len(run) < MIN_WALL_POINTS * 2 - 1:
         return []
-    loose = _fit_segment_unchecked(run)
     if loose is not None:
         split = max(
             range(MIN_WALL_POINTS - 1, len(run) - MIN_WALL_POINTS + 1),
@@ -509,7 +522,8 @@ class TwoSweepWallEvidence:
                 previous_points,
                 key=lambda candidate: (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2,
             )
-            if math.hypot(nearest.x - point.x, nearest.y - point.y) > match_distance:
+            tolerance = match_distance * range_tolerance_scale(min(point.distance_m, nearest.distance_m))
+            if math.hypot(nearest.x - point.x, nearest.y - point.y) > tolerance:
                 continue
             source = point.source or "thin_wall"
             if source.startswith("thin_wall"):

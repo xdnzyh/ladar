@@ -1,0 +1,2 @@
+{"source": "simulation", "synthetic_only": true, "seconds": 60.049999999984735, "moves": 17, "safety_stop": null, "state": "̽����", "detail": "����45��ƽ�ƣ���һȦ���¶�λ", "goal_error_m": 3.360663688287711, "collisions": 0, "mapping_attempts": 18, "rejected": 0}
+{"source": "hardware", "synthetic_only": true, "seconds": 60.049999999984735, "moves": 11, "safety_stop": null, "state": "��Ȧǽ��ȷ��", "detail": "�ȴ��ڶ�������������Ȧ", "goal_error_m": 3.8510636785192, "collisions": 0, "mapping_attempts": 12, "rejected": 0}
