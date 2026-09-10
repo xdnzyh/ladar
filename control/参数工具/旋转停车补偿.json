@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "enabled": true,
+  "r_lead_cnt": 145,
+  "f_lead_cnt": 145,
+  "r_500_deg": 20,
+  "r_1000_deg": 50,
+  "f_500_deg": 20,
+  "f_1000_deg": 47
+}
