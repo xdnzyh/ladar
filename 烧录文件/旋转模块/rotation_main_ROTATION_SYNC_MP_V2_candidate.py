@@ -139,6 +139,8 @@ last_irq_raw = 0
 motor_start_raw = 0
 boot_start_raw = utime.ticks_us()
 motor_enabled = False
+boot_ignore_active = True
+motor_start_ignore_active = False
 
 
 def _reset_trigger_ring(reset_count=False):
@@ -156,9 +158,10 @@ def _reset_trigger_ring(reset_count=False):
 
 
 def motor_off():
-    global motor_enabled
+    global motor_enabled, motor_start_ignore_active
     state = machine.disable_irq()
     motor_enabled = False
+    motor_start_ignore_active = False
     machine.enable_irq(state)
     relay.value(0)
 
@@ -166,7 +169,7 @@ def motor_off():
 def motor_on(reset_count=True):
     """Start relay safely; startup optical edges are ignored for 300 ms."""
     global motor_enabled, motor_start_raw, last_irq_raw, count_total
-    global trigger_head, trigger_tail, trigger_overflow
+    global trigger_head, trigger_tail, trigger_overflow, motor_start_ignore_active
 
     # Keep IRQ disabled logically while the relay transitions. Any relay glitch
     # that occurs here is ignored because motor_enabled is False.
@@ -179,6 +182,7 @@ def motor_on(reset_count=True):
 
     state = machine.disable_irq()
     motor_start_raw = start
+    motor_start_ignore_active = True
     last_irq_raw = 0
     trigger_head = 0
     trigger_tail = 0
@@ -203,11 +207,11 @@ def sensor_irq(_pin):
         return
 
     # 1. Ignore early boot transients.
-    if utime.ticks_diff(now, boot_start_raw) < BOOT_IGNORE_US:
+    if boot_ignore_active:
         return
 
     # 2. Ignore relay/motor startup transient.
-    if utime.ticks_diff(now, motor_start_raw) < MOTOR_ON_IGNORE_US:
+    if motor_start_ignore_active:
         return
 
     # 3. Debounce / reject implausibly close repeated edges.
@@ -576,8 +580,6 @@ def handle_cmd(raw_cmd):
 # -------------------- UART RX --------------------
 
 def process_complete_lines():
-    global rx_buf
-
     while True:
         pos_r = rx_buf.find(b"\r")
         pos_n = rx_buf.find(b"\n")
@@ -593,24 +595,16 @@ def process_complete_lines():
             pos = min(pos_r, pos_n)
 
         one_cmd = bytes(rx_buf[:pos])
+        del rx_buf[:pos + 1]
 
-        # MicroPython's bytearray does not reliably support ``del buf[...]``.
-        # Skip the line ending (and any following CR/LF bytes), then rebuild
-        # the small RX buffer from the unconsumed tail. RX_MAX_LENGTH is only
-        # 256 bytes, so this bounded copy is safe and simple.
-        next_pos = pos + 1
-        buf_len = len(rx_buf)
-        while next_pos < buf_len and rx_buf[next_pos] in (10, 13):
-            next_pos += 1
-        rx_buf = bytearray(rx_buf[next_pos:])
+        while rx_buf and rx_buf[0] in (10, 13):
+            del rx_buf[0]
 
         if one_cmd.strip():
             handle_cmd(one_cmd)
 
 
 def poll_lora_rx():
-    global rx_buf
-
     n = lora.any()
     if not n:
         return
@@ -622,7 +616,7 @@ def poll_lora_rx():
     rx_buf.extend(data)
 
     if len(rx_buf) > RX_MAX_LENGTH:
-        rx_buf = bytearray()
+        rx_buf[:] = b""
         _fail_safe_motor("RX_OVERFLOW")
         return
 
@@ -634,6 +628,15 @@ def poll_lora_rx():
 def poll_watchdog(now_us):
     if motor_enabled and now_us - last_command_us > WATCHDOG_US:
         _fail_safe_motor("WATCHDOG")
+
+
+def poll_startup_guards():
+    global boot_ignore_active, motor_start_ignore_active
+    now = utime.ticks_us()
+    if boot_ignore_active and utime.ticks_diff(now, boot_start_raw) >= BOOT_IGNORE_US:
+        boot_ignore_active = False
+    if motor_start_ignore_active and utime.ticks_diff(now, motor_start_raw) >= MOTOR_ON_IGNORE_US:
+        motor_start_ignore_active = False
 
 
 # -------------------- main --------------------
@@ -659,6 +662,7 @@ def main():
             process_trigger_events()
 
             now_us = clock.now()
+            poll_startup_guards()
             poll_watchdog(now_us)
 
             flush_tx()
