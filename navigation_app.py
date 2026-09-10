@@ -1454,8 +1454,13 @@ class NavigationApp:
         runtime = getattr(self, "mapping_runtime", None)
         if runtime is not None:
             session = self.sync.session if hasattr(self, "sync") else ""
-            scan_start = min((point.timestamp for point in points), default=timestamp)
-            scan_end = max((point.timestamp for point in points), default=timestamp)
+            point_times = [
+                point.timestamp_s
+                for point in points
+                if point.timestamp_s is not None and math.isfinite(point.timestamp_s)
+            ]
+            scan_start = min(point_times, default=timestamp)
+            scan_end = max(point_times, default=timestamp)
             runtime.submit(
                 session,
                 sequence,
