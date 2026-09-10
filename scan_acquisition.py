@@ -8,6 +8,7 @@ from statistics import median
 
 from radar_core import PolarPoint
 from navigation_core import ScanPoint
+from scan_geometry import line_supported_indices
 
 
 def polar_to_scan_point(point: PolarPoint, quality: float | None = None) -> ScanPoint:
@@ -34,19 +35,40 @@ def scan_points_from_polar(points) -> list[ScanPoint]:
 
 
 def scan_complete(points, config):
-    if len(points) < int(config.get("min_scan_points", 12)):
+    minimum = int(config.get("min_scan_points", 12))
+    if len(points) < minimum:
         return False, "本圈有效测距不足"
     angles = sorted({p.angle_rad % math.tau for p in points})
-    if len(angles) < int(config.get("min_scan_points", 12)):
+    if len(angles) < minimum:
         return False, "本圈有效方位不足"
     gaps = [b - a for a, b in zip(angles, angles[1:] + [angles[0] + math.tau])]
     normal = median(gaps)
     limit = min(math.radians(float(config.get("scan_gap_hard_limit_deg", 45))),
                 max(math.radians(float(config.get("max_scan_gap_deg", 25))),
                     normal * float(config.get("scan_gap_factor", 2.5))))
-    if max(gaps) > limit + 1e-9:
-        return False, "扫描存在过大的角度空缺，本圈丢弃"
-    return True, "完整扫描"
+    if max(gaps) <= limit + 1e-9:
+        return True, "完整扫描"
+
+    # A small indoor scene often contains several short straight wall fragments
+    # separated by large angular gaps.  Global 360-degree coverage is not a
+    # requirement for mapping.  When enough locally straight echo points are
+    # present, accept the revolution and let the mapping layer reject isolated
+    # clutter instead of discarding the whole scan.
+    echoes = [point for point in points if bool(getattr(point, "is_echo", True))]
+    supported = line_supported_indices(
+        echoes,
+        min_window_points=int(config.get("line_support_window_points", 4)),
+        max_angle_gap_deg=float(config.get("line_support_max_angle_gap_deg", 20.0)),
+        max_neighbor_gap_m=float(config.get("line_support_max_neighbor_gap_m", 0.18)),
+        max_rms_m=float(config.get("line_support_max_rms_m", 0.020)),
+        min_span_m=float(config.get("line_support_min_span_m", 0.050)),
+    )
+    minimum_supported = int(config.get("min_line_supported_points", 8))
+    minimum_ratio = float(config.get("min_line_support_ratio", 0.35))
+    if (len(supported) >= minimum_supported
+            and len(supported) / max(1, len(echoes)) >= minimum_ratio):
+        return True, "短直线结构有效扫描"
+    return False, "扫描存在过大的角度空缺，本圈丢弃"
 
 
 class TimedSweepBuilder:
@@ -106,12 +128,9 @@ class TimedSweepBuilder:
             self.last_outcome = "timing_failure"
             return []
 
-        # The display path is deliberately independent from mapping confidence.
-        # As soon as a revolution is bounded by two consecutive real TRIG events,
-        # every finite range sample inside that physical revolution is projected
-        # with the actual adjacent-zero period and retained for visualization.
-        # Confidence/uncertainty filters below still govern localization and map
-        # writes; they must never make real measured points disappear from view.
+        # Display is deliberately independent from mapping confidence.  Once a
+        # revolution is bounded by two consecutive real TRIG events, every
+        # finite range sample in that physical revolution remains visible.
         direction = 1 if self.config.get("clockwise", True) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         display_lower_period = period - start_error - uncertainty
@@ -168,7 +187,15 @@ class TimedSweepBuilder:
             self.last_outcome = "timing_failure"
             return []
         result = []
-        error_limit = float(self.config.get("max_timing_position_error_m", 0.04))
+        # 4 cm remains the scale used for downstream confidence weighting, but
+        # it is too strict as a hard acquisition cutoff.  Only observations
+        # whose timing uncertainty implies an extreme (>12 cm by default)
+        # endpoint ambiguity are removed here; moderate uncertainty is carried
+        # forward in angle_error_rad and down-weighted by the mapper.
+        error_limit = max(
+            float(self.config.get("max_timing_position_error_m", 0.04)),
+            float(self.config.get("hard_timing_position_error_m", 0.12)),
+        )
         for stamp, error, pixel, distance, is_echo, distance_error_m, calibration_version, source_session in samples:
             if (not all(math.isfinite(v) for v in (stamp, error, distance)) or error < 0
                     or stamp - error < start + start_error or stamp + error >= timestamp - uncertainty):
@@ -294,12 +321,16 @@ class EstimatedSweepBuilder:
         points = []
         direction = 1 if self.config.get("clockwise", True) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
+        error_limit = max(
+            float(self.config.get("max_timing_position_error_m", 0.04)),
+            float(self.config.get("hard_timing_position_error_m", 0.12)),
+        )
         for stamp, error, pixel, distance, is_echo, distance_error_m, calibration_version, source_session in samples:
             if not start <= stamp < end or not math.isfinite(error) or error < 0:
                 continue
             phase = (stamp - anchor[0]) / period
             angular_error = math.tau * ((error + anchor[1]) / period + abs(phase) * spread / period)
-            if distance * angular_error > float(self.config.get("max_timing_position_error_m", 0.04)):
+            if distance * angular_error > error_limit:
                 continue
             points.append(PolarPoint(
                 distance,
@@ -323,7 +354,6 @@ class EstimatedSweepBuilder:
         else:
             self.last_failure_reason = self.reason
         return self.sequence, points if valid else [], period
-
 
 
 @dataclass(frozen=True, eq=False)
@@ -515,7 +545,7 @@ class DistanceObservationReceiver:
             if result is None:
                 return
             sequence, points, period = result
-            if self.builder.last_closed_points:
+            if self.builder.last_closed_points and not points:
                 local_results.append((sequence, list(self.builder.last_closed_points), period))
             if points:
                 self.accepted += 1
@@ -563,10 +593,6 @@ class DistanceObservationReceiver:
                         self.warmup += 1
                     continue
 
-                # Visualization and mapping are intentionally separated.  A
-                # closed physical revolution replaces the radar display with
-                # every measured point from that revolution, even when none of
-                # those points is trustworthy enough for map/localization use.
                 if self.builder.last_closed_period is not None:
                     self._preview.clear()
                     for point in self.builder.last_display_points:
@@ -580,7 +606,10 @@ class DistanceObservationReceiver:
                             point.angle_error_rad,
                         ))
 
-                if self.builder.last_closed_points:
+                # A formal scan and its local fallback must not both write the
+                # same physical revolution.  Local mapping is retained only for
+                # a revolution that failed the formal completeness gate.
+                if self.builder.last_closed_points and not points:
                     local_results.append((packet.sequence - 1, list(self.builder.last_closed_points),
                                           self.builder.last_closed_period))
                 if points:
