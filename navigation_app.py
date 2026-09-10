@@ -1317,6 +1317,17 @@ class NavigationApp:
             if self.view_mode.get() == "navigation":
                 if not self._navigation_preflight(show=True):
                     return
+            controller = getattr(self, "chassis_controller", None)
+            if controller is not None and controller.in_flight:
+                messagebox.showwarning("底盘尚未停止", "请等待底盘停止确认后再开始扫描。")
+                return
+            # A previous connection may have ended during STOP/settle. Its UI
+            # motion flag must not suppress every sweep in the new session.
+            self.moving = False
+            self.manual_motion = False
+            self._resume_radar_on_settle = False
+            self.motion_generation += 1
+            self.motion_safety.clear()
         self.mapping_generation += 1
         self._clear_mapping_tasks()
         if self.source == "hardware":
@@ -2237,6 +2248,10 @@ class NavigationApp:
             self._complete_disconnect()
 
     def _handle_chassis_fault(self, kind: str, value: object) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if (isinstance(value, tuple) and value
+                and (controller is None or value[0] != controller.connection_generation)):
+            return
         if kind == "chassis_protocol_error":
             detail = value[2] if isinstance(value, tuple) and len(value) > 2 else value
             self._log(f"底盘协议行已丢弃：{detail}")
@@ -2249,14 +2264,21 @@ class NavigationApp:
             detail = value[1]
         else:
             detail = value
-        self.navigator.state = "底盘故障"
-        self.navigator.detail = str(detail)
         self._log(str(detail))
         self.running = False
         self.accept_samples = False
+        self.motion_generation += 1
         self.motion_safety.clear()
-        self._clear_mapping_tasks()
-        controller = getattr(self, "chassis_controller", None)
+        with self.mapping_lock:
+            self.mapping_generation += 1
+            self._clear_mapping_tasks()
+            self.mapping_snapshot = None
+            self.navigator.set_auto(False)
+            self.navigator.state = "底盘故障"
+            self.navigator.detail = str(detail)
+        self._stop_radar_only()
+        self.start_button.configure(text="开始")
+        self.connection_label.configure(text="●  底盘故障，已暂停", fg=COLORS["yellow"])
         self.moving = bool(controller is not None and controller.in_flight)
 
     def _stop_radar_only(self) -> None:
