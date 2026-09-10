@@ -67,11 +67,13 @@ class TimedSweepBuilder:
         self.last_closed_points = []
         self.last_closed_period = None
         self.last_outcome = "waiting_for_zero"
+        self.last_failure_reason = ""
 
     def begin_after(self, timestamp):
         self.samples.clear()
         self.collect_after = timestamp
         self.reason = "等待停车后完整零位圈"
+        self.last_failure_reason = ""
 
     def sample(self, timestamp, uncertainty, pixel, distance, is_echo=True,
                distance_error_m=None, calibration_version=None, source_session=None):
@@ -97,6 +99,7 @@ class TimedSweepBuilder:
             self.reset()
             self.anchor = (timestamp, uncertainty, count)
             self.reason = "零位不连续，本圈丢弃"
+            self.last_failure_reason = self.reason
             self.last_outcome = "timing_failure"
             return []
         previous = self.previous_period
@@ -105,6 +108,7 @@ class TimedSweepBuilder:
             self.periods.clear()
             self.stable_periods = 0
             self.reason = "零位或转速异常，重新估计"
+            self.last_failure_reason = self.reason
             self.last_outcome = "timing_failure"
             return []
         self.periods.append(period)
@@ -120,6 +124,7 @@ class TimedSweepBuilder:
         lower_period = period - start_error - uncertainty
         if lower_period <= 0:
             self.reason = "校时误差超过旋转周期"
+            self.last_failure_reason = self.reason
             self.last_outcome = "timing_failure"
             return []
         result = []
@@ -157,6 +162,10 @@ class TimedSweepBuilder:
             return []
         valid, self.reason = scan_complete(result, self.config)
         self.last_outcome = "formal" if valid else "coverage_failure"
+        if valid:
+            self.last_failure_reason = ""
+        else:
+            self.last_failure_reason = self.reason
         return result if valid else []
 
 
@@ -180,6 +189,7 @@ class EstimatedSweepBuilder:
         self.last_closed_points = []
         self.last_closed_period = None
         self.last_outcome = "waiting_for_zero"
+        self.last_failure_reason = ""
 
     def begin_after(self, timestamp: float):
         self.samples = []
@@ -189,6 +199,7 @@ class EstimatedSweepBuilder:
         self.last_closed_points = []
         self.last_closed_period = None
         self.last_outcome = "warmup"
+        self.last_failure_reason = ""
 
     def trigger(self, timestamp: float, uncertainty: float, count: int):
         self.last_closed_points = []
@@ -210,6 +221,7 @@ class EstimatedSweepBuilder:
             self.period_s = None
             self.stable_periods = 0
             self.reason = "零位或转速异常，重新估计"
+            self.last_failure_reason = self.reason
             self.last_outcome = "timing_failure"
             return
         self.periods.append(period)
@@ -224,6 +236,7 @@ class EstimatedSweepBuilder:
             return
         if timestamp - self.anchor[0] > self.period_s * 1.5:
             self.reason = "零位更新超时"
+            self.last_failure_reason = self.reason
             return
         if self.window is None:
             self.window = (timestamp, timestamp + self.period_s, self.anchor, self.period_s,
@@ -268,6 +281,10 @@ class EstimatedSweepBuilder:
         self.last_closed_period = period
         valid, self.reason = scan_complete(points, self.config)
         self.last_outcome = "formal" if valid else "coverage_failure"
+        if valid:
+            self.last_failure_reason = ""
+        else:
+            self.last_failure_reason = self.reason
         return self.sequence, points if valid else [], period
 
 
@@ -377,6 +394,7 @@ class DistanceObservationReceiver:
         self.discarded += bool(self.builder.samples)
         self.builder.reset()
         self.builder.reason = reason
+        self.builder.last_failure_reason = reason
         self.pending.clear()
         self.seen.clear()
         self.progress.clear()
@@ -538,6 +556,6 @@ class DistanceObservationReceiver:
         self.watermark = cutoff
         self.seen = {key: timestamp for key, timestamp in self.seen.items() if timestamp > cutoff}
         if self.builder.last_outcome in {"coverage_failure", "timing_failure"}:
-            diagnostics.append(self.builder.last_outcome)
+            diagnostics.append(self.builder.last_failure_reason or self.builder.reason or self.builder.last_outcome)
         self.local_results.clear()
         return ReceiverPollResult(tuple(results), tuple(local_results), tuple(diagnostics))
