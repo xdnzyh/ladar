@@ -43,13 +43,13 @@ def line_supported_indices(
     """Return indices belonging to locally straight, contiguous scan runs.
 
     The filter is intentionally local.  It keeps short wall fragments while
-    rejecting isolated echoes and small irregular clusters.  Five consecutive
-    samples are required by default so a smooth circular/curved arc is not
-    accidentally accepted merely because a tiny three- or four-point window
-    looks approximately straight.
+    rejecting isolated echoes and small irregular clusters.  At least five
+    consecutive samples and a 12 mm RMS straightness bound are enforced even
+    if a legacy caller supplies looser values; otherwise a smooth curved arc
+    can masquerade as many tiny straight windows.
     """
-    if min_window_points < 3:
-        raise ValueError("min_window_points must be at least 3")
+    min_window_points = max(5, int(min_window_points))
+    max_rms_m = min(0.012, float(max_rms_m))
     max_angle_gap = math.radians(float(max_angle_gap_deg))
     if not all(math.isfinite(value) and value > 0 for value in (
             max_angle_gap, max_neighbor_gap_m, max_rms_m, min_span_m)):
