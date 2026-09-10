@@ -79,6 +79,8 @@ class TimedSweepBuilder:
                 and timestamp >= self.anchor[0]):
             self.samples.append((timestamp, uncertainty, pixel, distance, bool(is_echo),
                                  distance_error_m, calibration_version, source_session))
+            self.reason = "扫描中，等待下一真实零位确认"
+            self.last_outcome = "collecting"
 
     def trigger(self, timestamp, uncertainty, count):
         self.last_closed_points = []
@@ -358,6 +360,7 @@ class DistanceObservationReceiver:
         self.watermark = -math.inf
         self.accepted = self.discarded = self.late = self.duplicates = 0
         self.warmup = 0
+        self.timestamp_conflicts = {"range": 0, "rotation": 0}
         self._preview = deque(maxlen=512)
         self.preview_points = ()
         self.local_results = []
@@ -424,7 +427,9 @@ class DistanceObservationReceiver:
                 or (packet.sequence < seq and timestamp > stamp)
             )
             if raw_conflict or mapped_conflict:
-                self.invalidate("设备时间倒退，等待新的角度基准")
+                self.timestamp_conflicts[packet.source] += 1
+                if packet.source == "rotation":
+                    self.invalidate("零位设备时间异常，当前扫描失效，等待新的真实零位")
                 return False
         if timestamp <= self.watermark:
             self.late += 1
@@ -481,17 +486,18 @@ class DistanceObservationReceiver:
                         packet.calibration_version,
                         packet.source_session,
                     )
-                    estimate = self.estimate_angle(packet, require_stable=False)
-                    if estimate is not None and is_echo:
-                        self._preview.append(PreviewObservation(
-                            timestamp,
-                            estimate[0],
-                            distance,
-                            packet.pixel,
-                            1.0,
-                            packet.uncertainty,
-                            estimate[1],
-                        ))
+                    if estimated:
+                        estimate = self.estimate_angle(packet, require_stable=False)
+                        if estimate is not None and is_echo:
+                            self._preview.append(PreviewObservation(
+                                timestamp,
+                                estimate[0],
+                                distance,
+                                packet.pixel,
+                                1.0,
+                                packet.uncertainty,
+                                estimate[1],
+                            ))
             else:
                 had_anchor = self.builder.anchor is not None
                 before_invalidated = getattr(self.builder, "invalidated", 0)
@@ -507,17 +513,27 @@ class DistanceObservationReceiver:
                 if points:
                     self.accepted += 1
                     results.append((packet.sequence - 1, points, self.builder.period_s))
+                    self._preview.clear()
+                    for point in points:
+                        self._preview.append(PreviewObservation(
+                            point.timestamp,
+                            point.angle_rad,
+                            point.distance_m,
+                            point.pixel,
+                            1.0,
+                            point.time_error_s,
+                            point.angle_error_rad,
+                        ))
                 elif had_anchor:
                     if self.builder.last_outcome == "warmup":
                         self.warmup += 1
                     else:
                         self.discarded += 1
         finish_estimated_window(cutoff)
-        period = self.builder.period_s or float(self.config.get("radar_period_s", 1.5))
-        if self.builder.anchor is not None and cutoff - self.builder.anchor[0] > period * 1.5:
-            self.invalidate("零位更新超时，当前扫描失效")
-        while self._preview and self._preview[0][0] < cutoff - period:
-            self._preview.popleft()
+        if estimated:
+            period = self.builder.period_s or float(self.config.get("radar_period_s", 1.5))
+            while self._preview and self._preview[0][0] < cutoff - period:
+                self._preview.popleft()
         self.preview_points = tuple(self._preview)
         self.watermark = cutoff
         self.seen = {key: timestamp for key, timestamp in self.seen.items() if timestamp > cutoff}
