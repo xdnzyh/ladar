@@ -147,7 +147,7 @@ class MappingRuntimeContractTests(unittest.TestCase):
 
         runtime = MappingRuntime(engine, queue_size=1, on_result=results.append)
         try:
-            with patch.object(NavigationEngine, "process_local_scan", blocked):
+            with patch("mapping_runtime.process_radar_debug_scan", side_effect=blocked):
                 request = runtime.submit("session", 1, [ScanPoint(0.0, 0.3)], 1.0, mode="local")
                 self.assertIsNotNone(request)
                 self.assertTrue(started.wait(1.0))

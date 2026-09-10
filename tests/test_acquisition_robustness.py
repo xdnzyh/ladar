@@ -140,7 +140,7 @@ class RobustSweepTests(unittest.TestCase):
         self.assertEqual(receiver.builder.anchor, anchor)
         self.assertEqual(receiver.late, 1)
 
-    def test_timed_preview_uses_last_finalized_sweep_not_open_sweep(self):
+    def test_timed_preview_updates_during_the_open_sweep(self):
         receiver = DistanceObservationReceiver({"observation_reorder_s": 0})
         for n in range(4):
             receiver.feed(ReceivedObservation(HardwareObservation("rotation", n + 1, n * 1.5), n * 1.5))
@@ -149,16 +149,16 @@ class RobustSweepTests(unittest.TestCase):
             t = 4.5 + (n + 0.5) * 1.5 / 30
             receiver.feed(ReceivedObservation(HardwareObservation("range", 100 + n, t, 1, pixel=n), t))
             receiver.poll(t)
-        self.assertFalse(receiver.preview_points)
+        self.assertEqual(len(receiver.preview_points), 30)
         receiver.feed(ReceivedObservation(HardwareObservation("rotation", 5, 6.0), 6.0))
         receiver.poll(6.0)
-        finalized = receiver.preview_points
-        self.assertEqual(len(finalized), 30)
+        self.assertEqual(len(receiver.preview_points), 30)
         for n in range(10):
             t = 6.0 + (n + 0.5) * 1.53 / 30
             receiver.feed(ReceivedObservation(HardwareObservation("range", 200 + n, t, 1, pixel=100 + n), t))
             receiver.poll(t)
-        self.assertEqual(receiver.preview_points, finalized)
+        self.assertEqual(len(receiver.preview_points), 10)
+        self.assertEqual([point.pixel for point in receiver.preview_points], list(range(100, 110)))
 
     def test_direct_distance_and_pixel_adapter_have_same_standard_output(self):
         clock = ClockEstimate(100, 0.001, 2, 0)

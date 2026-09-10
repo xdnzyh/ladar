@@ -441,6 +441,7 @@ class NavigationApp:
         self.running = False
         self.connected = source == "simulation"
         self.latest_points: list[ScanPoint] = []
+        self.latest_raw_points: list[ScanPoint] = []
         self.latest_distance: float | None = None
         self.latest_angle: float | None = None
         self.current_pixel: int | None = None
@@ -1325,6 +1326,7 @@ class NavigationApp:
             self.grid = self.navigator.grid
         self.navigator.set_auto(self.view_mode.get() == "navigation")
         self.latest_points.clear()
+        self.latest_raw_points.clear()
         self.current_pixel = None
         self.latest_bias = 0.0
         if was_running and self.simulation:
@@ -1349,6 +1351,7 @@ class NavigationApp:
     def _start_hardware_scan(self) -> None:
         self.scan_collect_after = time.perf_counter()
         self.latest_points.clear()
+        self.latest_raw_points.clear()
         self.latest_distance = None
         self.latest_angle = None
         self.current_pixel = None
@@ -1527,6 +1530,9 @@ class NavigationApp:
                 if result.snapshot is not None:
                     self.mapping_snapshot = result.snapshot
                     self.grid = result.snapshot.grid
+                    latest_scan = getattr(self.navigator, "latest_scan", None)
+                    if isinstance(latest_scan, (list, tuple)):
+                        self.latest_points = list(latest_scan)
                 controller = getattr(self, "chassis_controller", None)
                 if (
                     kind == "navigation"
@@ -1985,7 +1991,7 @@ class NavigationApp:
                 controller.handle_transport_error(int(generation), str(message), timestamp)
 
     def _handle_sweep(self, sequence: int, points: list[ScanPoint], timestamp: float) -> None:
-        self.latest_points = points
+        self.latest_raw_points = points
         if points:
             nearest = min(points, key=lambda point: point.distance_m)
             self.latest_distance = nearest.distance_m
@@ -2288,17 +2294,12 @@ class NavigationApp:
     def _draw(self) -> None:
         if self._closed:
             return
-        radar_points = [(point.x, point.y, 1.0) for point in self.latest_points]
-        displayed_radar_count = len(self.latest_points)
+        radar_points = [(point.x, point.y, point.quality) for point in self.latest_raw_points]
+        displayed_radar_count = len(self.latest_raw_points)
         receiver = self.simulation.hardware.receiver if self.simulation is not None else self.sync.receiver
         if receiver is not None:
             preview = receiver.preview_points
-            if preview_is_stable_for_display(
-                preview,
-                self.latest_points,
-                min_points=int(self.config.get("display_preview_min_points", 40)),
-                min_ratio_to_latest=float(self.config.get("display_preview_min_ratio", 0.70)),
-            ):
+            if preview:
                 radar_points = []
                 for item in preview:
                     angle, distance = preview_item_angle_distance(item)
@@ -2312,7 +2313,7 @@ class NavigationApp:
                 self.latest_angle = math.degrees(angle) % 360
                 self.latest_distance = distance
                 self.current_pixel = nearest.pixel if hasattr(nearest, "pixel") else self.current_pixel
-            elif self.running and not self.latest_points:
+            elif self.running and not self.latest_raw_points:
                 self.latest_angle = None
                 self.latest_distance = None
                 self.current_pixel = None

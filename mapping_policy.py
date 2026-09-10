@@ -18,9 +18,7 @@ MIN_TURN_VECTOR_M = 0.035
 WALL_CORNER_TURN_DEG = 35.0
 MAX_COLLINEAR_MERGE_ANGLE_DEG = 10.0
 MAX_COLLINEAR_MERGE_OFFSET_M = 0.035
-MAX_COLLINEAR_MERGE_GAP_M = 0.20
-MAX_CORNER_EXTENSION_M = 0.07
-MAX_CORNER_ENDPOINT_GAP_M = 0.10
+MAX_COLLINEAR_MERGE_GAP_M = 0.06
 
 
 @dataclass(frozen=True)
@@ -30,6 +28,12 @@ class MappingPointSelection:
     supported_echoes: int
     noise_echoes: int
     fitted_segments: int = 0
+    confirmed_scans: int = 1
+    mapping_passes: int = 1
+    unconfirmed_sectors: tuple[int, ...] = ()
+    reset_required: bool = False
+    rejection_reason: str = ""
+    mapping_layers: tuple[tuple[ScanPoint, ...], ...] = ()
 
 
 @dataclass
@@ -52,6 +56,7 @@ class _WallSegment:
     rms: float
     quality: float
     raw_count: int
+    items: list[_EchoItem]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -105,9 +110,9 @@ def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
     if projection_gaps and max(projection_gaps) > MAX_WALL_POINT_GAP_M:
         return None
     rms = math.sqrt(error_sum / total_weight)
-    mean_quality = sum(item.weight for item in items) / len(items)
+    mean_quality = sum(_clamp(float(item.point.quality), 0.0, 1.0) for item in items) / len(items)
     line_quality = 1.0 / (1.0 + (rms / max(MAX_WALL_RMS_M, 1e-6)) ** 2)
-    quality = _clamp(max(0.90, mean_quality * (0.70 + 0.30 * line_quality)), 0.0, 1.0)
+    quality = _clamp(mean_quality * (0.70 + 0.30 * line_quality), 0.0, 1.0)
     return _WallSegment(
         mean_x,
         mean_y,
@@ -118,6 +123,7 @@ def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
         rms,
         quality,
         len(items),
+        list(items),
     )
 
 
@@ -301,6 +307,7 @@ def _merge_collinear_adjacent(segments: Sequence[_WallSegment]) -> list[_WallSeg
         target.quality = max(target.quality, segment.quality)
         target.rms = max(target.rms, segment.rms)
         target.raw_count += segment.raw_count
+        target.items.extend(segment.items)
     if len(merged) > 1 and _can_merge_collinear(merged[-1], merged[0]):
         first = merged[0]
         last = merged.pop()
@@ -311,6 +318,7 @@ def _merge_collinear_adjacent(segments: Sequence[_WallSegment]) -> list[_WallSeg
         first.quality = max(first.quality, last.quality)
         first.rms = max(first.rms, last.rms)
         first.raw_count += last.raw_count
+        first.items.extend(last.items)
     return merged
 
 
@@ -323,51 +331,6 @@ def _fit_run(run: Sequence[_EchoItem]) -> list[_WallSegment]:
 
 def _endpoint(segment: _WallSegment, t: float) -> tuple[float, float]:
     return segment.x + segment.dx * t, segment.y + segment.dy * t
-
-
-def _nearest_endpoint(segment: _WallSegment, x: float, y: float) -> float:
-    endpoints = (segment.t_min, segment.t_max)
-    return min(endpoints, key=lambda t: math.hypot(_endpoint(segment, t)[0] - x, _endpoint(segment, t)[1] - y))
-
-
-def _line_intersection(left: _WallSegment, right: _WallSegment) -> tuple[float, float, float, float] | None:
-    cross = left.dx * right.dy - left.dy * right.dx
-    if abs(cross) < math.sin(math.radians(12.0)):
-        return None
-    rx = right.x - left.x
-    ry = right.y - left.y
-    left_t = (rx * right.dy - ry * right.dx) / cross
-    right_t = (rx * left.dy - ry * left.dx) / cross
-    x, y = _endpoint(left, left_t)
-    return left_t, right_t, x, y
-
-
-def _close_small_corners(segments: list[_WallSegment]) -> None:
-    if len(segments) < 2:
-        return
-    for index, left in enumerate(segments):
-        right = segments[(index + 1) % len(segments)]
-        intersection = _line_intersection(left, right)
-        if intersection is None:
-            continue
-        left_t, right_t, x, y = intersection
-        left_end = _nearest_endpoint(left, x, y)
-        right_end = _nearest_endpoint(right, x, y)
-        left_gap = abs(left_t - left_end)
-        right_gap = abs(right_t - right_end)
-        left_xy = _endpoint(left, left_end)
-        right_xy = _endpoint(right, right_end)
-        endpoint_gap = math.hypot(left_xy[0] - right_xy[0], left_xy[1] - right_xy[1])
-        if (left_gap <= MAX_CORNER_EXTENSION_M and right_gap <= MAX_CORNER_EXTENSION_M
-                and endpoint_gap <= MAX_CORNER_ENDPOINT_GAP_M):
-            if left_end == left.t_min:
-                left.t_min = left_t
-            else:
-                left.t_max = left_t
-            if right_end == right.t_min:
-                right.t_min = right_t
-            else:
-                right.t_max = right_t
 
 
 def _segment_points(
@@ -389,12 +352,25 @@ def _segment_points(
             distance = math.hypot(x, y)
             if not min_range_m <= distance <= max_range_m:
                 continue
+            source_item = min(
+                segment.items,
+                key=lambda item: (item.x - x) ** 2 + (item.y - y) ** 2,
+            )
+            source_point = source_item.point
+            source = "thin_wall" if not source_point.source else f"thin_wall:{source_point.source}"
             points.append(ScanPoint(
                 math.atan2(x, y) % math.tau,
                 distance,
-                segment.quality,
+                min(segment.quality, source_point.quality),
                 True,
-                source="thin_wall",
+                timestamp_s=source_point.timestamp_s,
+                time_error_s=source_point.time_error_s,
+                angle_error_rad=source_point.angle_error_rad,
+                distance_error_m=source_point.distance_error_m,
+                pixel=source_point.pixel,
+                calibration_version=source_point.calibration_version,
+                source=source,
+                session=source_point.session,
             ))
     return points
 
@@ -418,7 +394,6 @@ def _fit_thin_walls(
     segments: list[_WallSegment] = []
     for run in _connected_runs(items):
         segments.extend(_fit_run(run))
-    _close_small_corners(segments)
     fitted = _segment_points(segments, min_range_m, max_range_m, resolution_m)
     supported = sum(segment.raw_count for segment in segments)
     return fitted, supported, len(segments)
@@ -456,19 +431,7 @@ def prepare_mapping_points(
         max_range_m,
         max(float(resolution_m), 1e-6),
     )
-    fallback = fitted
-    if not fallback and len(echoes) >= 2:
-        # Sparse data is still useful for preview/local mapping.  Keep it with
-        # reduced confidence, but only when no line model was reliable enough.
-        fallback = [
-            ScanPoint(point.angle_rad, point.distance_m, min(point.quality, 0.45), True)
-            for point in echoes
-        ]
-    selected = tuple(
-        point
-        for point in ordered
-        if not point.has_echo(max_range_m)
-    ) + tuple(fallback)
+    selected = tuple(fitted)
     raw_echoes = len(echoes)
     supported_echoes = min(raw_echoes, supported_count)
     noise_echoes = max(0, raw_echoes - supported_echoes)
@@ -481,6 +444,132 @@ def prepare_mapping_points(
     )
 
 
+class TwoSweepWallEvidence:
+    SECTOR_COUNT = 24
+
+    def __init__(self, resolution_m: float = DEFAULT_MAP_RESOLUTION_M) -> None:
+        self.resolution_m = max(float(resolution_m), 1e-6)
+        self.reset()
+
+    def reset(self) -> None:
+        self._session: str | None = None
+        self._sequence: int | None = None
+        self._selection: MappingPointSelection | None = None
+        self._has_confirmed_pair = False
+
+    @classmethod
+    def _unconfirmed_sectors(cls, points: Sequence[ScanPoint]) -> tuple[int, ...]:
+        confirmed = {
+            min(cls.SECTOR_COUNT - 1, int((point.angle_rad % math.tau) / math.tau * cls.SECTOR_COUNT))
+            for point in points
+        }
+        return tuple(index for index in range(cls.SECTOR_COUNT) if index not in confirmed)
+
+    def update(
+        self,
+        session: str,
+        sequence: int,
+        selection: MappingPointSelection,
+    ) -> MappingPointSelection:
+        session = str(session)
+        sequence = int(sequence)
+        continuous = (
+            self._session == session
+            and self._sequence is not None
+            and sequence == self._sequence + 1
+        )
+        reset_required = self._sequence is not None and not continuous
+        previous = self._selection if continuous else None
+        had_confirmed_pair = self._has_confirmed_pair if continuous else False
+        self._session = session
+        self._sequence = sequence
+        self._selection = selection
+
+        if previous is None or not previous.points or not selection.points:
+            self._has_confirmed_pair = False
+            return MappingPointSelection(
+                (),
+                raw_echoes=selection.raw_echoes,
+                supported_echoes=0,
+                noise_echoes=selection.noise_echoes,
+                fitted_segments=0,
+                confirmed_scans=1,
+                mapping_passes=0,
+                unconfirmed_sectors=tuple(range(self.SECTOR_COUNT)),
+                reset_required=reset_required,
+                rejection_reason="等待第二个连续可信整圈",
+            )
+
+        match_distance = max(2.5 * self.resolution_m, 0.05)
+        previous_points = tuple(previous.points)
+        stable = []
+        previous_layer = []
+        for point in selection.points:
+            nearest = min(
+                previous_points,
+                key=lambda candidate: (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2,
+            )
+            if math.hypot(nearest.x - point.x, nearest.y - point.y) > match_distance:
+                continue
+            source = point.source or "thin_wall"
+            if source.startswith("thin_wall"):
+                source = "stable_wall" + source[len("thin_wall"):]
+            stable_point = ScanPoint(
+                point.angle_rad,
+                point.distance_m,
+                min(point.quality, nearest.quality),
+                True,
+                timestamp_s=point.timestamp_s,
+                time_error_s=point.time_error_s,
+                angle_error_rad=point.angle_error_rad,
+                distance_error_m=point.distance_error_m,
+                pixel=point.pixel,
+                calibration_version=point.calibration_version,
+                source=source,
+                session=point.session,
+            )
+            previous_source = nearest.source or "thin_wall"
+            if previous_source.startswith("thin_wall"):
+                previous_source = "stable_wall" + previous_source[len("thin_wall"):]
+            previous_layer.append(ScanPoint(
+                stable_point.angle_rad,
+                stable_point.distance_m,
+                min(point.quality, nearest.quality),
+                True,
+                timestamp_s=nearest.timestamp_s,
+                time_error_s=nearest.time_error_s,
+                angle_error_rad=nearest.angle_error_rad,
+                distance_error_m=nearest.distance_error_m,
+                pixel=nearest.pixel,
+                calibration_version=nearest.calibration_version,
+                source=previous_source,
+                session=nearest.session,
+            ))
+            stable.append(stable_point)
+
+        ratio = len(stable) / max(1, len(selection.points))
+        supported = min(
+            selection.supported_echoes,
+            previous.supported_echoes,
+            int(round(selection.supported_echoes * ratio)),
+        )
+        self._has_confirmed_pair = bool(stable and supported >= 4)
+        reason = "" if self._has_confirmed_pair else "相邻两圈墙段缺少重复支持"
+        return MappingPointSelection(
+            tuple(stable),
+            raw_echoes=selection.raw_echoes,
+            supported_echoes=supported,
+            noise_echoes=max(selection.noise_echoes, selection.raw_echoes - supported),
+            fitted_segments=selection.fitted_segments if stable else 0,
+            confirmed_scans=2 if self._has_confirmed_pair else 1,
+            mapping_passes=(1 if had_confirmed_pair else 2) if self._has_confirmed_pair else 0,
+            unconfirmed_sectors=self._unconfirmed_sectors(stable),
+            reset_required=reset_required,
+            rejection_reason=reason,
+            mapping_layers=(tuple(previous_layer), tuple(stable)) if self._has_confirmed_pair else (),
+        )
+
+
 def process_radar_debug_scan(navigator, selection: MappingPointSelection, min_range_m: float) -> VelocityCommand:
     """Build a fixed-pose occupancy map while automatic navigation is off."""
     navigator.latest_scan = list(selection.points)
@@ -489,31 +578,36 @@ def process_radar_debug_scan(navigator, selection: MappingPointSelection, min_ra
     navigator.frontier_count = 0
     navigator.reachable_frontier_count = 0
 
-    if selection.supported_echoes < 4:
+    if selection.confirmed_scans < 2 or selection.supported_echoes < 4:
         navigator.state = "仅雷达建图"
-        navigator.detail = (
+        navigator.detail = selection.rejection_reason or (
             f"直线结构不足：回波 {selection.raw_echoes} 个，"
-            f"仅 {selection.supported_echoes} 个具有短直线支持；暂不写图"
+            f"仅 {selection.supported_echoes} 个具有连续两圈支持；暂不写图"
         )
         return VelocityCommand()
 
-    navigator.completed_scans += 1
+    navigator.completed_scans += selection.mapping_passes
     before = navigator.grid.update_count
-    summary = navigator.grid.update_scan(
-        navigator._sensor_pose(),
-        selection.points,
-        navigator.max_range_m,
-        min_range_m=min_range_m,
-        scan_confidence=1.0,
-    )
+    summary = None
+    layers = selection.mapping_layers or (selection.points,)
+    for layer in layers:
+        summary = navigator.grid.update_scan(
+            navigator._sensor_pose(),
+            layer,
+            navigator.max_range_m,
+            min_range_m=min_range_m,
+            scan_confidence=1.0,
+            add_only=True,
+        )
     if navigator.grid.update_count > before:
         navigator.local_map_updates += 1
     navigator.state = "仅雷达建图"
     navigator.detail = (
         f"固定姿态薄墙建图：线段 {selection.fitted_segments} 条，"
-        f"直线回波 {selection.supported_echoes}/{selection.raw_echoes}，"
-        f"忽略孤立噪声 {selection.noise_echoes} 个"
+        f"两圈重复回波 {selection.supported_echoes}/{selection.raw_echoes}，"
+        f"忽略孤立噪声 {selection.noise_echoes} 个，"
+        f"未确认扇区 {len(selection.unconfirmed_sectors)}/{TwoSweepWallEvidence.SECTOR_COUNT}"
     )
-    if summary.out_of_bounds_points:
+    if summary is not None and summary.out_of_bounds_points:
         navigator.detail += f"，另有 {summary.out_of_bounds_points} 个点超出地图"
     return VelocityCommand()

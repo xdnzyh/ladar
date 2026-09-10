@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Callable, Sequence
 
-from mapping_policy import prepare_mapping_points, process_radar_debug_scan
+from mapping_policy import TwoSweepWallEvidence, prepare_mapping_points, process_radar_debug_scan
 from navigation_core import NavigationEngine, Pose2D, ScanPoint, VelocityCommand
 
 
@@ -76,6 +76,7 @@ class MappingRuntime:
         self._generation = 0
         self._state_version = 0
         self._dropped_requests = 0
+        self._wall_evidence = TwoSweepWallEvidence(navigator.grid.resolution_m)
         self._thread = threading.Thread(target=self._worker, name="navigation-mapper", daemon=True)
         self._thread.start()
 
@@ -149,6 +150,7 @@ class MappingRuntime:
             self._generation = self._generation + 1 if generation is None else int(generation)
             self._state_version += 1
             self._pending.clear()
+            self._wall_evidence.reset()
             if reset:
                 self.navigator.reset()
             if reason:
@@ -188,6 +190,7 @@ class MappingRuntime:
                         or request.base_state_version != self._state_version):
                     continue
                 working = deepcopy(self.navigator)
+                wall_evidence = deepcopy(self._wall_evidence)
             try:
                 selection = prepare_mapping_points(
                     request.points,
@@ -195,17 +198,22 @@ class MappingRuntime:
                     self.min_range_m,
                     working.grid.resolution_m,
                 )
-                if request.mode == "local":
-                    command = working.process_local_scan(
-                        selection.points,
-                        min_range_m=self.min_range_m,
-                    )
-                elif not working.auto_enabled:
+                selection = wall_evidence.update(
+                    request.session,
+                    request.scan_sequence,
+                    selection,
+                )
+                if request.mode == "local" or not working.auto_enabled:
                     command = process_radar_debug_scan(
                         working,
                         selection,
                         self.min_range_m,
                     )
+                elif selection.confirmed_scans < 2 or selection.supported_echoes < 4:
+                    working.latest_scan = list(selection.points)
+                    working.state = "两圈墙面确认"
+                    working.detail = selection.rejection_reason or "等待连续两圈墙面证据"
+                    command = VelocityCommand()
                 else:
                     command = working.process_scan(selection.points)
             except BaseException as exc:
@@ -218,6 +226,7 @@ class MappingRuntime:
                         continue
                     self.navigator.__dict__.clear()
                     self.navigator.__dict__.update(deepcopy(working.__dict__))
+                    self._wall_evidence = wall_evidence
                     self._state_version += 1
                     snapshot = self._snapshot_locked(
                         request.session, request.scan_sequence, request.mode, command,

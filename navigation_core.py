@@ -283,6 +283,7 @@ class OccupancyGrid:
         max_range_m: float,
         min_range_m: float = 0.08,
         scan_confidence: float = 1.0,
+        add_only: bool = False,
     ) -> MapUpdateSummary:
         if not math.isfinite(scan_confidence) or scan_confidence < self.MIN_SCAN_CONFIDENCE:
             return MapUpdateSummary(known_cells=self._known_count, map_revision=self._revision)
@@ -298,20 +299,25 @@ class OccupancyGrid:
                     or not min_range_m <= point.distance_m <= max_range_m):
                 continue
             valid_points += 1
-            weight = point.evidence_weight(self.resolution_m) * confidence / (1 + 0.1 * (point.distance_m / max_range_m) ** 2)
-            if weight <= 0:
+            evidence_weight = point.evidence_weight(self.resolution_m) * confidence / (1 + 0.1 * (point.distance_m / max_range_m) ** 2)
+            if evidence_weight <= 0:
                 continue
             endpoint = pose.local_to_world(point.x, point.y)
             end = self.world_to_cell(*endpoint)
-            if point.source == "thin_wall":
+            wall_model = bool(point.source and point.source.split(":", 1)[0] in {"thin_wall", "stable_wall"})
+            if wall_model:
                 end = self._snap_thin_wall_hit(end)
             cells = self._line_cells(start, end)
             has_hit = point.has_echo(max_range_m)
-            for cell in cells[:-1] if has_hit else cells:
-                frees[cell] = max(frees.get(cell, 0.0), weight)
+            if not add_only:
+                for cell in cells[:-1] if has_hit else cells:
+                    frees[cell] = max(frees.get(cell, 0.0), evidence_weight)
             if has_hit:
-                hit_log_odds = 2.25 if point.source == "thin_wall" else self.HIT_LOG_ODDS
-                hits[end] = max(hits.get(end, 0.0), hit_log_odds * weight)
+                hit_log_odds = 2.25 if wall_model else self.HIT_LOG_ODDS
+                hit_weight = evidence_weight
+                if point.source and point.source.split(":", 1)[0] == "stable_wall":
+                    hit_weight = min(1.0, max(0.0, point.quality)) * confidence
+                hits[end] = max(hits.get(end, 0.0), hit_log_odds * hit_weight)
             if not self.in_bounds(*end):
                 out_of_bounds += 1
         if not hits and not frees:

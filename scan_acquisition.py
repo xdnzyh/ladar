@@ -448,6 +448,7 @@ class DistanceObservationReceiver:
         self.timestamp_conflicts = {"range": 0, "rotation": 0}
         self._preview = deque(maxlen=512)
         self.preview_points = ()
+        self._preview_anchor_count = None
         self.local_results = []
         self.raw_progress = {}
         self.max_pending = 0
@@ -457,6 +458,7 @@ class DistanceObservationReceiver:
         self.local_results.clear()
         self._preview.clear()
         self.preview_points = ()
+        self._preview_anchor_count = None
 
     def invalidate(self, reason):
         self.discarded += bool(self.builder.samples)
@@ -470,6 +472,7 @@ class DistanceObservationReceiver:
         self.watermark = -math.inf
         self._preview.clear()
         self.preview_points = ()
+        self._preview_anchor_count = None
         self.local_results.clear()
 
     def estimate_angle(self, packet, *, require_stable: bool = True):
@@ -572,18 +575,22 @@ class DistanceObservationReceiver:
                         packet.calibration_version,
                         packet.source_session,
                     )
-                    if estimated:
-                        estimate = self.estimate_angle(packet, require_stable=False)
-                        if estimate is not None and is_echo:
-                            self._preview.append(PreviewObservation(
-                                timestamp,
-                                estimate[0],
-                                distance,
-                                packet.pixel,
-                                1.0,
-                                packet.uncertainty,
-                                estimate[1],
-                            ))
+                    estimate = self.estimate_angle(packet, require_stable=False)
+                    if estimate is not None and is_echo:
+                        if not estimated:
+                            anchor_count = self.builder.anchor[2] if self.builder.anchor is not None else None
+                            if anchor_count != self._preview_anchor_count:
+                                self._preview.clear()
+                                self._preview_anchor_count = anchor_count
+                        self._preview.append(PreviewObservation(
+                            timestamp,
+                            estimate[0],
+                            distance,
+                            packet.pixel,
+                            1.0,
+                            packet.uncertainty,
+                            estimate[1],
+                        ))
             else:
                 had_anchor = self.builder.anchor is not None
                 before_invalidated = getattr(self.builder, "invalidated", 0)
@@ -596,6 +603,7 @@ class DistanceObservationReceiver:
 
                 if self.builder.last_closed_period is not None:
                     self._preview.clear()
+                    self._preview_anchor_count = None
                     for point in self.builder.last_display_points:
                         self._preview.append(PreviewObservation(
                             point.timestamp,

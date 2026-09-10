@@ -48,7 +48,7 @@ class DisplayAllScanPointsTests(unittest.TestCase):
             ))
             receiver.poll(t)
 
-        self.assertFalse(receiver.preview_points)
+        self.assertEqual(len(receiver.preview_points), 30)
 
         receiver.feed(ReceivedObservation(
             HardwareObservation("rotation", 5, 6.0), 6.0
