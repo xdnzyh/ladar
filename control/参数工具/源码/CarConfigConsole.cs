@@ -38,7 +38,8 @@ class CarConfigConsole {
                     var client=new CarConfigClient(link,session,note);
                     session.BeforeMove=()=>client.IsVerified(config.Values);
                     session.Quiet(1500,5000);
-                    note("READ读取核对 / LOAD重载JSON / APPLY提交并回读 / EXPORT导出实际配置 / PING / LINKTEST静止通信自检 / D 100 MM / D 700 CNT / CONFIRM / EXIT");
+                    note("READ读取核对 / LOAD重载JSON / APPLY提交并回读 / EXPORT导出实际配置 / PING / LINKTEST静止通信自检 / D 100 MM / D 700 CNT / R 250 CNT / F 250 CNT / CONFIRM / EXIT");
+                    note("ROTATION_CNT=1：R顺时针、F逆时针；旋转仅支持CNT，尚未标定角度。");
                     note("参数缓存版 RX_IDLE=1：连接后READ/APPLY成功一次，后续运动不再查询参数；已满足的静默时间不重复等待。");
                     note("MM由电脑换算为CNT。LOAD若改变执行参数则需APPLY；只改距离系数无需写设备。动作等待/执行中Esc请求停止。");
                     var input=new StringBuilder();Console.Write("> ");
@@ -78,14 +79,15 @@ class CarConfigConsole {
                                 client.Apply(config.Values);
                             }
                             else {
-                                var m=Regex.Match(command,@"^([WSADQEZC])\s+([0-9]+)\s+(MM|CNT)$");
+                                var m=Regex.Match(command,@"^([WSADQEZCRF])\s+([0-9]+)\s+(MM|CNT)$");
                                 int value;
-                                if(!m.Success||!int.TryParse(m.Groups[2].Value,out value)||value<=0)throw new Exception("格式：D 100 MM 或 D 700 CNT；其他命令见帮助。");
+                                if(!m.Success||!int.TryParse(m.Groups[2].Value,out value)||value<=0)throw new Exception("格式：D 100 MM、D 700 CNT 或 R/F 250 CNT；其他命令见帮助。");
+                                string mode=m.Groups[1].Value;bool rotation=mode=="R"||mode=="F";
+                                if(rotation&&m.Groups[3].Value!="CNT")throw new Exception("旋转尚未标定角度，只支持 R 250 CNT 或 F 250 CNT。");
                                 if(session.Uncertain)throw new Exception("上一运动未确认，先现场确认再CONFIRM。");
                                 if(!client.IsVerified(config.Values))throw new Exception("参数尚未确认，请先READ/APPLY成功一次；后续动作沿用确认状态。");
-                                string mode=m.Groups[1].Value;
                                 long counts=m.Groups[3].Value=="MM"?config.ToCounts(mode,value):value;
-                                note("请求="+command+"，CNT/mm="+config.CountsPerMm[mode]+", 发送CNT="+counts+", CONFIG_CRC="+CarConfigClient.Hash(config.Values));
+                                note("请求="+command+(rotation?"，原地旋转":", CNT/mm="+config.CountsPerMm[mode])+", 发送CNT="+counts+", CONFIG_CRC="+CarConfigClient.Hash(config.Values));
                                 // Tagged MOVE is single-shot; cached timeout bounds read-only RESULT recovery.
                                 session.EmergencyRequested=()=>{
                                     while(Console.KeyAvailable)if(Console.ReadKey(true).Key==ConsoleKey.Escape)return true;

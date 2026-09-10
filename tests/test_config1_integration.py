@@ -83,7 +83,7 @@ class Config1IntegrationTests(unittest.TestCase):
     def test_navigation_loads_terminal_profile_for_distance_control(self):
         from navigation_app import load_configuration
 
-        profile = 'car control final/car control final/control/参数工具/底盘参数.json'
+        profile = 'control/参数工具/底盘参数.json'
         values, coefficients = load_profile(profile)
         config = load_configuration('hardware', 'navigation')
         self.assertEqual(config['chassis_config1_file'], profile)

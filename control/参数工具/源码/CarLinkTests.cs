@@ -166,10 +166,10 @@ class CarLinkTests {
             if(scenario=="pingretry")Assert(pings==2&&session.LastPingTag=="1234ABCD"&&queries==0);
         }
         // Active directional means must ignore inactive wheel drift on diagonals.
-        string[] modes={"W","S","A","D","Q","E","Z","C"};
+        string[] modes={"W","S","A","D","Q","E","Z","C","R","F"};
         string[] wheels={"600,602,604,606","-600,-602,-604,-606","600,-602,604,-606","-600,602,-604,606",
-            "600,77,606,-33","77,600,-33,606","77,-600,-33,-606","-600,77,-606,-33"};
-        for(int i=0;i<modes.Length;i++)foreach(string unit in new[]{"CNT","MM"})foreach(int reason in new[]{0,1,2,3}) {
+            "600,77,606,-33","77,600,-33,606","77,-600,-33,-606","-600,77,-606,-33","-600,602,604,-606","600,-602,-604,606"};
+        for(int i=0;i<modes.Length;i++)foreach(string unit in i<8?new[]{"CNT","MM"}:new[]{"CNT"})foreach(int reason in new[]{0,1,2,3}) {
             var link=new FakeCarLink();var session=new CarSession(link,s=>{},s=>{},()=>"1234ABCD");
             string mode=modes[i];
             link.OnWrite=(s,f)=>{
@@ -180,7 +180,7 @@ class CarLinkTests {
             Assert(session.MoveRecoverable(mode,"718",unit)==new[]{"TARGET","EMERGENCY","TIMEOUT","WRONG_DIRECTION"}[reason]);
             Assert(session.Uncertain==(reason!=0)&&QueryTimes(link).Count==0);
         }
-        Console.WriteLine("PASS: actual RX silence, B/N, late auto result within deadline, emergency/race, reboot epoch, write failure, cached BeforeMove, successful retry PING tag, all 8 directions/units/reasons.");
+        Console.WriteLine("PASS: actual RX silence, B/N, late auto result within deadline, emergency/race, reboot epoch, write failure, cached BeforeMove, successful retry PING tag, all 10 directions and supported units/reasons.");
     }
 
     static void DiagnosticFragmentReplay() {
@@ -414,7 +414,44 @@ class CarLinkTests {
         }
         if(failures.Count>0)throw new Exception("Idle preflight failures ("+failures.Count+"): "+string.Join("; ",failures));
     }
+    static void RotationRecovery() {
+        foreach(string mode in new[]{"R","F"}) {
+            foreach(string unit in new[]{"MM","DEG"}) {
+                var invalid=new FakeCarLink();var session=new CarSession(invalid,s=>{},s=>{},()=>"1234ABCD");
+                bool rejected=false;try{session.MoveRecoverable(mode,"250",unit);}catch(ArgumentException){rejected=true;}
+                Assert(rejected&&invalid.Writes.Count==0);
+            }
+            foreach(string scenario in new[]{"direct","truncated","wrongsign","badcrc","absent","stop"}) {
+                var link=new FakeCarLink();var session=new CarSession(link,s=>{},s=>{},()=>"1234ABCD");int queries=0;long moveAt=-1;
+                string wheels=mode=="R"?"-245,249,251,-255":"245,-249,-251,255";
+                string body="@RESULT,1234ABCD,"+mode+",0,250,CNT,230.00,250.00,"+wheels;
+                if(scenario=="stop")session.EmergencyRequested=()=>moveAt>=0&&link.Now-moveAt>=80;
+                link.OnWrite=(wire,f)=>{
+                    if(wire.StartsWith("@PING,")){f.Later(20,"@PONG,1234ABCD\r\n");return;}
+                    if(wire=="!\r\nX\r\n"){f.Later(20,ResultFrame(body.Replace(","+mode+",0,",","+mode+",1,")));return;}
+                    if(wire.StartsWith("@MOVE,")) {
+                        Assert(wire==ResultFrame("@MOVE,"+mode+",250,CNT,1234ABCD"));moveAt=f.Now;
+                        if(scenario=="direct")f.Later(100,ResultFrame(body));
+                        if(scenario=="truncated")f.Later(100,ResultFrame(body).Substring(18));
+                        if(scenario=="wrongsign")f.Later(100,ResultFrame(body.Replace(wheels,mode=="R"?"245,-249,-251,255":"-245,249,251,-255")));
+                        if(scenario=="badcrc")f.Later(100,ResultFrame(body).Replace("230.00","231.00"));
+                        return;
+                    }
+                    Assert(wire==ResultFrame("@RESULT,1234ABCD"));queries++;
+                    f.Later(20,ResultFrame(scenario=="absent"?"@RESULT,1234ABCD,N":body));
+                };
+                string result=session.MoveRecoverable(mode,"250");
+                string expected=scenario=="stop"?"EMERGENCY":scenario=="absent"?"UNCERTAIN":"TARGET";
+                Assert(result==expected&&MoveCount(link)==1&&session.Uncertain==(expected!="TARGET"));
+                Assert(queries==(scenario=="direct"||scenario=="stop"?0:scenario=="absent"?5:1));
+                if(scenario=="stop")Assert(link.Writes.FindAll(s=>s=="!\r\nX\r\n").Count==1);
+                if(scenario=="absent")Assert(session.MoveRecoverable(mode,"250")=="LOCKED"&&MoveCount(link)==1);
+            }
+        }
+        Console.WriteLine("PASS: R/F asymmetric wheel signs, CNT-only before transmission, corrupt/truncated/sign-wrong recovery, absent result lock, emergency, one MOVE only.");
+    }
     public static void Run() {
+        RotationRecovery();
         RecoverableResults();
         RecoverySafety();
         DiagnosticFragmentReplay();

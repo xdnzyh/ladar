@@ -131,7 +131,7 @@ class CarSession {
                     ConfigurationEpoch++;
                     LastPingTag=null;
                     ClearPreparation();
-                    note("检测到底盘启动，已确认的参数状态失效，请重新READ/APPLY。");
+                    note("检测到底盘启动，先前读回的参数记录已失效，车端执行参数已恢复启动值。");
                 }
                 lines.Add(prefix);
                 line=line.Substring(frameStart);
@@ -141,7 +141,7 @@ class CarSession {
                 ConfigurationEpoch++;
                 LastPingTag=null;
                 ClearPreparation();
-                note("检测到底盘启动，已确认的参数状态失效，请重新READ/APPLY。");
+                note("检测到底盘启动，先前读回的参数记录已失效，车端执行参数已恢复启动值。");
             }
             if(line.StartsWith("FULL RESET",StringComparison.Ordinal)) {ClearPreparation();LastPingTag=null;}
             if(preparing&&preparedTag!=null&&preparedEpoch==ConfigurationEpoch) {
@@ -233,6 +233,8 @@ class CarSession {
             case "E":return new[]{0,1,0,1};
             case "Z":return new[]{0,-1,0,-1};
             case "C":return new[]{-1,0,-1,0};
+            case "R":return new[]{-1,1,1,-1};
+            case "F":return new[]{1,-1,-1,1};
             default:return null;
         }
     }
@@ -274,7 +276,8 @@ class CarSession {
         // Recovery never extends the original motion deadline.
         if(timeoutMs<14000||timeoutMs>21000)throw new ArgumentOutOfRangeException("timeoutMs");
         int request;
-        if(Directions(mode)==null||!RequestValue(counts,out request)||(unit!="CNT"&&unit!="MM"))throw new ArgumentException("Invalid MOVE mode/value/unit.");
+        if(Directions(mode)==null||!RequestValue(counts,out request)||(unit!="CNT"&&unit!="MM")
+            ||((mode=="R"||mode=="F")&&unit!="CNT"))throw new ArgumentException("Invalid MOVE mode/value/unit; R/F require CNT.");
         if(Uncertain){note("上一动作结果待确认，禁止继续移动。");return "LOCKED";}
         if(BeforeMove!=null&&!BeforeMove()){ClearPreparation();note("参数尚未确认，请先READ/APPLY一次。");return "CONFIG_REQUIRED";}
         if(!PrepareMotionHandshake()||Uncertain||LastPingTag==null)return "NO_LINK";
