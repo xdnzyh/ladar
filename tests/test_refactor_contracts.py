@@ -140,7 +140,7 @@ class MappingRuntimeContractTests(unittest.TestCase):
         release = threading.Event()
         results = []
 
-        def blocked(_self, _points, min_range_m=0.08, scan_confidence=0.7):
+        def blocked(_self, _points, min_range_m=0.08, scan_confidence=0.7, **kwargs):
             started.set()
             release.wait(1.0)
             return VelocityCommand()

@@ -248,10 +248,11 @@ class TimedSweepBuilder:
             new_times = {p.timestamp for p in structural}
             counts["timing_kept"] = len(result)
             counts["structure_rescued"] = len(new_times - old_times)
-            counts["structure_rejected"] = len(old_times - new_times)
+            counts["structure_rejected"] = 0
             counts["structure_unsupported"] = len(self.last_display_points) - len(supported)
             counts["structure_untrusted"] = len(supported) - len(structural)
-            result = structural
+            result = sorted(result + [p for p in structural if p.timestamp not in old_times],
+                            key=lambda point: point.timestamp)
         counts["kept"] = len(result)
         self.last_quality_counts = counts
         self.last_closed_points = result

@@ -14,6 +14,31 @@ from scan_acquisition import HardwareObservation
 
 
 class MotionSafetyTests(unittest.TestCase):
+    def test_distance_control_guards_whole_segment_without_speed_or_braking_fields(self):
+        config = resolve_runtime_config('hardware', 'navigation', {
+            'chassis_distance_control': True,
+        })
+        guard = MotionSafetyGuard(config)
+        for right, forward, angle in ((0, 0.1, 0), (0, -0.1, math.pi),
+                                      (0.1, 0, math.pi/2), (-0.1, 0, -math.pi/2)):
+            with self.subTest(angle=angle):
+                guard.start(VelocityCommand(right_mps=right, forward_mps=forward, duration_s=1), 10)
+                self.assertIsNone(guard.observe(self.point(2), (angle, 0), 10.1))
+                self.assertIsNotNone(guard.observe(self.point(0.3), (angle, 0), 10.1))
+                self.assertIsNone(guard.observe(self.point(0.3), (angle + math.pi, 0), 10.1))
+                self.assertIsNotNone(guard.poll(11))
+                guard.clear()
+                self.assertIsNone(guard.poll(12))
+
+    def test_distance_control_keeps_observation_and_angle_validation(self):
+        guard = MotionSafetyGuard(resolve_runtime_config('hardware', 'navigation', {
+            'chassis_distance_control': True,
+        }))
+        guard.start(VelocityCommand(forward_mps=0.1, duration_s=1), 10)
+        self.assertIsNone(guard.observe(self.point(0.2, 9), (0, 0), 10.1))
+        self.assertIsNotNone(guard.observe(self.point(0.2), None, 10.1))
+        self.assertIsNotNone(guard.poll(11))
+
     def test_near_obstacle_recovery_chooses_translation_away_after_scan(self):
         config = resolve_runtime_config('simulation', 'navigation', {}, prefer_mode_defaults=True)
         navigator = build_navigation_engine(config)

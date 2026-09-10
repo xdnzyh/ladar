@@ -139,16 +139,18 @@ class ChassisMotionAdapter:
             reasons.append("未确认底盘当前烧录版本")
         if capability_mode == "unknown":
             reasons.append("未确认底盘协议能力")
-        if not bool(self.config.get("chassis_speed_validated", False)):
-            reasons.append("底盘实际速度上界尚未测得")
-        if not bool(self.config.get("chassis_braking_validated", False)):
-            reasons.append("底盘完整停止距离尚未测得")
-        speed = self._finite(self.config.get("safety_speed_upper_bound_mps"))
-        if speed is None or speed <= 0:
-            reasons.append("缺少经测量的底盘速度上界")
-        stop_distance = self._finite(self.config.get("safety_stop_distance_m"))
-        if stop_distance is None or stop_distance < 0:
-            reasons.append("缺少经测量的保守停止距离")
+        distance_control = bool(self.config.get("chassis_distance_control", False))
+        if not distance_control:
+            if not bool(self.config.get("chassis_speed_validated", False)):
+                reasons.append("底盘实际速度上界尚未测得")
+            if not bool(self.config.get("chassis_braking_validated", False)):
+                reasons.append("底盘完整停止距离尚未测得")
+            speed = self._finite(self.config.get("safety_speed_upper_bound_mps"))
+            if speed is None or speed <= 0:
+                reasons.append("缺少经测量的底盘速度上界")
+            stop_distance = self._finite(self.config.get("safety_stop_distance_m"))
+            if stop_distance is None or stop_distance < 0:
+                reasons.append("缺少经测量的保守停止距离")
 
         if mode is None:
             modes = tuple(
@@ -165,15 +167,15 @@ class ChassisMotionAdapter:
                 if not bool(entry.get("enabled", False)):
                     reasons.append(f"{item} 方向未启用")
                     continue
-                if not bool(entry.get("motion_range_validated", False)):
+                if not distance_control and not bool(entry.get("motion_range_validated", False)):
                     reasons.append(f"{item} 方向执行范围尚未重复验证")
                     continue
                 minimum = self._finite(entry.get("validated_min_mm"))
                 maximum = self._finite(entry.get("validated_max_mm"))
                 uncertainty = self._finite(entry.get("uncertainty_m"))
-                if minimum is None or maximum is None or minimum <= 0 or maximum < minimum:
+                if not distance_control and (minimum is None or maximum is None or minimum <= 0 or maximum < minimum):
                     reasons.append(f"{item} 方向验证范围无效")
-                if uncertainty is None or uncertainty < 0:
+                if not distance_control and (uncertainty is None or uncertainty < 0):
                     reasons.append(f"{item} 方向缺少执行不确定度")
                 coefficient = self._finite(entry.get("counts_per_mm"))
                 if coefficient is None or coefficient <= 0:
@@ -199,7 +201,7 @@ class ChassisMotionAdapter:
         maximum_global = self._finite(self.config.get("chassis_max_translation_m"))
         if maximum_global is not None and maximum_global > 0 and distance_m > maximum_global + 1e-12:
             raise MotionConversionError(f"动作长度超过当前底盘上限 {maximum_global:g} m")
-        if automatic or bool(entry.get("motion_range_validated", False)):
+        if not self.config.get("chassis_distance_control", False) and (automatic or bool(entry.get("motion_range_validated", False))):
             if not bool(entry.get("motion_range_validated", False)):
                 raise MotionConversionError(f"{mode} 方向执行范围尚未重复验证")
             minimum = self._finite(entry.get("validated_min_mm"))
@@ -357,6 +359,8 @@ class ChassisMotionAdapter:
             if coefficient is None or coefficient <= 0:
                 raise MotionConversionError(f"{mode} 方向缺少执行先验换算")
             uncertainty_m = self._finite(entry.get("uncertainty_m"))
+            if uncertainty_m is None and self.config.get("chassis_distance_control", False):
+                uncertainty_m = float(self.config["map_resolution_m"])
             if uncertainty_m is None or uncertainty_m < 0:
                 raise MotionConversionError(f"{mode} 方向缺少执行不确定度")
             amount = report.enc / coefficient / 1000.0
@@ -1223,10 +1227,14 @@ class ChassisController:
     def request_stop(self, *, reason: str = "用户停止", now: float | None = None) -> bool:
         stamp = self._now(now)
         with self._lock:
+            keep_verified = (self.config_verified and self.config_exchange is None
+                             and self.pending is None and not self._motion_unconfirmed
+                             and self.state in {ChassisState.IDLE, ChassisState.STOPPING_IDLE})
             self._idle_status_deferred = False
             self._cancel_motion_ping()
             self._invalidate_idle_preflight()
             self._cancel_config_exchange()
+            self.config_verified = keep_verified
             self.automatic_locked = True
             if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE}:
                 return True

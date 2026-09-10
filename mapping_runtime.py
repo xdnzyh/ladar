@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import math
 import threading
 import time
 from typing import Callable, Sequence
 
-from mapping_policy import TwoSweepWallEvidence, prepare_mapping_points, process_radar_debug_scan
+from mapping_policy import (TwoSweepWallEvidence, prepare_mapping_points,
+                            prepare_free_space_points, process_radar_debug_scan)
 from navigation_core import NavigationEngine, Pose2D, ScanPoint, VelocityCommand
 
 
@@ -193,6 +194,8 @@ class MappingRuntime:
                 working = deepcopy(self.navigator)
                 wall_evidence = deepcopy(self._wall_evidence)
             try:
+                free_rays = prepare_free_space_points(request.points, working.max_range_m,
+                                                      self.min_range_m, working.grid.resolution_m)
                 selection = prepare_mapping_points(
                     request.points,
                     working.max_range_m,
@@ -209,8 +212,13 @@ class MappingRuntime:
                         working,
                         selection,
                         self.min_range_m,
+                        free_space_points=free_rays,
                     )
                 elif selection.confirmed_scans < 2 or selection.supported_echoes < 4:
+                    if not working._motion_since_last_scan:
+                        working.grid.update_scan(working._sensor_pose(), free_rays,
+                                                 working.max_range_m, min_range_m=self.min_range_m,
+                                                 add_only=True)
                     working.latest_scan = list(selection.points)
                     working.state = "两圈墙面确认"
                     working.detail = selection.rejection_reason or "等待连续两圈墙面证据"
@@ -222,20 +230,9 @@ class MappingRuntime:
                         point for point in request.points
                         if point.is_echo is False
                     )
-                    # Raw wall rays also prove free space up to the return,
-                    # even where line fitting discarded an endpoint. Keep these
-                    # separate so they cannot replace confirmed wall hits.
-                    approach_rays = tuple(
-                        replace(point, distance_m=point.distance_m - math.sqrt(2) * working.grid.resolution_m,
-                                is_echo=False, source="free_space")
-                        for point in request.points
-                        if point.has_echo(working.max_range_m)
-                        and math.isfinite(point.distance_m)
-                        and self.min_range_m <= point.distance_m <= working.max_range_m
-                    )
                     command = working.process_scan(selection.points + clear_rays,
-                                                   free_space_points=approach_rays,
-                                                   obstacle_points=request.points)
+                                                   free_space_points=free_rays,
+                                                   obstacle_points=request.points, add_only=True)
             except BaseException as exc:
                 result = MappingResult(request, None, None, exc)
             else:

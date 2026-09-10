@@ -724,7 +724,7 @@ class SynchronizedAcquisition:
         packet = raw.normalize(self.clocks[source], arrival)
         is_new_progress = previous is None or raw.sequence > previous[0]
         accepted = self.receiver.feed(ReceivedObservation(packet, arrival))
-        if packet.source == "range" and packet.status == "ok" and packet.distance is not None and is_new_progress:
+        if packet.source == "range" and packet.status in {"ok", "over_range"} and packet.distance is not None and is_new_progress:
             self.last_arrival["measurement"] = arrival
             self.last_valid_range = arrival
             self.emit("sync_range", (self.session, packet.pixel, packet.distance), arrival)

@@ -298,7 +298,7 @@ class OccupancyGrid:
                  and point.quality >= self.MIN_QUALITY
                  and min_range_m <= point.distance_m <= max_range_m]
         rays = list(valid)
-        if not add_only and len(valid) > 1:
+        if len(valid) > 1:
             ordered = sorted(valid, key=lambda point: point.angle_rad % math.tau)
             for left, right in zip(ordered, ordered[1:] + ordered[:1]):
                 gap = (right.angle_rad - left.angle_rad) % math.tau
@@ -334,9 +334,10 @@ class OccupancyGrid:
                 end = self._snap_thin_wall_hit(end)
             cells = self._line_cells(start, end)
             has_hit = point.has_echo(max_range_m)
-            if not add_only:
-                for cell in cells[:-1] if has_hit else cells:
-                    frees[cell] = max(frees.get(cell, 0.0), evidence_weight)
+            for cell in cells[:-1] if has_hit else cells:
+                if add_only and self.state(*cell) == self.OCCUPIED:
+                    break
+                frees[cell] = max(frees.get(cell, 0.0), evidence_weight)
             if has_hit:
                 hit_log_odds = 2.25 if wall_model else self.HIT_LOG_ODDS
                 hit_weight = evidence_weight
@@ -351,7 +352,7 @@ class OccupancyGrid:
         changed = set()
         state_changed = set()
         for cell, weight in frees.items():
-            if cell not in hits:
+            if cell not in hits and not (add_only and self.value(*cell) > 0):
                 before = self.state(*cell)
                 if self._add(*cell, -self.FREE_LOG_ODDS * weight):
                     changed.add(cell)
@@ -1088,7 +1089,8 @@ class NavigationEngine:
 
     def process_scan(self, points: Sequence[ScanPoint], *,
                      free_space_points: Sequence[ScanPoint] = (),
-                     obstacle_points: Sequence[ScanPoint] = ()) -> VelocityCommand:
+                     obstacle_points: Sequence[ScanPoint] = (),
+                     add_only: bool = False) -> VelocityCommand:
         self._last_scan_had_motion = self._motion_since_last_scan
         self._motion_since_last_scan = False
         self._last_scan_had_diagonal_motion = self._diagonal_motion_since_last_scan
@@ -1134,7 +1136,9 @@ class NavigationEngine:
         if len(matching_points) < self.matcher.MIN_HIT_POINTS or len(sectors) < 3:
             return self._reject_scan(0.0, "有效障碍回波不足，等待重扫")
         initializing = not self._map_initialized
-        if self.grid.update_count == 0:
+        if (self.grid.update_count == 0
+                or (not self._map_initialized and not self.grid.occupied_cells()
+                    and not self._last_scan_had_motion)):
             corrected_sensor = self._sensor_pose()
             match_result = ScanMatchResult(corrected_sensor, 1.0, inlier_count=len(matching_points),
                                            valid_direction_count=len(sectors), known_overlap=1.0)
@@ -1189,7 +1193,7 @@ class NavigationEngine:
         self._predicted_rotation_rad = 0.0
         self._predicted_motion_uncertainty_rad = 0.0
         summary = self.grid.update_scan(self._sensor_pose(), valid + list(free_space_points),
-                                        self.max_range_m, scan_confidence=score)
+                                        self.max_range_m, scan_confidence=score, add_only=add_only)
         if summary.out_of_bounds_points:
             self.detail = f"本圈有 {summary.out_of_bounds_points} 个回波超出地图范围"
         if initializing:

@@ -20,7 +20,7 @@
     "LAT_FF_SLOW": 125,
     "LAT_START_SPEED": 20,
     "LAT_START_FF": 150,
-    "LAT_RAMP_MS": 500,
+    "LAT_RAMP_MS": 600,
     "LAT_MIN_PWM": 90,
     "LAT_MAX_PWM": 180,
     "DIAG_FAST": 32,
@@ -108,3 +108,4 @@
     "C": 10.1874
   }
 }
+

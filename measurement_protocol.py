@@ -51,7 +51,7 @@ def parse_observation(source, line, session, calibration, config):
         pixel_max = int(config.get("pixel_max", CCD_PIXEL_MAX))
         if pixel == -1:
             return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
-                                     None, pixel, "no_return", False, session=session)
+                                     float(config.get("max_range_m", 3.0)), pixel, "over_range", False, session=session)
         if not pixel_min <= pixel <= pixel_max:
             return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
                                      None, pixel, "invalid_pixel", False, session=session)
@@ -61,6 +61,9 @@ def parse_observation(source, line, session, calibration, config):
                                      None, pixel, "calibration_outside", False, session=session)
         minimum = float(config.get("min_range_m", 0.08))
         maximum = float(config.get("max_range_m", 3.0))
+        if distance > maximum:
+            return DeviceObservation("range", sequence, (begin + end) / 2, (end - begin) * 0.5e-6,
+                                     maximum, pixel, "over_range", False, session=session)
         status = "ok" if minimum <= distance <= maximum else "out_of_range"
         distance_error = calibration.pixel_quantization_error_m(pixel)
         return DeviceObservation(

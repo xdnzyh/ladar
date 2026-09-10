@@ -167,11 +167,12 @@ class RobustSweepTests(unittest.TestCase):
                                   CalibrationModel(p0=700, k=100), {})
         self.assertEqual(direct.normalize(clock, 2.01), pixel.normalize(clock, 2.01))
 
-    def test_invalid_pixel_is_no_return_not_free_space(self):
+    def test_explicit_no_echo_clears_to_configured_range(self):
         raw = parse_observation("measurement", "PIX session 1 1000 2000 -1", "session",
                                 CalibrationModel(p0=700, k=100), {})
-        self.assertIsNone(raw.distance)
-        self.assertEqual(raw.status, "no_return")
+        self.assertEqual(raw.distance, 3.0)
+        self.assertEqual(raw.status, "over_range")
+        self.assertFalse(raw.is_echo)
 
 
 if __name__ == "__main__":

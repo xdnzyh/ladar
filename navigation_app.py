@@ -772,6 +772,20 @@ class NavigationApp:
         if controller is None or not controller.request_status():
             self._log("当前底盘状态不允许读取")
 
+    def _verify_chassis_on_idle(self, generation: int, state: str) -> None:
+        controller = getattr(self, "chassis_controller", None)
+        if (controller is None or generation != controller.connection_generation
+                or not self.config.get("chassis_config1_file")):
+            return
+        if state == ChassisState.CONNECTED_WAITING:
+            self._chassis_config_read_generation = None
+        elif (state == ChassisState.IDLE
+              and getattr(self, "_chassis_config_read_generation", None) != generation):
+            if controller.config_verified or controller.config_exchange is not None:
+                self._chassis_config_read_generation = generation
+            elif controller.request_config_sync(apply=False):
+                self._chassis_config_read_generation = generation
+
     def _start_chassis_communication_check(self) -> None:
         controller = getattr(self, "chassis_controller", None)
         if controller is None or not controller.request_communication_check(20):
@@ -855,6 +869,9 @@ class NavigationApp:
                 if entry.get("motion_range_validated") is True:
                     validated.append(direction)
         version = "固件已确认" if self.config.get("chassis_firmware_confirmed", False) else "固件待确认"
+        if self.config.get("chassis_distance_control", False):
+            enabled = "".join(direction for direction in "WSADQEZC" if table.get(direction, {}).get("enabled")) or "无"
+            return f"方向距离模式 · {version} · 自动方向 {enabled} · R/F 锁定"
         opened = "".join(validated) or "无"
         return f"{mode_label} · {version} · CNT/mm 初值 {len(initial)}/8 · 自动范围 {opened} · R/F 锁定"
 
@@ -1148,6 +1165,7 @@ class NavigationApp:
             adapter_detail = "；".join(adapter_reasons)
         else:
             adapter_ready, adapter_detail = False, "底盘控制器未初始化"
+        config_reading = controller is not None and controller.config_exchange is not None
         checks = (
             (self.connected, "设备未连接", "请先连接测距、旋转串口。"),
             (bool(self.calibration.ready), "标定不可用", calibration_detail),
@@ -1155,7 +1173,9 @@ class NavigationApp:
             (chassis_open, "底盘未连接", "自动导航需要连接底盘串口。"),
             (chassis_confirmed, "底盘状态未确认", "请先读取底盘状态，并核对或保存固件能力。"),
             (not self.config.get("chassis_config1_file") or bool(getattr(controller, "config_verified", False)),
-             "底盘参数未同步", "请停止导航，在展开串口与指令中点击重载并同步参数，等待不同项为 0。"),
+             "底盘参数核对中" if config_reading else "底盘参数未同步",
+             "正在读取底盘参数，请等待核对完成后再开始。" if config_reading
+             else "请停止导航，在展开串口与指令中点击重载并同步参数，等待不同项为 0。"),
             (adapter_ready, "底盘标定未完成", adapter_detail),
         )
         for ok, title, detail in checks:
@@ -1228,6 +1248,7 @@ class NavigationApp:
         self.connect_button.configure(text="断开设备")
         if ports[2]:
             self.chassis_status_var.set("底盘串口已打开，等待启动标识或状态回复")
+            self.chassis_controller.request_status()
         self._log("测距、旋转和底盘通道已连接" if ports[2] else "测距和旋转通道已连接")
 
     def disconnect(self) -> None:
@@ -2025,11 +2046,16 @@ class NavigationApp:
         elif kind == "chassis_status":
             if isinstance(value, tuple) and len(value) == 2:
                 self._log(f"底盘  {value[1]}")
+                detail = str(value[1])
+                if (hasattr(self, "chassis_status_var")
+                        and detail.startswith(("底盘参数 CRC=", "正在读取/同步底盘参数", "CONFIG1 "))):
+                    self.chassis_status_var.set(detail)
             else:
                 self._log(f"底盘  {value}")
         elif kind == "chassis_state":
             if isinstance(value, tuple) and len(value) == 3:
                 _generation, state, detail = value
+                self._verify_chassis_on_idle(_generation, state)
                 if hasattr(self, "chassis_status_var"):
                     self.chassis_status_var.set(str(detail))
                 self._log(f"底盘状态：{state}，{detail}")

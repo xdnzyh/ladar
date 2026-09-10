@@ -47,12 +47,14 @@ class MotionSafetyGuard:
         radius = float(self.config.get("robot_radius_m", 0.15))
         clearance = float(self.config.get("safety_clearance_m", 0.12))
         speed = self.speed_mps
-        if speed is None:
+        distance_control = (str(self.config.get("runtime_source", "")).lower() == "hardware"
+                            and bool(self.config.get("chassis_distance_control", False)))
+        if speed is None and not distance_control:
             return "底盘实际速度上界未标定，停止自动运动"
-        speed = max(0.0, speed)
+        speed = max(0.0, speed or 0.0)
         configured_stop_distance = self.config.get("safety_stop_distance_m")
         if configured_stop_distance is None:
-            if str(self.config.get("runtime_source", "")).lower() == "hardware":
+            if str(self.config.get("runtime_source", "")).lower() == "hardware" and not distance_control:
                 return "底盘制动距离未标定，停止自动运动"
             configured_stop_distance = 0.0
         try:
@@ -73,7 +75,10 @@ class MotionSafetyGuard:
         y = -sensor_x * sine + sensor_y * cosine + float(self.config.get("radar_offset_y_m", 0.0))
         point_distance = math.hypot(x, y)
         margin = packet.distance * math.sin(min(math.pi / 2, max(0, error)))
-        limit = radius + clearance + speed * age + stop_distance
+        lookahead = speed * age + stop_distance
+        if distance_control:
+            lookahead = max(lookahead, (self.direction_speed_mps or 0.0) * self.command.duration_s)
+        limit = radius + clearance + lookahead
         if point_distance > limit + margin:
             return None
         direction_speed = self.direction_speed_mps or 0.0
@@ -85,7 +90,7 @@ class MotionSafetyGuard:
         uy = self.command.forward_mps / direction_speed
         along = x * ux + y * uy
         lateral = abs(x * uy - y * ux)
-        if along + margin >= 0 and along <= speed * age + radius + clearance + stop_distance + margin and lateral <= radius + margin:
+        if along + margin >= 0 and along <= limit + margin and lateral <= radius + margin:
             return "运动方向出现近距离障碍，紧急停车"
         return None
 

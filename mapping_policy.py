@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Sequence
 
@@ -570,13 +570,33 @@ class TwoSweepWallEvidence:
         )
 
 
-def process_radar_debug_scan(navigator, selection: MappingPointSelection, min_range_m: float) -> VelocityCommand:
+def prepare_free_space_points(points, max_range_m, min_range_m, resolution_m):
+    result = []
+    for point in points:
+        if (not math.isfinite(point.angle_rad) or not math.isfinite(point.distance_m)
+                or not math.isfinite(point.quality) or point.quality < 0.25
+                or not min_range_m <= point.distance_m <= max_range_m):
+            continue
+        distance = point.distance_m
+        if point.has_echo(max_range_m):
+            distance -= math.sqrt(2) * resolution_m
+        if distance >= min_range_m:
+            result.append(replace(point, distance_m=distance, is_echo=False, source="free_space"))
+    return tuple(result)
+
+
+def process_radar_debug_scan(navigator, selection: MappingPointSelection, min_range_m: float,
+                             *, free_space_points: Sequence[ScanPoint] = ()) -> VelocityCommand:
     """Build a fixed-pose occupancy map while automatic navigation is off."""
     navigator.latest_scan = list(selection.points)
     navigator.path_cells.clear()
     navigator.target_cell = None
     navigator.frontier_count = 0
     navigator.reachable_frontier_count = 0
+
+    if free_space_points:
+        navigator.grid.update_scan(navigator._sensor_pose(), free_space_points,
+                                   navigator.max_range_m, min_range_m=min_range_m, add_only=True)
 
     if selection.confirmed_scans < 2 or selection.supported_echoes < 4:
         navigator.state = "仅雷达建图"

@@ -129,6 +129,7 @@ RUNTIME_DEFAULTS = {
     "chassis_max_translation_m": 0.20,
     "chassis_max_rotation_rad": 0.5,
     "chassis_speed_validated": False,
+    "chassis_distance_control": False,
     "chassis_braking_validated": False,
     "chassis_translation_capabilities": {
         mode: {
@@ -453,6 +454,7 @@ def resolve_runtime_config(
         for index, mode in enumerate("WSADQEZC"):
             table[mode]["counts_per_mm"] = coefficients[mode]
             table[mode]["fixed_counts_per_mm"] = int(math.floor(coefficients[mode]*10000 + 0.5))
+            table[mode]["coefficient_source"] = profile_file
             table[mode]["brake_min_counts"] = values[44 + 4*index]
             table[mode]["brake_max_counts"] = values[45 + 4*index]
         config["chassis_translation_capabilities"] = table
@@ -466,7 +468,7 @@ def resolve_runtime_config(
     for key in (
         "synchronized_acquisition", "clockwise", "chassis_firmware_confirmed",
         "chassis_speed_validated", "chassis_braking_validated", "chassis_raw_log_enabled",
-        "chassis_result_recovery", "chassis_idle_preflight",
+        "chassis_result_recovery", "chassis_idle_preflight", "chassis_distance_control",
     ):
         config[key] = _strict_bool(config, key)
 
@@ -787,6 +789,15 @@ def build_navigation_engine(config: Mapping[str, object]):
             }
             for mode in NavigationEngine.TRANSLATION_MODES
         }
+        if resolved["chassis_distance_control"]:
+            for mode, capability in translation_capabilities.items():
+                entry = raw_capabilities[mode]
+                counts_per_m = float(entry["counts_per_mm"]) * 1000.0
+                capability.update(
+                    enabled=entry["enabled"],
+                    min_m=float(resolved["chassis_min_counts"]) / counts_per_m,
+                    max_m=min(global_maximum, float(resolved["chassis_max_counts"]) / counts_per_m),
+                )
     else:
         translation_capabilities = {
             mode: {"enabled": True, "min_m": 0.0, "max_m": NavigationEngine.MAX_MOTION_SEGMENT_M}
