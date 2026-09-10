@@ -259,7 +259,7 @@ class HardwareSimulation:
         receiver_config = dict(config)
         receiver_config["min_range_m"] = minimum
         receiver_config["max_range_m"] = maximum
-        receiver_config["arbitrary_phase_scans"] = True
+        receiver_config["arbitrary_phase_scans"] = config.get("simulation_estimated_sweeps", True)
         self.receiver = DistanceObservationReceiver(receiver_config)
         self.time = 0.0
         self.resume_at = 0.0

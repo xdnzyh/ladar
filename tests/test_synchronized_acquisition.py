@@ -342,7 +342,7 @@ class AcquisitionTests(unittest.TestCase):
         self.assertTrue(a.stop_status['rotation']['confirmed'])
         self.assertEqual(endpoints[0].messages[-2:], ['STOP', 'LASER 0'])
 
-    def test_only_noise_or_no_return_still_times_out(self):
+    def test_over_range_is_valid_but_subsequent_silence_times_out(self):
         a, _, _ = self.running()
         session = a.session
         for timestamp in (0.5, 1.0, 1.5, 1.9):
@@ -352,7 +352,12 @@ class AcquisitionTests(unittest.TestCase):
             self.assertEqual(a.state, 'running')
         a.poll(2.1)
         self.assertEqual(a.state, 'running')
+        self.assertEqual(a.last_valid_range, 1.9)
+        a.poll(4.0)
+        self.assertEqual(a.state, 'running')
         a.poll(12.1)
+        self.assertEqual(a.state, 'running')
+        a.poll(14.1)
         self.assertEqual(a.state, 'stopped')
         self.assertGreater(a.sync_stats['measurement']['format_error'], 0)
 

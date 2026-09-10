@@ -96,13 +96,18 @@ RUNTIME_DEFAULTS = {
     "radar_period_s": 1.5,
     "fusion_delay_ms": 80,
     "map_resolution_m": 0.02,
-    "map_width_cells": 120,
-    "map_height_cells": 120,
+    "map_width_cells": 360,
+    "map_height_cells": 560,
     "radar_offset_x_m": 0.0,
     "radar_offset_y_m": 0.0,
     "radar_offset_yaw_deg": 0.0,
     "robot_radius_m": 0.15,
     "path_turn_penalty": 0.75,
+    "hardware_unobserved_clear_range_m": 1.0,
+    "simulation_unobserved_clear_range_m": 0.0,
+    "hardware_prefer_forward_exploration": True,
+    "simulation_prefer_forward_exploration": False,
+    "simulation_estimated_sweeps": True,
     "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
     "chassis_capability_mode": "unknown",
     "chassis_firmware_confirmed": False,
@@ -470,6 +475,8 @@ def resolve_runtime_config(
         "synchronized_acquisition", "clockwise", "chassis_firmware_confirmed",
         "chassis_speed_validated", "chassis_braking_validated", "chassis_raw_log_enabled",
         "chassis_result_recovery", "chassis_idle_preflight", "chassis_distance_control",
+        "hardware_prefer_forward_exploration", "simulation_prefer_forward_exploration",
+        "simulation_estimated_sweeps",
     ):
         config[key] = _strict_bool(config, key)
 
@@ -485,7 +492,7 @@ def resolve_runtime_config(
     config["max_range_m"] = config["hardware_max_range_m"]
 
     mode_defaults = {
-        "hardware": (120, 120, 0.02),
+        "hardware": (360, 560, 0.02),
         "simulation": (180, 280, 0.04),
     }
     mode_prefix = f"{source}_map_"
@@ -518,6 +525,7 @@ def resolve_runtime_config(
         "scan_gap_factor", "scan_gap_hard_limit_deg", "safety_max_angle_error_deg",
         "fusion_delay_ms", "sync_interval_s", "sync_max_age_s", "keepalive_interval_s",
         "display_preview_min_ratio",
+        "hardware_unobserved_clear_range_m", "simulation_unobserved_clear_range_m",
     ):
         _set_number(config, key, nonnegative=True)
     for key in ("min_range_m", "max_range_m", "hardware_min_range_m", "hardware_max_range_m"):
@@ -809,8 +817,8 @@ def build_navigation_engine(config: Mapping[str, object]):
         }
     return NavigationEngine(
         grid,
-        unobserved_clear_range_m=1.0 if resolved['runtime_source'] == 'hardware' else 0.0,
-        prefer_forward_exploration=resolved['runtime_source'] == 'hardware',
+        unobserved_clear_range_m=float(resolved[f"{resolved['runtime_source']}_unobserved_clear_range_m"]),
+        prefer_forward_exploration=resolved[f"{resolved['runtime_source']}_prefer_forward_exploration"],
         max_range_m=float(resolved["max_range_m"] if resolved["runtime_source"] == "hardware" else resolved["simulation_max_range_m"]),
         robot_radius_m=float(resolved["robot_radius_m"]),
         sensor_offset_x_m=float(resolved["radar_offset_x_m"]),

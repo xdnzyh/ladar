@@ -168,6 +168,8 @@ class OccupancyGrid:
         self._revision = 0
         self._known_count = 0
         self._observed_cells: set[tuple[int, int]] = set()
+        self.assumed_free_cells: set[tuple[int, int]] = set()
+        self._measured_free_cells: set[tuple[int, int]] = set()
         self._occupied_cache: tuple[int, list[tuple[int, int]]] | None = None
         self._inflated_cache: dict[tuple[int, float], set[tuple[int, int]]] = {}
         self._field_cache = {}
@@ -178,12 +180,29 @@ class OccupancyGrid:
         self._revision += 1
         self._known_count = 0
         self._observed_cells.clear()
+        self.assumed_free_cells.clear()
+        self._measured_free_cells.clear()
         self._occupied_cache = None
         self._inflated_cache.clear()
         self._field_cache.clear()
 
     def _index(self, col: int, row: int) -> int:
         return row * self.width + col
+
+    def clear_region(self, x: float, y: float, radius_m: float) -> None:
+        if not all(math.isfinite(v) for v in (x, y, radius_m)) or radius_m <= 0:
+            raise ValueError("局部修正范围无效")
+        center = self.world_to_cell(x, y)
+        radius = math.ceil(radius_m / self.resolution_m)
+        for row in range(max(0, center[1] - radius), min(self.height, center[1] + radius + 1)):
+            for col in range(max(0, center[0] - radius), min(self.width, center[0] + radius + 1)):
+                cell = col, row
+                if math.dist(self.cell_to_world(*cell), (x, y)) > radius_m:
+                    continue
+                self._add(*cell, -self.value(*cell))
+                self._observed_cells.discard(cell)
+                self.assumed_free_cells.discard(cell)
+                self._measured_free_cells.discard(cell)
 
     def in_bounds(self, col: int, row: int) -> bool:
         return 0 <= col < self.width and 0 <= row < self.height
@@ -292,6 +311,7 @@ class OccupancyGrid:
         start = self.world_to_cell(pose.x, pose.y)
         hits = {}
         frees = {}
+        measured_frees = set()
         out_of_bounds = 0
         valid_points = 0
         valid = [point for point in points
@@ -318,7 +338,8 @@ class OccupancyGrid:
                               right.evidence_weight(self.resolution_m))
                 for index in range(1, steps):
                     rays.append(ScanPoint(left.angle_rad + gap * index / steps,
-                                          distance, quality, False))
+                                          distance, quality, False,
+                                          source="assumed_open" if "assumed_open" in (left.source, right.source) else "free_space"))
         for point in rays:
             if (not math.isfinite(point.angle_rad) or not math.isfinite(point.quality)
                     or point.quality < self.MIN_QUALITY
@@ -339,6 +360,8 @@ class OccupancyGrid:
                 if add_only and self.state(*cell) == self.OCCUPIED:
                     break
                 frees[cell] = max(frees.get(cell, 0.0), evidence_weight)
+                if point.source != "assumed_open":
+                    measured_frees.add(cell)
             if has_hit:
                 hit_log_odds = 2.25 if wall_model else self.HIT_LOG_ODDS
                 hit_weight = evidence_weight
@@ -354,12 +377,22 @@ class OccupancyGrid:
         state_changed = set()
         for cell, weight in frees.items():
             if cell not in hits and not (add_only and self.value(*cell) > 0):
+                was_assumed = cell in self.assumed_free_cells
+                if cell in measured_frees:
+                    self._measured_free_cells.add(cell)
+                    self.assumed_free_cells.discard(cell)
+                elif cell not in self._measured_free_cells and self.in_bounds(*cell):
+                    self.assumed_free_cells.add(cell)
+                if was_assumed != (cell in self.assumed_free_cells):
+                    self._revision += 1
                 before = self.state(*cell)
                 if self._add(*cell, -self.FREE_LOG_ODDS * weight):
                     changed.add(cell)
                     if self.state(*cell) != before:
                         state_changed.add(cell)
         for cell, amount in hits.items():
+            self.assumed_free_cells.discard(cell)
+            self._measured_free_cells.discard(cell)
             before = self.state(*cell)
             if self._add(*cell, amount):
                 changed.add(cell)
@@ -1107,11 +1140,8 @@ class NavigationEngine:
                      obstacle_points: Sequence[ScanPoint] = (),
                      add_only: bool = False) -> VelocityCommand:
         self._last_scan_had_motion = self._motion_since_last_scan
-        self._motion_since_last_scan = False
         self._last_scan_had_diagonal_motion = self._diagonal_motion_since_last_scan
-        self._diagonal_motion_since_last_scan = False
         self._last_scan_had_translation = self._translation_since_last_scan
-        self._translation_since_last_scan = False
         if self.auto_enabled:
             self.mapping_attempts += 1
         valid = [
@@ -1140,8 +1170,8 @@ class NavigationEngine:
             self.detail = f"本圈只有 {len(valid)} 个有效点"
             return VelocityCommand()
 
-        self.completed_scans += 1
         if not self.auto_enabled:
+            self.completed_scans += 1
             self.state = "仅雷达"
             self.detail = f"已接收 {self.completed_scans} 圈"
             return VelocityCommand()
@@ -1200,6 +1230,10 @@ class NavigationEngine:
                 return self._reject_scan(score, match_result.rejection_reason or "本圈几何定位不充分，停车重扫")
             corrected = self._body_pose_from_sensor(corrected_sensor)
         self.last_match_result = match_result
+        self.completed_scans += 1
+        self._motion_since_last_scan = False
+        self._diagonal_motion_since_last_scan = False
+        self._translation_since_last_scan = False
         self.pose = corrected
         self.match_score = score
         self.match_failures = 0
@@ -1465,20 +1499,36 @@ class NavigationEngine:
             return False
         if self.match_score < 0.55 or len(self.latest_scan) < 12:
             return False
+        approach = next((point for point in reversed(self.trajectory)
+                         if math.dist(point, (self.pose.x, self.pose.y)) >= 0.15), None)
+        if approach is None:
+            return False
+        dx, dy = self.pose.world_to_local(*approach)
+        incoming = math.atan2(dx, dy)
+        observed = [point for point in self.latest_scan
+                    if point.source != "assumed_open"
+                    and math.isfinite(point.angle_rad) and math.isfinite(point.distance_m)
+                    and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
+                    and self.min_range_m <= point.distance_m <= self.max_range_m]
+        angles = sorted({point.angle_rad % math.tau for point in observed})
+        if len(angles) < 12 or max((b - a) % math.tau for a, b in zip(angles, angles[1:] + angles[:1])) > math.radians(45):
+            return False
         sectors = []
-        for center in (0.0, math.pi / 2, -math.pi / 2, math.pi):
-            distances = [
-                point.distance_m
-                for point in self.latest_scan
-                if abs(wrap_angle(point.angle_rad - center)) <= math.radians(35)
-            ]
-            if len(distances) < 2:
+        for offset in (math.pi, math.pi / 2, -math.pi / 2, 0.0):
+            center = incoming + offset
+            points = [point for point in observed
+                      if abs(wrap_angle(point.angle_rad + self.sensor_offset_yaw_rad - center)) <= math.radians(35)]
+            if len(points) < 2:
                 return False
-            sectors.append(min(distances))
+            if offset != 0.0 and any(not point.has_echo(self.max_range_m) for point in points):
+                return False
+            sectors.append(max(point.distance_m for point in points) if offset != 0.0
+                           else min(point.distance_m for point in points))
         front, right, left, rear = sectors
         close_side_count = sum(distance < 0.30 for distance in (front, right, left))
         open_limit = max(0.75, self.robot_radius_m + 0.45)
-        if close_side_count < 2 or rear < open_limit + 0.15:
+        if (close_side_count < 2 or rear < open_limit + 0.15
+                or any(distance >= open_limit for distance in (front, right, left))):
             return False
         signature = tuple(sectors)
         if self._terminal_signature is not None and max(
@@ -1902,6 +1952,10 @@ class NavigationEngine:
         blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02) if blocked is None else blocked
         cells = self._motion_cells(command)
         swept_cells = self._swept_body_cells(cells)
+        if any(not self.grid.in_bounds(*cell) for cell in swept_cells):
+            reason = "地图边界导致无路"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
         unknown = [cell for cell in swept_cells if self.grid.state(*cell) != self.grid.FREE]
         if unknown:
             reason = "动作扫过区域包含未知空间"

@@ -73,7 +73,8 @@ class NavigationModeSwitchTests(unittest.TestCase):
                 runtime.submit("session", 3, points, mode="navigation")
                 result = app.mapping_results.get(timeout=2)
                 self.assertIsNone(result.error)
-                self.assertGreater(result.snapshot.completed_scans, 0)
+                self.assertGreater(app.navigator.mapping_attempts, 0)
+                self.assertFalse(result.snapshot.scan_accepted)
                 self.assertGreater(result.snapshot.grid.known_area_m2(), 0)
                 self.assertTrue(app.navigator.auto_enabled)
         finally:
