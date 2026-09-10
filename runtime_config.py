@@ -92,7 +92,7 @@ RUNTIME_DEFAULTS = {
     "hardware_max_range_m": 1.00,
     "display_radius_m": 1.10,
     "angle_offset_deg": 0.0,
-    "clockwise": True,
+    "clockwise": False,
     "radar_period_s": 1.5,
     "fusion_delay_ms": 80,
     "map_resolution_m": 0.02,

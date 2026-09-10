@@ -97,6 +97,8 @@ class ContinuousSyncTests(unittest.TestCase):
         acquisition, endpoints, output = self.running()
         acquisition.last_arrival = {source: 9 for source in endpoints}
         acquisition.poll(9)
+        self.assertEqual(acquisition.state, "running")
+        acquisition.poll(19)
         self.assertEqual(acquisition.state, "stopped")
         self.assertTrue(any(kind == "sync_error" and "校时超时" in value for kind, value, _ in output))
 

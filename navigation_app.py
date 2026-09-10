@@ -474,7 +474,7 @@ class NavigationApp:
         self.rotation_parser = MotorLineParser()
         self.rotation = RotationTracker(
             angle_offset_deg=float(self.config.get("angle_offset_deg", 0.0)),
-            clockwise=bool(self.config.get("clockwise", True)),
+            clockwise=bool(self.config.get("clockwise", False)),
             initial_period_s=float(self.config.get("radar_period_s", 1.5)),
             keep_revolutions=1,
         )
@@ -1767,6 +1767,8 @@ class NavigationApp:
             self._log(str(value))
             starting = self.sync.state in {"starting_measurement", "starting_rotation"}
             label = "校时中" if self.sync.state == "syncing" else ("设备启动中" if starting else "同步采集中")
+            if getattr(self.sync, "recovery_started_at", None) is not None:
+                label = "超时恢复中（保持旋转）"
             self.connection_label.configure(text="●  " + label, fg=COLORS["cyan"])
             if str(value) != "完整扫描":
                 self.navigator.state = label if starting or self.sync.state == "syncing" else "等待有效扫描"

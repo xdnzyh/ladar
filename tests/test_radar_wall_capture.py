@@ -14,7 +14,8 @@ class CapturedWallScanTests(unittest.TestCase):
         start, start_error, count = fixture['start']
         end, end_error, next_count = fixture['end']
         points = [PolarPoint(**p) for p in fixture['points']]
-        builder = TimedSweepBuilder({'runtime_source': 'hardware', 'runtime_view': view, 'min_scan_points': 40})
+        # This historical capture was recorded with clockwise rotation.
+        builder = TimedSweepBuilder({'clockwise': True, 'runtime_source': 'hardware', 'runtime_view': view, 'min_scan_points': 40})
         builder.trigger(start - (end-start), start_error * uncertainty_scale, count-1)
         builder.trigger(start, start_error * uncertainty_scale, count)
         for p in points:

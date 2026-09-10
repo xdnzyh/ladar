@@ -51,7 +51,7 @@ class RobustSweepTests(unittest.TestCase):
         self.assertEqual(len(points), 30)
         self.assertAlmostEqual(builder.period_s, 1.53)
         for n, point in enumerate(points):
-            self.assertAlmostEqual(point.angle_rad, math.tau * (n + 0.5) / 30)
+            self.assertAlmostEqual(point.angle_rad, (-math.tau * (n + 0.5) / 30) % math.tau)
 
     def test_hard_gap_cap_rejects_sparse_large_hole(self):
         builder = self.builder(scan_gap_factor=10)

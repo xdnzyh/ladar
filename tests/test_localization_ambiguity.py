@@ -38,3 +38,29 @@ class LocalizationAmbiguityTests(unittest.TestCase):
             navigator.process_scan(points)
         self.assertEqual(navigator.rejected_scans, 0, navigator.detail)
         self.assertEqual(grid.update_count, before + 3)
+
+    def test_parallel_corridor_still_reports_unconstrained_axis(self):
+        grid = OccupancyGrid(180, 180, 0.04)
+        points = [ScanPoint(math.atan2(x, y), math.hypot(x, y), is_echo=True)
+                  for x in (-0.6, 0.6) for y in (i * 0.04 for i in range(-60, 61))]
+        for _ in range(4):
+            grid.update_scan(Pose2D(), points, 3)
+        result = CorrelativeScanMatcher().match(grid, Pose2D(0, 0.1), points)
+        self.assertGreater(result.data_score, 0.75)
+        self.assertTrue(result.degenerate)
+
+    def test_insufficient_map_evidence_is_not_accepted(self):
+        _, _, predicted, points = self.fixture()
+        result = CorrelativeScanMatcher().match(OccupancyGrid(), predicted, points)
+        self.assertLess(result.data_score, NavigationEngine.MAP_UPDATE_MIN_CONFIDENCE)
+
+    def test_two_separate_matching_locations_remain_ambiguous(self):
+        grid = OccupancyGrid(160, 160, 0.02)
+        points = [ScanPoint(i * math.tau / 24, 0.7 + 0.12 * math.sin(i * 1.7), is_echo=True)
+                  for i in range(24)]
+        for shift in (-0.15, 0.15):
+            for point in points:
+                grid._add(*grid.world_to_cell(point.x + shift, point.y), 10)
+        result = CorrelativeScanMatcher().match(grid, Pose2D(), points)
+        self.assertGreater(result.data_score, 0.75)
+        self.assertTrue(result.degenerate)

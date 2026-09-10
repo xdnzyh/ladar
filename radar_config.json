@@ -18,7 +18,7 @@
   "hardware_min_range_m": 0.15,
   "hardware_max_range_m": 1.0,
   "angle_offset_deg": 0.0,
-  "clockwise": true,
+  "clockwise": false,
   "keep_revolutions": 2,
   "initial_period_s": 2.5,
   "calibration": {

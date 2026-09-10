@@ -55,7 +55,7 @@ class EstimatedSweepTests(unittest.TestCase):
         _, points, period = builder.poll(6.25)
         self.assertEqual(len(points), 30)
         self.assertAlmostEqual(period, 1.5)
-        self.assertAlmostEqual(points[0].angle_rad, math.pi / 3)
+        self.assertAlmostEqual(points[0].angle_rad, 5 * math.pi / 3)
 
     def test_waiting_discards_ranges_but_preserves_period_history(self):
         builder = self.builder()

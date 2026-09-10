@@ -295,7 +295,7 @@ class HardwareSimulation:
             for packet in self.rotation.step(self.time, dt):
                 self.link.send(packet, self.time)
             if self.time >= self.sensor.next_sample - 1e-10:
-                direction = 1 if self.config.get("clockwise", True) else -1
+                direction = 1 if self.config.get("clockwise", False) else -1
                 packet = self.sensor.sample(self.time, self._world, direction * self.rotation.angle)
                 self.link.send(packet, self.time)
             moving = self.time < self.resume_at

@@ -134,7 +134,7 @@ class TimedSweepBuilder:
         # Display is deliberately independent from mapping confidence.  Once a
         # revolution is bounded by two consecutive real TRIG events, every
         # finite range sample in that physical revolution remains visible.
-        direction = 1 if self.config.get("clockwise", True) else -1
+        direction = 1 if self.config.get("clockwise", False) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         display_lower_period = period - start_error - uncertainty
         display_points = []
@@ -355,7 +355,7 @@ class EstimatedSweepBuilder:
         self.window = None
         self.sequence += 1
         points = []
-        direction = 1 if self.config.get("clockwise", True) else -1
+        direction = 1 if self.config.get("clockwise", False) else -1
         offset = math.radians(float(self.config.get("angle_offset_deg", 0)))
         error_limit = max(
             float(self.config.get("max_timing_position_error_m", 0.04)),
@@ -519,7 +519,7 @@ class DistanceObservationReceiver:
         age = packet.device_timestamp - anchor[0]
         if not 0 <= age <= period * 1.5:
             return None
-        direction = 1 if self.config.get("clockwise", True) else -1
+        direction = 1 if self.config.get("clockwise", False) else -1
         angle = math.radians(float(self.config.get("angle_offset_deg", 0))) + direction * math.tau * age / period
         error = math.tau * ((packet.uncertainty + anchor[1]) / period
                            + abs(age / period) * (max(periods) - min(periods)) / period)

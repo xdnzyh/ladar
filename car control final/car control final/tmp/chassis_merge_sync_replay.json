@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "source_type": "offline_replay",
+  "input": "tests\\fixtures\\sync_replay.jsonl",
+  "config": "navigation_config.json",
+  "config_fingerprint": "f43451947c2c6584",
+  "session": "replay",
+  "fixture_header": {
+    "record_type": "header",
+    "schema_version": "1.0",
+    "source_type": "offline_replay_fixture",
+    "session": "replay",
+    "description": "deterministic dual-source timing replay"
+  },
+  "clock_models": {
+    "measurement": [
+      {
+        "offset": 0.0,
+        "uncertainty": 0.0001,
+        "observed_at": 0.0,
+        "drift_ppm": 500.0,
+        "version": 0
+      }
+    ],
+    "rotation": [
+      {
+        "offset": 0.0,
+        "uncertainty": 0.0001,
+        "observed_at": 0.0,
+        "drift_ppm": 500.0,
+        "version": 0
+      }
+    ]
+  },
+  "records": 76,
+  "parse_errors": [],
+  "formal_scans": 1,
+  "local_scans": 2,
+  "mapping_scans": 2,
+  "formal_points": 24,
+  "formal_echo_points": 24,
+  "formal_echo_rate": 1.0,
+  "mapped_points": 48,
+  "accepted_mapping_points": 48,
+  "mapping_point_rejection_rate": 0.0,
+  "map_updates": 2,
+  "known_area_m2": 0.1456,
+  "accepted_counter": 1,
+  "warmup_counter": 2,
+  "discarded_counter": 0,
+  "late_packets": 0,
+  "duplicate_packets": 0,
+  "pending_depth_peak": 7,
+  "builder_rejected_points": 0,
+  "diagnostics": [],
+  "elapsed_ms": 5.685000003722962
+}

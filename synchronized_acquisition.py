@@ -16,6 +16,7 @@ SYNC_REQUIRED_EXCHANGES = 8
 SYNC_MAX_ATTEMPTS = 16
 SYNC_RESPONSE_TIMEOUT_S = 1.0
 SYNC_TOTAL_TIMEOUT_S = 20.0
+RECOVERY_TIMEOUT_S = 10.0
 SYNC_FATAL_ERRORS = {
     "CCD_TIMEOUT",
     "EXPOSURE_WRITE",
@@ -83,6 +84,8 @@ class SynchronizedAcquisition:
         self.receiver = DistanceObservationReceiver(config)
         self.builder = self.receiver.builder
         self.state = "stopped"
+        self.recovery_started_at = None
+        self.recovery_reasons = []
         self.session = ""
         self.generation = 0
         self.sync_started_at = -math.inf
@@ -121,6 +124,8 @@ class SynchronizedAcquisition:
         self.generation += 1
         self.session = secrets.token_hex(6)
         self.state = "syncing"
+        self.recovery_started_at = None
+        self.recovery_reasons = []
         self.started_at = now
         self.sync_started_at = now
         self.receiver = DistanceObservationReceiver(self.config)
@@ -162,6 +167,8 @@ class SynchronizedAcquisition:
         self._drain_incoming()
         self.generation += 1
         self.state = "stopped"
+        self.recovery_started_at = None
+        self.recovery_reasons = []
         self.session = ""
         self.pending.clear()
         self.receiver.reset(math.inf)
@@ -253,6 +260,9 @@ class SynchronizedAcquisition:
              f"{self.receiver.discarded}/{self.receiver.warmup} ｜ 时间异常 测距{measurement_time_bad} "
              f"零位{rotation_time_bad} ｜ 旋转忽略 {rotation_ignored}"),
         ]
+        if self.recovery_started_at is not None:
+            remaining = max(0.0, RECOVERY_TIMEOUT_S - (now - self.recovery_started_at))
+            lines.insert(0, f"超时恢复中：{'、'.join(self.recovery_reasons)}；保持旋转并重试校时，剩余 {remaining:.1f} 秒")
         if last_failure and last_failure != current:
             lines.append(f"最近失败：{last_failure}")
         quality = getattr(self.builder, "last_quality_counts", {})
@@ -406,10 +416,13 @@ class SynchronizedAcquisition:
             self._running_sync_poll(now)
             if self.state != "running":
                 return
+            self._check_runtime_timeout(now)
+            if self.state != "running":
+                return
             poll_result = self.receiver.poll(now)
-            for sequence, points, period in poll_result.formal_scans:
+            for sequence, points, period in (poll_result.formal_scans if self.recovery_started_at is None else ()):
                 self.emit("sync_sweep", (self.session, sequence, points, period), points[-1].timestamp)
-            for sequence, points, period in poll_result.local_scans:
+            for sequence, points, period in (poll_result.local_scans if self.recovery_started_at is None else ()):
                 if points:
                     self.emit("sync_local_sweep", (self.session, sequence, points, period), points[-1].timestamp)
             for diagnostic in poll_result.diagnostics:
@@ -417,14 +430,31 @@ class SynchronizedAcquisition:
             if self.builder.period_s is not None:
                 self.emit("sync_period", (self.session, self.builder.period_s), now)
             self._publish_runtime_status(now)
-            missing = []
-            if now - self.last_arrival["measurement"] > 2:
-                missing.append(self._endpoint_label("measurement"))
-            if now - self.last_arrival["rotation"] > 10:
-                missing.append(self._endpoint_label("rotation"))
-            if len(self.pending) > 10000 or missing:
-                detail = "、".join(missing) if missing else "观测队列"
-                self._fail(f"采集失败：{detail}有效数据中断，请检查光电开关、CCD 和无线链路")
+            if len(self.pending) > 10000:
+                self._fail("采集失败：观测队列过载")
+
+    def _check_runtime_timeout(self, now):
+        reasons = []
+        for source, timeout in (("measurement", 2), ("rotation", 10)):
+            if now - self.last_arrival[source] > timeout:
+                reasons.append(f"{self._endpoint_label(source)}有效数据中断")
+            if now - self.clocks[source].observed_at > float(self.config.get("sync_max_age_s", 8)):
+                reasons.append(f"{self._endpoint_label(source)}持续校时超时")
+        self.recovery_reasons = reasons
+        if not reasons:
+            if self.recovery_started_at is not None:
+                self.recovery_started_at = None
+                self.receiver.invalidate("数据与校时已恢复，等待新的真实零位重新校准")
+                self._last_runtime_signature = None
+                self._diagnostic("超时恢复成功，继续旋转并重新建立完整扫描", force=True, timestamp=now)
+            return
+        if self.recovery_started_at is None:
+            self.recovery_started_at = now
+            self.receiver.invalidate("数据超时，保持旋转并尝试重新校准")
+            self._last_runtime_signature = None
+            self._diagnostic("进入 10 秒超时恢复窗口：" + "、".join(reasons), force=True, timestamp=now)
+        if now >= self.recovery_started_at + RECOVERY_TIMEOUT_S:
+            self._fail("采集已暂停：超时后持续尝试恢复 10 秒仍未恢复；" + "、".join(reasons))
 
     def _running_sync_poll(self, now):
         if now - self.last_keepalive >= float(self.config.get("keepalive_interval_s", 5)):
@@ -434,9 +464,6 @@ class SynchronizedAcquisition:
                     return
             self.last_keepalive = now
         for source, endpoint in self.endpoints.items():
-            if now - self.clocks[source].observed_at > float(self.config.get("sync_max_age_s", 8)):
-                self._fail(f"采集失败：{self._endpoint_label(source)}持续校时超时，停止采集与运动")
-                return
             if source in self.outstanding:
                 token, queued_at = self.outstanding[source]
                 if now - queued_at < SYNC_RESPONSE_TIMEOUT_S:
@@ -691,6 +718,9 @@ class SynchronizedAcquisition:
                 return
         if previous is None or raw.sequence > previous[0]:
             self.raw_progress[source] = raw.sequence, raw.timestamp_us
+        if arrival - self.clocks[source].observed_at > float(self.config.get("sync_max_age_s", 8)):
+            self._record_ignored(source, line, "等待重新校时", arrival)
+            return
         packet = raw.normalize(self.clocks[source], arrival)
         is_new_progress = previous is None or raw.sequence > previous[0]
         accepted = self.receiver.feed(ReceivedObservation(packet, arrival))

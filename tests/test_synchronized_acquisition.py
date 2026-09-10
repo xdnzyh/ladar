@@ -281,6 +281,8 @@ class AcquisitionTests(unittest.TestCase):
         a.poll(1)
         self.assertEqual(a.state, 'running')
         a.poll(2.1)
+        self.assertEqual(a.state, 'running')
+        a.poll(12.1)
         self.assertEqual(a.state, 'stopped')
         self.assertTrue(any(item[0] == 'sync_error' for item in output))
 
@@ -349,6 +351,8 @@ class AcquisitionTests(unittest.TestCase):
             a.poll(timestamp)
             self.assertEqual(a.state, 'running')
         a.poll(2.1)
+        self.assertEqual(a.state, 'running')
+        a.poll(12.1)
         self.assertEqual(a.state, 'stopped')
         self.assertGreater(a.sync_stats['measurement']['format_error'], 0)
 
@@ -421,7 +425,7 @@ class AcquisitionTests(unittest.TestCase):
         for _, sequence, points, period in sweeps:
             self.assertAlmostEqual(period, 2)
             for point in points:
-                expected = math.tau * ((point.timestamp - 1) % 2) / 2
+                expected = (-math.tau * ((point.timestamp - 1) % 2) / 2) % math.tau
                 self.assertAlmostEqual(point.angle_rad, expected, places=6)
 
 

@@ -1,0 +1,21 @@
+{
+  "purpose": "Unmodified pre-CONFIG1 firmware for matched live comparison",
+  "files": [
+    {
+      "file": "control.ino",
+      "sha256": "d0da4d2ff6bc3c1207f75d60019c63cb04bbab5d6d24d46f293f776bdf0335ef"
+    },
+    {
+      "file": "utils.cpp",
+      "sha256": "0444d64310e94fa45ab8c8b79b7ccc82eb642cbebc9abd615ad642ad9dd04fa2"
+    },
+    {
+      "file": "utils.h",
+      "sha256": "3bde01b1b1393fd7c17d0c31b3a79a6ff86558e781d47d5e1fb7030828d2be0a"
+    },
+    {
+      "file": "calibration.h",
+      "sha256": "b709710dc92eb860fd8a546f10964406838e44391d57712853e60b3b52c09c58"
+    }
+  ]
+}

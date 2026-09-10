@@ -1,0 +1,31 @@
+[
+  {
+    "path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\主线指令发送器\\logs\\20260910_144537_302_rx.bin",
+    "bytes": 257,
+    "sha256": "b4f86fd3d013982bdb502082e1b016029b65e7ebcfe6da663ecc3a91ee9b264d",
+    "done": [
+      {
+        "raw": "@DONE,W,TARGET,REQ=718,UNIT=CNT,BRAKE=634.50,ENC=739.25,DX=739.25,DY=-4.25,DR=-1.25,DS=-3.25,Q1=733,Q2=739,Q3=737,Q4=748",
+        "kinematics_ok": true
+      }
+    ]
+  },
+  {
+    "path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\主线指令发送器\\logs\\20260910_143501_897_rx.bin",
+    "bytes": 131,
+    "sha256": "46c84ffd5a04f985ebf552a60d067bb97bc55e71472362f8b0dca9006a67c663",
+    "done": []
+  },
+  {
+    "path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\ladar-main\\control\\参数工具\\logs\\20260910_131555_656_config_rx.bin",
+    "bytes": 1923,
+    "sha256": "da2b3cfce2c1a54a02e91d9ada80a95b78495d0cddce722d078dd56a7e4cd8e6",
+    "done": []
+  },
+  {
+    "path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\ladar-main\\control\\参数工具\\logs\\20260910_132357_232_config_rx.bin",
+    "bytes": 1472,
+    "sha256": "c669a31fec1572d6743ccc93802927fc378ca7d439f2e8931db5dcc4f5c240d8",
+    "done": []
+  }
+]

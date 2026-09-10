@@ -1,0 +1,30 @@
+{
+  "measurement_port": "",
+  "motor_port": "",
+  "baudrate": 115200,
+  "ccd_command": "@c0071#@",
+  "ccd_parser": "fffe",
+  "exposure_index": 5,
+  "actual_exposure_index": 5,
+  "calibration_firmware_version": "CCD-PEAK-RAW-CAL-3.0",
+  "measurement_firmware_version": "MEASUREMENT_SYNC_CAL_V3",
+  "calibration_model": "table",
+  "calibration_file": "CCD_Distance_App_v1_2/calibration.csv",
+  "pixel_min": 0,
+  "pixel_max": 1500,
+  "sample_rate_hz": 100.0,
+  "min_range_m": 0.15,
+  "max_range_m": 1.0,
+  "hardware_min_range_m": 0.15,
+  "hardware_max_range_m": 1.0,
+  "angle_offset_deg": 0.0,
+  "clockwise": true,
+  "keep_revolutions": 2,
+  "initial_period_s": 2.5,
+  "calibration": {
+    "p0": null,
+    "k": null,
+    "rmse": null,
+    "points": []
+  }
+}

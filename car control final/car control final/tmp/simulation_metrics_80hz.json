@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "source_type": "synthetic_simulation",
+  "summary": {
+    "IDEAL": {
+      "runs": 1,
+      "success_rate": 0.0,
+      "pose_rmse_m_mean": 0.0,
+      "mapping_rejection_rate_mean": 0.0
+    }
+  },
+  "runs": [
+    {
+      "schema_version": "1.0",
+      "source_type": "synthetic_simulation",
+      "config_fingerprint": "337086887cdca5d1",
+      "profile": "IDEAL",
+      "seed": 20260907,
+      "runtime": {
+        "seconds": 10.0,
+        "map_width_cells": 180,
+        "map_height_cells": 180,
+        "map_resolution_m": 0.04,
+        "min_range_m": 0.08,
+        "max_range_m": 3.0
+      },
+      "reached_goal": false,
+      "goal_error_m": 4.503343646669681,
+      "pose_rmse_m": 0.0,
+      "yaw_rmse_deg": 0.0,
+      "known_cell_map_error_rate": 0.037965072133637055,
+      "known_cells": 1317,
+      "known_area_m2": 2.1072,
+      "map_coverage": 0.04064814814814815,
+      "target_changes": 1,
+      "mapping_attempts": 3,
+      "mapping_rejected_scans": 0,
+      "mapping_rejection_rate": 0.0,
+      "mapping_rejection_reasons": {},
+      "map_updates": 3,
+      "input_points": 360,
+      "accepted_points": 360,
+      "point_rejection_rate": 0.0,
+      "local_scans": 4,
+      "motion_scan_skipped": 0,
+      "safety_stops": 0,
+      "degenerate_matches": 0,
+      "boundary_matches": 2,
+      "timing_ms": {
+        "simulation_mean": 11.789506999980404,
+        "simulation_p50": 10.814399999617308,
+        "simulation_p95": 16.38797499940665,
+        "mapping_mean": 48.28203333333173,
+        "mapping_p50": 40.00700000051438,
+        "mapping_p95": 88.36156999968807
+      },
+      "simulation_time_s": 10.0,
+      "accepted_scans": 3,
+      "warmup_scans": 2,
+      "discarded_scans": 0,
+      "scan_discard_rate": 0.0,
+      "late_packets": 0,
+      "duplicate_packets": 0,
+      "dropped_packets": 0,
+      "collisions": 0,
+      "pending_depth_peak": 26
+    }
+  ]
+}

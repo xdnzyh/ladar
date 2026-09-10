@@ -1,0 +1,37 @@
+{
+  "hashes": [
+    {
+      "Algorithm": "SHA256",
+      "Hash": "C03322787595D0564A2757EACE5F05B183B9B044EC8D685A1B964C42291F7840",
+      "Path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\ladar-main\\control\\control.ino"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BD8CBAB1444020F28EEB4BCDAADDFFD189A143ADA86894A60D8F1ED0DCCE3B30",
+      "Path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\ladar-main\\control\\motion_result.h"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "58BDED5AEAA29491C764516A72BA7457E3C10CC28E2D14E6317705E3282A880C",
+      "Path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\ladar-main\\control\\参数工具\\底盘参数工具_CONFIG1.exe"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "4CC305DC4FAE2664FBC610127B7A7DC2F8C27A8CCF26D59435D638E5875347BC",
+      "Path": "C:\\Users\\yuanq\\Desktop\\作业\\精仪认知实践\\挑战实验-小车的运动控制\\主线指令发送器\\主线指令发送器_0910.exe"
+    }
+  ],
+  "hardware": "Not flashed or driven; physical latency pending new field log",
+  "date": "2026-09-10",
+  "csharp_new_groups_passed": 15,
+  "formal_exe_tests": "Both --test passed; no serial port opened",
+  "feature": "IDLE_PREFLIGHT=1",
+  "csharp_new_groups": 15,
+  "python_tests": {
+    "skipped": 9,
+    "total": 314,
+    "passed": 305,
+    "failed": 0,
+    "new_idle_tests": 19
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "build": ".tmp_review/car_result_build",
+  "mode": "Q",
+  "value": "1200",
+  "unit": "CNT",
+  "preflight": "result",
+  "complete": true,
+  "done": "@RESULT,1234ABCD,Q,0,1200,CNT,1161.00,1161.00,1161,0,1161,0,433A\r\n",
+  "queries": [
+    {
+      "cmd": "@RESULT,1234ABCD,8CE5",
+      "response": "@RESULT,1234ABCD,Q,0,1200,CNT,1161.00,1161.00,1161,0,1161,0,433A\r\n"
+    },
+    {
+      "cmd": "@RESULT,1234ABCD,8CE5",
+      "response": "@RESULT,1234ABCD,Q,0,1200,CNT,1161.00,1161.00,1161,0,1161,0,433A\r\n"
+    },
+    {
+      "cmd": "@MOVE,Q,1200,CNT,1234ABCD,DF08",
+      "response": "@RESULT,1234ABCD,Q,0,1200,CNT,1161.00,1161.00,1161,0,1161,0,433A\r\n"
+    },
+    {
+      "cmd": "@RESULT,DEADBEEF,AE80",
+      "response": "@RESULT,DEADBEEF,N,4578\r\n"
+    },
+    {
+      "cmd": "G",
+      "response": "FULL RESET\r\nFREE_RAM=303\r\n"
+    },
+    {
+      "cmd": "@RESULT,1234ABCD,8CE5",
+      "response": "@RESULT,1234ABCD,N,19FF\r\n"
+    }
+  ],
+  "motorStarts": 1,
+  "minimumStackGapBytes": 207,
+  "minimumByPhase": {
+    "boot": 372,
+    "ping": 284,
+    "move": 246,
+    "query": 207
+  },
+  "running": 0,
+  "prescribedEncoderEdges": 1161,
+  "elapsedMs": 3511.2408125
+}

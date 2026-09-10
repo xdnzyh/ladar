@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     "max_range_m": 1.0,
     "min_range_m": 0.15,
     "angle_offset_deg": 0.0,
-    "clockwise": True,
+    "clockwise": False,
     "keep_revolutions": 3,
     "initial_period_s": 2.5,
     "calibration": {"p0": None, "k": None, "rmse": None, "points": []},
@@ -272,7 +272,7 @@ class RadarApp:
             self.calibration = CalibrationModel(p0=740.0, k=120.0, points=[(860, 1.0), (800, 2.0)], rmse=0.0)
         self.rotation = RotationTracker(
             angle_offset_deg=float(self.config.get("angle_offset_deg", 0.0)),
-            clockwise=bool(self.config.get("clockwise", True)),
+            clockwise=bool(self.config.get("clockwise", False)),
             initial_period_s=float(self.config.get("initial_period_s", 2.5)),
             keep_revolutions=int(self.config.get("keep_revolutions", 3)),
         )
@@ -545,7 +545,7 @@ class RadarApp:
         self.min_range_var.set(float(self.config.get("min_range_m", 0.08)))
         self.max_range_var.set(float(self.config.get("max_range_m", 3.0)))
         self.angle_offset_var.set(float(self.config.get("angle_offset_deg", 0.0)))
-        self.clockwise_var.set(bool(self.config.get("clockwise", True)))
+        self.clockwise_var.set(bool(self.config.get("clockwise", False)))
         self.keep_revolutions_var.set(int(self.config.get("keep_revolutions", 3)))
 
     def _collect_config(self) -> dict:

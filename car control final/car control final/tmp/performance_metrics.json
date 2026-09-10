@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "source_type": "synthetic_benchmark_fixture",
+  "fixture": "tests\\fixtures\\mapping_replay.jsonl",
+  "config": "navigation_config.json",
+  "config_fingerprint": "337086887cdca5d1",
+  "b1": {
+    "definition": "每次匹配前清空距离场与障碍缓存的 B1 参考路径",
+    "measured": {
+      "repeat": 5,
+      "scans": 30,
+      "mean_ms_per_scan": 31.340409999878222,
+      "p50_ms_per_scan": 31.353800000033516,
+      "p95_ms_per_scan": 33.74024500035375,
+      "total_ms": 940.2122999963467,
+      "match_runs": 30
+    }
+  },
+  "optimized": {
+    "definition": "复用固定地图上的距离场与障碍缓存的当前路径",
+    "measured": {
+      "repeat": 5,
+      "scans": 30,
+      "mean_ms_per_scan": 7.550416666526871,
+      "p50_ms_per_scan": 2.6226999998471,
+      "p95_ms_per_scan": 32.201269999859505,
+      "total_ms": 226.51249999580614,
+      "match_runs": 30
+    }
+  },
+  "comparison": {
+    "speedup": 4.150818608305301,
+    "baseline_mean_ms": 31.340409999878222,
+    "optimized_mean_ms": 7.550416666526871,
+    "evidence_scope": "固定合成回放；不是硬件吞吐承诺"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "build": ".tmp_review/car_result_build",
+  "mode": "W",
+  "value": "718",
+  "unit": "CNT",
+  "preflight": "",
+  "complete": true,
+  "done": "@DONE,W,TARGET,REQ=718,UNIT=CNT,BRAKE=641.00,ENC=641.00,DX=641.00,DY=0.00,DR=0.00,DS=0.00,Q1=641,Q2=641,Q3=641,Q4=641\r\n",
+  "queries": [],
+  "motorStarts": 1,
+  "minimumStackGapBytes": 246,
+  "minimumByPhase": {
+    "boot": 372,
+    "ping": 284,
+    "move": 246
+  },
+  "running": 0,
+  "prescribedEncoderEdges": 641,
+  "elapsedMs": 939.2825
+}

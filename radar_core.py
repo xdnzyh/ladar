@@ -447,7 +447,7 @@ class RotationTracker:
     def __init__(
         self,
         angle_offset_deg: float = 0.0,
-        clockwise: bool = True,
+        clockwise: bool = False,
         initial_period_s: float = 2.5,
         keep_revolutions: int = 3,
     ) -> None:

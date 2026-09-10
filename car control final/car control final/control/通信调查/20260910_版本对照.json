@@ -1,0 +1,173 @@
+{
+  "date": "2026-09-10",
+  "kind": "offline_firmware_and_receiver_audit",
+  "simulator": {
+    "name": "avr8js",
+    "version": "0.21.1",
+    "url": "https://registry.npmjs.org/avr8js/-/avr8js-0.21.1.tgz"
+  },
+  "source_sha256": {
+    "old": "d0da4d2ff6bc3c1207f75d60019c63cb04bbab5d6d24d46f293f776bdf0335ef",
+    "current": "a944f474e554c8ccb1bf1cbde06d3832a41af0d2b15454bcbb72fe244644e7f3"
+  },
+  "limitations": [
+    "Ideal UART and acknowledged TWI; no radio or electrical noise modeled.",
+    "Encoder edges prescribed at 2000/s per active wheel, not a motor dynamics model.",
+    "Minimum stack gap applies only to the exercised paths, not all configurations."
+  ],
+  "avr_runs": [
+    {
+      "build": ".tmp_review/car_avr_audit/old/build",
+      "mode": "W",
+      "value": "718",
+      "unit": "CNT",
+      "complete": true,
+      "done": "@DONE,W,TARGET,REQ=718,UNIT=CNT,BRAKE=648.00,ENC=648.00,DX=648.00,DY=0.00,DR=0.00,DS=0.00,Q1=648,Q2=648,Q3=648,Q4=648\r\n",
+      "minimumStackGapBytes": 757,
+      "running": 0,
+      "prescribedEncoderEdges": 648,
+      "elapsedMs": 943.276125
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/current/build",
+      "mode": "W",
+      "value": "718",
+      "unit": "CNT",
+      "complete": true,
+      "done": "@DONE,W,TARGET,REQ=718,UNIT=CNT,BRAKE=641.00,ENC=641.00,DX=641.00,DY=0.00,DR=0.00,DS=0.00,Q1=641,Q2=641,Q3=641,Q4=641\r\n",
+      "minimumStackGapBytes": 207,
+      "running": 0,
+      "prescribedEncoderEdges": 641,
+      "elapsedMs": 939.348375
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/current/build",
+      "mode": "W",
+      "value": "718",
+      "unit": "CNT",
+      "preflight": "read",
+      "complete": true,
+      "done": "@DONE,W,TARGET,REQ=718,UNIT=CNT,BRAKE=640.00,ENC=640.00,DX=640.00,DY=0.00,DR=0.00,DS=0.00,Q1=640,Q2=640,Q3=640,Q4=640\r\n",
+      "minimumStackGapBytes": 207,
+      "minimumByPhase": {
+        "boot": 397,
+        "read": 207,
+        "ping": 207,
+        "move": 207
+      },
+      "running": 0,
+      "prescribedEncoderEdges": 640,
+      "elapsedMs": 939.1833125
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/old/build",
+      "mode": "D",
+      "value": "100",
+      "unit": "MM",
+      "preflight": "",
+      "complete": true,
+      "done": "@DONE,D,TARGET,REQ=100,UNIT=MM,TARGET_CNT=739,BRAKE=690.00,ENC=690.00,DX=0.00,DY=-690.00,DR=0.00,DS=0.00,Q1=-690,Q2=690,Q3=-690,Q4=690\r\n",
+      "minimumStackGapBytes": 749,
+      "minimumByPhase": {
+        "boot": 809,
+        "ping": 854,
+        "move": 749
+      },
+      "running": 0,
+      "prescribedEncoderEdges": 690,
+      "elapsedMs": 979.4940625
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/old/build",
+      "mode": "D",
+      "value": "739",
+      "unit": "CNT",
+      "preflight": "",
+      "complete": true,
+      "done": "@DONE,D,TARGET,REQ=739,UNIT=CNT,BRAKE=689.00,ENC=689.00,DX=0.00,DY=-689.00,DR=0.00,DS=0.00,Q1=-689,Q2=689,Q3=-689,Q4=689\r\n",
+      "minimumStackGapBytes": 749,
+      "minimumByPhase": {
+        "boot": 809,
+        "ping": 854,
+        "move": 749
+      },
+      "running": 0,
+      "prescribedEncoderEdges": 689,
+      "elapsedMs": 966.9263125
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/current/build",
+      "mode": "D",
+      "value": "100",
+      "unit": "MM",
+      "preflight": "",
+      "complete": true,
+      "done": "@DONE,D,TARGET,REQ=100,UNIT=MM,TARGET_CNT=739,BRAKE=681.00,ENC=681.00,DX=0.00,DY=-681.00,DR=0.00,DS=0.00,Q1=-681,Q2=681,Q3=-681,Q4=681\r\n",
+      "minimumStackGapBytes": 207,
+      "minimumByPhase": {
+        "boot": 397,
+        "ping": 207,
+        "move": 207
+      },
+      "running": 0,
+      "prescribedEncoderEdges": 681,
+      "elapsedMs": 975.5495
+    },
+    {
+      "build": ".tmp_review/car_avr_audit/current/build",
+      "mode": "D",
+      "value": "739",
+      "unit": "CNT",
+      "preflight": "",
+      "complete": true,
+      "done": "@DONE,D,TARGET,REQ=739,UNIT=CNT,BRAKE=681.00,ENC=681.00,DX=0.00,DY=-681.00,DR=0.00,DS=0.00,Q1=-681,Q2=681,Q3=-681,Q4=681\r\n",
+      "minimumStackGapBytes": 207,
+      "minimumByPhase": {
+        "boot": 397,
+        "ping": 207,
+        "move": 207
+      },
+      "running": 0,
+      "prescribedEncoderEdges": 681,
+      "elapsedMs": 962.94475
+    }
+  ],
+  "isolated_done_replay": [
+    {
+      "sample": "morning_D_MM",
+      "old_accepted": true,
+      "current_accepted": true,
+      "bytes": 142
+    },
+    {
+      "sample": "morning_A_MM",
+      "old_accepted": true,
+      "current_accepted": true,
+      "bytes": 138
+    },
+    {
+      "sample": "morning_Q_MM",
+      "old_accepted": true,
+      "current_accepted": true,
+      "bytes": 138
+    },
+    {
+      "sample": "morning_C_MM_isolated",
+      "old_accepted": true,
+      "current_accepted": true,
+      "bytes": 142
+    },
+    {
+      "sample": "131555_truncated_Q4",
+      "old_accepted": false,
+      "current_accepted": false,
+      "bytes": 117
+    },
+    {
+      "sample": "132357_missing_line_end",
+      "old_accepted": false,
+      "current_accepted": false,
+      "bytes": 118
+    }
+  ]
+}
