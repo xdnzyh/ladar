@@ -111,6 +111,11 @@ def load_configuration(
 
     nav_config = load_json_config(NAV_CONFIG_PATH, {})
     config.update(nav_config)
+    # Rotation direction is a physical radar property.  Keep one source of
+    # truth so the radar and navigation entry points cannot mirror the same
+    # sweep by loading conflicting saved values.
+    if "clockwise" in radar_config:
+        config["clockwise"] = radar_config["clockwise"]
     if "rotation_port" not in nav_config and "motor_port" in radar_config:
         config["rotation_port"] = radar_config["motor_port"]
     if "measurement_mode" not in nav_config and "ccd_parser" in radar_config:
