@@ -47,7 +47,12 @@ class CapturedWallScanTests(unittest.TestCase):
     def test_wall_segments_reach_actual_mapping_preparation(self):
         _, _, selected = self.replay()
         mapping = prepare_mapping_points(scan_points_from_polar(selected), 1.0, .15, .02)
-        self.assertGreaterEqual(sum(p.x < -.38 and -.08 < p.y < .15 for p in mapping.points), 5)
+        # This historical left fragment spans only 16 cm. It remains in raw
+        # obstacle data, but the board-wall model now requires at least 20 cm.
+        left = [p for p in selected if p.x < -.38 and -.08 < p.y < .15]
+        self.assertGreaterEqual(len(left), 5)
+        self.assertLess(max(p.y for p in left) - min(p.y for p in left), .20)
+        self.assertFalse(any(p.x < -.38 and -.08 < p.y < .15 for p in mapping.points))
         self.assertGreaterEqual(sum(p.y > .30 and abs(p.x) < .15 for p in mapping.points), 8)
         self.assertFalse(any(-.24 < p.x < -.20 and .07 < p.y < .12 for p in mapping.points))
 

@@ -33,8 +33,8 @@ class RangeAdaptiveGeometryTests(unittest.TestCase):
             process_radar_debug_scan(navigator, evidence.update('test', sequence, selection), 0.1)
         self.assertGreaterEqual(len(grid.occupied_cells()), 30)
 
-    def test_near_wall_still_requires_tight_fit(self):
-        self.assertFalse(prepare_mapping_points(wall(0.30, 0.03), 2, 0.1, 0.02).points)
+    def test_near_wall_accepts_three_centimetre_range_jitter(self):
+        self.assertGreaterEqual(prepare_mapping_points(wall(0.30, 0.03), 2, 0.1, 0.02).supported_echoes, 15)
 
     def test_sparse_distant_wall_is_kept_without_bridging_opening(self):
         def points(xs):

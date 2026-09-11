@@ -59,8 +59,12 @@ class MotionSafetyGuard:
             return None
         lookahead = speed * age + stop_distance
         if distance_control:
-            lookahead = max(lookahead, (self.direction_speed_mps or 0.0) * self.command.duration_s)
+            lookahead = max(lookahead, (self.direction_speed_mps or 0.0) * self.command.duration_s + stop_distance)
         limit = radius + clearance + lookahead
+        if distance_control:
+            # Match finite-distance planning: retain actual stopping distance
+            # and uncertainty, without another velocity-mode clearance buffer.
+            limit = radius + .035 + lookahead
         sensor_offset = math.hypot(float(self.config.get("radar_offset_x_m", 0.0)),
                                    float(self.config.get("radar_offset_y_m", 0.0)))
         if (estimate is None or not all(math.isfinite(value) for value in estimate)
@@ -90,6 +94,15 @@ class MotionSafetyGuard:
         uy = self.command.forward_mps / direction_speed
         along = x * ux + y * uy
         lateral = abs(x * uy - y * ux)
+        if distance_control:
+            closest = min(lookahead, max(0.0, along))
+            if (self.command.recovery_translation
+                    and direction_speed * self.command.duration_s <= .05 + 1e-9
+                    and along < 0 and point_distance > radius + .005 + margin):
+                return None
+            if math.hypot(along - closest, lateral) <= radius + .035 + margin:
+                return "运动方向出现近距离障碍，紧急停车"
+            return None
         if along + margin >= 0 and along <= limit + margin and lateral <= radius + margin:
             return "运动方向出现近距离障碍，紧急停车"
         return None

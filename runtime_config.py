@@ -47,6 +47,13 @@ RUNTIME_DEFAULTS = {
     "synchronized_acquisition": True,
     "observation_reorder_s": 0.3,
     "hardware_settle_s": 0.2,
+    "hardware_local_probe_after_two_scans": False,
+    "hardware_detour_rotation": False,
+    "hardware_immediate_navigation": False,
+    "hardware_prioritize_unexplored_gaps": False,
+    "hardware_radar_gap_steering": False,
+    "hardware_forward_turn_only": False,
+    "chassis_rotation_calibration_file": "control/参数工具/旋转停车补偿.json",
     "safety_clearance_m": 0.12,
     "safety_max_observation_age_s": 0.5,
     "safety_blind_timeout_s": 0.75,
@@ -115,6 +122,10 @@ RUNTIME_DEFAULTS = {
     "chassis_firmware_confirmed": False,
     "chassis_initial_sync_completed": False,
     "chassis_result_recovery": False,
+    # Some course chassis revisions occasionally omit the terminal RESULT.
+    # Keep the default conservative; the verified hardware profile may opt in
+    # to treating its bounded MOVE timeout as a logical stop.
+    "chassis_timeout_assume_stopped": False,
     "chassis_idle_preflight": False,
     "chassis_preferred_translation_unit": "MM",
     "chassis_config1_file": "",
@@ -125,10 +136,10 @@ RUNTIME_DEFAULTS = {
     "chassis_rx_silence_after_pong_s": 0.25,
     "chassis_silence_wait_timeout_s": 4.0,
     "chassis_ping_timeout_s": 2.0,
-    "chassis_ack_timeout_s": 2.0,
-    "chassis_action_timeout_s": 12.0,
-    "chassis_total_timeout_s": 12.0,
-    "chassis_stop_timeout_s": 3.0,
+    "chassis_ack_timeout_s": 0.5,
+    "chassis_action_timeout_s": 2.0,
+    "chassis_total_timeout_s": 2.0,
+    "chassis_stop_timeout_s": 2.0,
     "chassis_stop_status_delay_s": 0.35,
     "chassis_tx_max_command_bytes": 47,
     "chassis_max_line_bytes": 1024,
@@ -467,7 +478,9 @@ def resolve_runtime_config(
             table[mode]["brake_min_counts"] = values[44 + 4*index]
             table[mode]["brake_max_counts"] = values[45 + 4*index]
         config["chassis_translation_capabilities"] = table
-        timeout = max(float(config["chassis_total_timeout_s"]), 14.0, values[76]/1000 + 6.0)
+        # The course uses short, calibrated steps.  A stale configuration-1
+        # watchdog must never extend a MOVE beyond the operator's 2 s limit.
+        timeout = 2.0
         config["chassis_action_timeout_s"] = timeout
         config["chassis_total_timeout_s"] = timeout
     else:
@@ -478,9 +491,13 @@ def resolve_runtime_config(
         "synchronized_acquisition", "clockwise", "chassis_firmware_confirmed",
         "chassis_initial_sync_completed",
         "chassis_speed_validated", "chassis_braking_validated", "chassis_raw_log_enabled",
-        "chassis_result_recovery", "chassis_idle_preflight", "chassis_distance_control",
+        "chassis_result_recovery", "chassis_timeout_assume_stopped", "chassis_idle_preflight", "chassis_distance_control",
         "hardware_prefer_forward_exploration", "simulation_prefer_forward_exploration",
         "hardware_forward_only", "simulation_forward_only",
+        "hardware_local_probe_after_two_scans", "hardware_detour_rotation",
+        "hardware_immediate_navigation", "hardware_prioritize_unexplored_gaps",
+        "hardware_radar_gap_steering",
+        "hardware_forward_turn_only",
         "simulation_estimated_sweeps",
     ):
         config[key] = _strict_bool(config, key)
@@ -644,11 +661,18 @@ def resolve_runtime_config(
         "chassis_max_rotation_rad",
     ):
         _set_number(config, key, nonnegative=True)
+    if source == "hardware":
+        config["chassis_max_translation_m"] = min(0.20, config["chassis_max_translation_m"])
     if not math.isclose(
         config["chassis_action_timeout_s"], config["chassis_total_timeout_s"],
         rel_tol=0.0, abs_tol=1e-9,
     ):
         raise RuntimeConfigError("chassis_action_timeout_s 与 chassis_total_timeout_s 必须一致")
+    if source == "hardware":
+        # The deadline is measured from the MOVE write, not from preparation
+        # PING/PONG.  Never let an override or legacy profile exceed 2 s.
+        config["chassis_action_timeout_s"] = min(2.0, config["chassis_action_timeout_s"])
+        config["chassis_total_timeout_s"] = min(2.0, config["chassis_total_timeout_s"])
     if config["chassis_silence_wait_timeout_s"] < config["chassis_rx_silence_before_ping_s"]:
         raise RuntimeConfigError("底盘静默等待上限不能短于 PING 前静默时间")
     if config["chassis_total_timeout_s"] <= config["chassis_ack_timeout_s"]:
@@ -836,12 +860,19 @@ def build_navigation_engine(config: Mapping[str, object]):
             mode: {"enabled": True, "min_m": 0.0, "max_m": NavigationEngine.MAX_MOTION_SEGMENT_M}
             for mode in NavigationEngine.TRANSLATION_MODES
         }
-    return NavigationEngine(
+    navigator = NavigationEngine(
         grid,
         course_model=course_model,
         unobserved_clear_range_m=float(resolved[f"{resolved['runtime_source']}_unobserved_clear_range_m"]),
         prefer_forward_exploration=resolved[f"{resolved['runtime_source']}_prefer_forward_exploration"],
         forward_only=resolved[f"{resolved['runtime_source']}_forward_only"],
+        local_probe_after_two_scans=(resolved['runtime_source'] == 'hardware' and resolved['hardware_local_probe_after_two_scans']),
+        rotation_enabled=(resolved['runtime_source'] == 'hardware' and resolved['hardware_detour_rotation']),
+        immediate_navigation=(resolved['runtime_source'] == 'hardware' and resolved['hardware_immediate_navigation']),
+        prioritize_unexplored_gaps=(resolved['runtime_source'] == 'hardware' and resolved['hardware_prioritize_unexplored_gaps']),
+        radar_gap_steering=(resolved['runtime_source'] == 'hardware' and resolved['hardware_radar_gap_steering']),
+        forward_turn_only=(resolved['runtime_source'] == 'hardware' and resolved['hardware_forward_turn_only']),
+        distance_controlled_motion=(resolved['runtime_source'] == 'hardware' and resolved['chassis_distance_control']),
         max_range_m=float(resolved["max_range_m"] if resolved["runtime_source"] == "hardware" else resolved["simulation_max_range_m"]),
         robot_radius_m=float(resolved["robot_radius_m"]),
         sensor_offset_x_m=float(resolved["radar_offset_x_m"]),
@@ -856,6 +887,9 @@ def build_navigation_engine(config: Mapping[str, object]):
         safety_speed_upper_bound_mps=(resolved.get('safety_speed_upper_bound_mps')
                                       if resolved['runtime_source'] == 'hardware' else None),
     )
+    if navigator.local_probe_after_two_scans:
+        navigator.BOOTSTRAP_SCANS = 2
+    return navigator
 
 
 def configuration_fingerprint(config: Mapping[str, object]) -> str:

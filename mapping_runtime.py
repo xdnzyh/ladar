@@ -218,9 +218,12 @@ class MappingRuntime:
                 working = deepcopy(self.navigator)
                 wall_evidence = deepcopy(self._wall_evidence)
             try:
+                working._two_scan_action_attempted = False
+                working._stationary_scan_attempts += 1
                 scan_points = complete_open_scan(
                     request.points, working.unobserved_clear_range_m, working.max_range_m,
-                    self.min_range_m, working.grid.resolution_m)
+                    self.min_range_m, working.grid.resolution_m,
+                    front_angle_rad=-working.sensor_offset_yaw_rad)
                 free_rays = prepare_free_space_points(scan_points, working.max_range_m,
                                                       self.min_range_m, working.grid.resolution_m)
                 selection = prepare_mapping_points(
@@ -229,11 +232,16 @@ class MappingRuntime:
                     self.min_range_m,
                     working.grid.resolution_m,
                 )
+                current_selection = selection
+                fast_navigation = (working.immediate_navigation and working._map_initialized
+                                   and request.mode == 'navigation' and working.auto_enabled)
                 selection = wall_evidence.update(
                     request.session,
                     request.scan_sequence,
                     selection,
                 )
+                if fast_navigation and selection.confirmed_scans < 2:
+                    selection = current_selection
                 if request.mode == "local" or not working.auto_enabled:
                     command = process_radar_debug_scan(
                         working,
@@ -241,7 +249,7 @@ class MappingRuntime:
                         self.min_range_m,
                         free_space_points=free_rays,
                     )
-                elif selection.confirmed_scans < 2 or selection.supported_echoes < 4:
+                elif (selection.confirmed_scans < 2 and not fast_navigation) or selection.supported_echoes < 4:
                     if not working._motion_since_last_scan:
                         working.grid.update_scan(working._sensor_pose(), free_rays,
                                                  working.max_range_m, min_range_m=self.min_range_m,
@@ -250,6 +258,9 @@ class MappingRuntime:
                     working.state = "两圈墙面确认"
                     working.detail = selection.rejection_reason or "等待连续两圈墙面证据"
                     command = VelocityCommand()
+                    if fast_navigation or (working.local_probe_after_two_scans and working._stationary_scan_attempts >= 2):
+                        working.latest_scan = list(scan_points)
+                        command = working._reject_scan(0, "两圈墙面仍未确认")
                 else:
                     # Wall fitting supplies obstacle evidence, but cannot describe
                     # open directions. Keep explicit, valid max-range observations.
@@ -259,7 +270,19 @@ class MappingRuntime:
                     )
                     command = working.process_scan(selection.points + clear_rays,
                                                    free_space_points=free_rays,
+                                                   previous_wall_layer=(selection.mapping_layers[0]
+                                                       if not fast_navigation and selection.mapping_passes == 2 and selection.mapping_layers else ()),
                                                    obstacle_points=request.points, add_only=True)
+                if (request.mode == 'navigation' and working.auto_enabled
+                        and working._two_scan_due()
+                        and not working._two_scan_action_attempted):
+                    command = working._two_scan_action()
+                if request.mode == 'navigation' and working._two_scan_due():
+                    if not command.stopped:
+                        # This admits a checked action, not a successful global
+                        # localization; retain the actual match score and map.
+                        working.completed_scans = max(working.completed_scans,
+                                                      self.navigator.completed_scans + 1)
             except BaseException as exc:
                 result = MappingResult(request, None, None, exc)
             else:

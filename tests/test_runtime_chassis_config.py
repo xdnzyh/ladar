@@ -35,7 +35,8 @@ class ChassisRuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config["chassis_rx_silence_after_pong_s"], 0.25)
         self.assertEqual(config["chassis_silence_wait_timeout_s"], 4.0)
         self.assertEqual(config["chassis_ping_timeout_s"], 2.0)
-        self.assertEqual(config["chassis_total_timeout_s"], 12.0)
+        self.assertEqual(config["chassis_total_timeout_s"], 2.0)
+        self.assertEqual(config["chassis_max_translation_m"], 0.20)
 
         capabilities = config["chassis_translation_capabilities"]
         self.assertEqual(set(capabilities), set("WSADQEZC"))
@@ -83,11 +84,11 @@ class ChassisRuntimeConfigTests(unittest.TestCase):
         legacy = resolve_runtime_config(
             "hardware", "navigation", {"chassis_action_timeout_s": 13.0}
         )
-        self.assertEqual(legacy["chassis_total_timeout_s"], 13.0)
+        self.assertEqual(legacy["chassis_total_timeout_s"], 2.0)
         modern = resolve_runtime_config(
             "hardware", "navigation", {"chassis_total_timeout_s": 14.0}
         )
-        self.assertEqual(modern["chassis_action_timeout_s"], 14.0)
+        self.assertEqual(modern["chassis_action_timeout_s"], 2.0)
         with self.assertRaises(RuntimeConfigError):
             resolve_runtime_config(
                 "hardware", "navigation",
@@ -99,13 +100,13 @@ class ChassisRuntimeConfigTests(unittest.TestCase):
         table["W"].update({
             "motion_range_validated": True,
             "validated_min_mm": 95.0,
-            "validated_max_mm": 190.0,
+            "validated_max_mm": 145.0,
             "uncertainty_m": 0.02,
         })
         config = resolve_runtime_config(
             "hardware", "navigation", {"chassis_translation_capabilities": table}
         )
-        self.assertEqual(config["chassis_translation_capabilities"]["W"]["validated_max_mm"], 190.0)
+        self.assertEqual(config["chassis_translation_capabilities"]["W"]["validated_max_mm"], 145.0)
 
         for bad_update in (
             {"validated_min_mm": 100.0},

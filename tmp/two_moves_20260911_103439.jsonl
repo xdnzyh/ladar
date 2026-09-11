@@ -1,0 +1,22 @@
+{"time": 1789094079.3706794, "direction": "TX", "text": "P\r\n"}
+{"time": 1789094079.705183, "direction": "RX", "text": "IDLE X=10828.5 Y=-1784.0 R=-3165.5 S=-6428.0\r\n"}
+{"time": 1789094079.705585, "direction": "TX", "text": "                                @PING,8E512CD9\r\n"}
+{"time": 1789094080.0647275, "direction": "RX", "text": "@PONG,8E512CD9\r\n"}
+{"time": 1789094080.4151707, "direction": "TX", "text": "                                @MOVE,W,100,CNT,8E512CD9,D7EE\r\n"}
+{"time": 1789094080.7954202, "direction": "RX", "text": "@ACK,W,100,CNT\r\n"}
+{"time": 1789094081.4665353, "direction": "RX", "text": "@RESULT,8E512CD9,W,0,100,CNT,100.50,141.75,130,194,93,150,012F\r\n"}
+{"time": 1789094081.9921255, "direction": "TX", "text": "P\r\n"}
+{"time": 1789094082.3232994, "direction": "RX", "text": "IDLE X=10970.2 Y=-1814.3 R=-3163.8 S=-6407.7\r\n"}
+{"time": 1789094082.3235664, "direction": "TX", "text": "                                @PING,8E513713\r\n"}
+{"time": 1789094082.6823118, "direction": "RX", "text": "@PONG,8E513713\r\n"}
+{"time": 1789094083.033205, "direction": "TX", "text": "                                @MOVE,W,100,CNT,8E513713,F374\r\n"}
+{"time": 1789094083.4162228, "direction": "RX", "text": "@ACK,W,100,CNT\r\n"}
+{"time": 1789094084.0547333, "direction": "RX", "text": "@RESULT,8E513713,W,0,100,CNT,"}
+{"time": 1789094086.0508025, "direction": "TX", "text": "                                @RESULT,8E513713,1AD1\r\n"}
+{"time": 1789094086.4875262, "direction": "RX", "text": "@RESULT,8E513713,W,0,100,CNT,106.00,156.00,155,163,154,152,1ECD\r\n"}
+{"time": 1789094086.988397, "direction": "TX", "text": "P\r\n"}
+{"time": 1789094087.3288538, "direction": "RX", "text": "IDLE X=11126.2 Y=-1815.8 R=-3161.3 S=-6404.7\r\n"}
+{"time": 1789094087.3290796, "direction": "TX", "text": "!\r\nX\r\n"}
+{"time": 1789094087.8301024, "direction": "TX", "text": "P\r\n"}
+{"time": 1789094087.8903863, "direction": "RX", "text": "@ERR,BAD_CMD\r\n"}
+{"time": 1789094088.1699924, "direction": "RX", "text": "IDLE X=11126.0 Y=-1816.0 R=-3162.0 S=-6404.0\r\n"}

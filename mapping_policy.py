@@ -10,8 +10,8 @@ from scan_geometry import range_tolerance_scale
 
 DEFAULT_MAP_RESOLUTION_M = 0.02
 MIN_WALL_POINTS = 4
-MAX_WALL_RMS_M = 0.020
-MIN_WALL_SPAN_M = 0.08
+MAX_WALL_RMS_M = 0.05
+MIN_WALL_SPAN_M = 0.20
 MAX_WALL_ANGLE_GAP_DEG = 22.0
 MAX_WALL_NEIGHBOR_GAP_M = 0.16
 MAX_WALL_POINT_GAP_M = 0.095
@@ -131,7 +131,7 @@ def _fit_segment_unchecked(items: Sequence[_EchoItem]) -> _WallSegment | None:
 
 def _fit_segment(items: Sequence[_EchoItem]) -> _WallSegment | None:
     segment = _fit_segment_unchecked(items)
-    if segment is None or segment.rms > MAX_WALL_RMS_M * _segment_tolerance_scale(items):
+    if segment is None or segment.rms > MAX_WALL_RMS_M:
         return None
     return segment
 
@@ -241,6 +241,11 @@ def _split_run_at_corners(run: Sequence[_EchoItem]) -> list[list[_EchoItem]]:
         left_count = index - start + 1
         right_count = len(ordered) - index
         if left_count < MIN_WALL_POINTS or right_count < MIN_WALL_POINTS:
+            continue
+        # A few jittering samples are not a board corner. Both sides of a
+        # proposed split must retain a physically meaningful wall segment.
+        if (math.hypot(ordered[index].x - ordered[start].x, ordered[index].y - ordered[start].y) < MIN_WALL_SPAN_M
+                or math.hypot(ordered[-1].x - ordered[index].x, ordered[-1].y - ordered[index].y) < MIN_WALL_SPAN_M):
             continue
         if _smoothed_turn(ordered, index, closed=False) >= math.radians(WALL_CORNER_TURN_DEG):
             chunks.append(list(ordered[start:index + 1]))
@@ -513,7 +518,9 @@ class TwoSweepWallEvidence:
                 rejection_reason="等待第二个连续可信整圈",
             )
 
-        match_distance = max(2.5 * self.resolution_m, 0.05)
+        # Each stationary sweep may have up to 5 cm fitted range error.
+        # Opposite errors must not restart confirmation indefinitely.
+        match_distance = max(2.5 * self.resolution_m, 2 * MAX_WALL_RMS_M)
         previous_points = tuple(previous.points)
         stable = []
         previous_layer = []
@@ -522,7 +529,7 @@ class TwoSweepWallEvidence:
                 previous_points,
                 key=lambda candidate: (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2,
             )
-            tolerance = match_distance * range_tolerance_scale(min(point.distance_m, nearest.distance_m))
+            tolerance = min(.10, match_distance)
             if math.hypot(nearest.x - point.x, nearest.y - point.y) > tolerance:
                 continue
             source = point.source or "thin_wall"
@@ -584,7 +591,7 @@ class TwoSweepWallEvidence:
         )
 
 
-def complete_open_scan(points, clear_range_m, max_range_m, min_range_m, resolution_m):
+def complete_open_scan(points, clear_range_m, max_range_m, min_range_m, resolution_m, *, front_angle_rad=0.0):
     """Apply the hardware's bounded open-space assumption to a completed scan.
 
     This is an assumption, not measured clearance. Raw returns (including ones
@@ -597,7 +604,11 @@ def complete_open_scan(points, clear_range_m, max_range_m, min_range_m, resoluti
     if clear_range_m <= 0 or len(valid) < 12:
         return tuple(points)
     limit = min(clear_range_m, max_range_m)
-    supplemented = list(points)
+    supplemented = [replace(point, immediate_free=True)
+                    if (point in valid and not point.has_echo(max_range_m)
+                        and point.distance_m <= limit
+                        and math.cos(point.angle_rad - front_angle_rad) >= -1e-9)
+                    else point for point in points]
     for degree in range(0, 360, 2):
         angle = math.radians(degree)
         distance = limit
@@ -610,7 +621,8 @@ def complete_open_scan(points, clear_range_m, max_range_m, min_range_m, resoluti
                 distance = min(distance, point.distance_m - (
                     math.sqrt(2) * resolution_m if point.has_echo(max_range_m) else 0.0))
         if distance >= min_range_m:
-            supplemented.append(ScanPoint(angle, distance, is_echo=False, source='assumed_open'))
+            supplemented.append(ScanPoint(angle, distance, is_echo=False, source='assumed_open',
+                                          immediate_free=math.cos(angle - front_angle_rad) >= -1e-9))
     return tuple(supplemented)
 
 

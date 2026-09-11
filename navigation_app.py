@@ -1139,6 +1139,12 @@ class NavigationApp:
             self.navigator.sensor_offset_yaw_rad = configured_navigator.sensor_offset_yaw_rad
             self.navigator.path_turn_penalty = configured_navigator.path_turn_penalty
             self.navigator.translation_capabilities = configured_navigator.translation_capabilities
+            self.navigator.rotation_enabled = configured_navigator.rotation_enabled
+            self.navigator.immediate_navigation = configured_navigator.immediate_navigation
+            self.navigator.prioritize_unexplored_gaps = configured_navigator.prioritize_unexplored_gaps
+            self.navigator.distance_controlled_motion = configured_navigator.distance_controlled_motion
+            self.navigator.local_probe_after_two_scans = configured_navigator.local_probe_after_two_scans
+            self.navigator.BOOTSTRAP_SCANS = configured_navigator.BOOTSTRAP_SCANS
             if reset_mapping:
                 self.navigator.reset()
                 self.mapping_snapshot = None
@@ -1804,7 +1810,8 @@ class NavigationApp:
         if (getattr(self, "source", None) == "hardware" and self.running
                 and action is not None and action.source == "auto"
                 and not action.stop_requested
-                and reason in {"运动方向出现近距离障碍，紧急停车", "雷达检测到近距离障碍，紧急停车"}):
+                and reason in {"运动方向出现近距离障碍，紧急停车", "雷达检测到近距离障碍，紧急停车",
+                               "转向范围内存在近距离障碍，紧急停车"}):
             self.motion_generation += 1
             self.mapping_generation += 1
             self._obstacle_recovery_action = (controller.connection_generation, action.action_id, self.motion_generation)
@@ -1812,7 +1819,7 @@ class NavigationApp:
             self.motion_safety.clear()
             with self.mapping_lock:
                 self._clear_mapping_tasks()
-            if self._send_chassis_stop():
+            if self._send_chassis_stop(recover_result=True):
                 self.navigator.state = "近障碍停车"
                 self.navigator.detail = "等待停止报告，停稳重扫后微移避让"
                 return
@@ -1849,6 +1856,7 @@ class NavigationApp:
             self._handle_mapping_results()
             if self.source == "hardware" and hasattr(self, "chassis_controller"):
                 self.chassis_controller.poll(now)
+                self._check_settle_timeout(now)
             if self.source == "hardware" and self.config.get("synchronized_acquisition", True):
                 self.sync.poll(now)
                 self._check_motion_safety(now)
@@ -1914,7 +1922,9 @@ class NavigationApp:
             if getattr(self.sync, "recovery_started_at", None) is not None:
                 label = "超时恢复中（保持旋转）"
             self.connection_label.configure(text="●  " + label, fg=COLORS["cyan"])
-            if str(value) != "完整扫描":
+            self.acquisition_detail = str(value)
+            routine_scan = str(value).startswith(("完整扫描", "短直线结构有效扫描", "扫描中", "等待停车"))
+            if not routine_scan or starting or self.sync.state == "syncing":
                 self.navigator.state = label if starting or self.sync.state == "syncing" else "等待有效扫描"
                 self.navigator.detail = str(value)
         elif kind == "sync_error":
@@ -2032,6 +2042,9 @@ class NavigationApp:
         elif kind == "chassis_done":
             generation, action, report = value
             self._handle_chassis_done(int(generation), action, report, timestamp)
+        elif kind == "chassis_timeout_assumed_stopped":
+            generation, action, detail = value
+            self._handle_chassis_timeout_assumed_stopped(int(generation), action, str(detail), timestamp)
         elif kind == "chassis_stop_confirmed":
             generation, status, _action = value
             controller = getattr(self, "chassis_controller", None)
@@ -2039,6 +2052,22 @@ class NavigationApp:
                 return
             self.chassis_status_var.set("底盘返回 IDLE；仍需停稳观察，未视为外部测量证明") if hasattr(self, "chassis_status_var") else None
             self._log("底盘状态回复 IDLE")
+            if (getattr(self, "_obstacle_recovery_action", None) is not None
+                    and _action is not None
+                    and self._obstacle_recovery_action == (generation, _action.action_id, self.motion_generation)):
+                self._obstacle_recovery_action = None
+                self.motion_safety.clear()
+                self.moving = False
+                self.manual_motion = False
+                self.accept_samples = False
+                self.running = False
+                self.navigator.set_auto(False)
+                self._stop_radar_only()
+                self.navigator.state = "位置待重新确认"
+                self.navigator.detail = "底盘已停车，但完整运动结果补查失败；请重新定位后启动导航"
+                if hasattr(self, "start_button"):
+                    self.start_button.configure(text="开始")
+                self._log(self.navigator.detail)
             if self.disconnect_requested and not controller.in_flight:
                 self._complete_disconnect()
         elif kind == "chassis_idle":
@@ -2288,8 +2317,53 @@ class NavigationApp:
         self.running = False
         self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
 
+    def _handle_chassis_timeout_assumed_stopped(
+        self, generation: int, action, detail: str, timestamp: float
+    ) -> None:
+        """Continue after a bounded MOVE with no terminal report.
+
+        We deliberately do not apply the requested motion as an odometry delta:
+        the stop point is unknown.  The following complete radar scan therefore
+        refreshes the direct-gap decision before another command is allowed.
+        """
+        controller = getattr(self, "chassis_controller", None)
+        if controller is None or generation != controller.connection_generation:
+            return
+        if action is None or controller.pending is not action:
+            return
+        self._log(detail)
+        self.motion_safety.clear()
+        self.accept_samples = False
+        self.manual_motion = action.source == "manual"
+        self.latest_chassis_state = {
+            "mode": action.mode,
+            "reason": "TIMEOUT_ASSUMED_STOPPED",
+            "request_value": action.request_value,
+            "request_unit": action.unit,
+            "timeout_assumed_stopped": True,
+        }
+        can_resume = bool(action.source == "auto" and self.running)
+        if can_resume:
+            snapshot = self.mapping_snapshot
+            self._post_motion_map_revision = (
+                snapshot.map_version if snapshot is not None else int(getattr(self.navigator.grid, "_revision", 0))
+            )
+            self._post_motion_scan_count = (
+                snapshot.completed_scans if snapshot is not None else int(self.navigator.completed_scans)
+            )
+            self.navigator.state = "底盘回报超时，继续导航"
+            self.navigator.detail = "按已停处理；不使用未知里程计，等待一圈新雷达扫描"
+            self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=True)
+            return
+        self.navigator.state = "底盘动作超时结束"
+        self.navigator.detail = "按已停处理；未应用未知运动位移"
+        self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
+
     def _finish_chassis_action_after_settle(self, action, generation: int, timestamp: float, *, resume_auto: bool) -> None:
-        self.scan_collect_after = max(time.perf_counter(), float(timestamp)) + self._settle_duration()
+        started_at = time.perf_counter()
+        self.scan_collect_after = started_at + self._settle_duration()
+        self._settle_watchdog = (started_at + 2.0, generation, action.action_id,
+                                self.motion_generation, resume_auto)
         if self.config.get("synchronized_acquisition", True) and hasattr(self, "sync"):
             self.sync.begin_after(self.scan_collect_after)
         delay = max(1, round(max(0.0, self.scan_collect_after - time.perf_counter()) * 1000))
@@ -2305,6 +2379,23 @@ class NavigationApp:
         else:
             callback()
 
+    def _check_settle_timeout(self, now: float) -> None:
+        pending = getattr(self, "_settle_watchdog", None)
+        if pending is None:
+            return
+        deadline, generation, action_id, motion_generation, resume_auto = pending
+        controller = getattr(self, "chassis_controller", None)
+        action = getattr(controller, "pending", None)
+        if (controller is None or controller.connection_generation != generation
+                or controller.state != ChassisState.SETTLING
+                or action is None or action.action_id != action_id
+                or self.motion_generation != motion_generation):
+            self._settle_watchdog = None
+            return
+        if now >= deadline and getattr(action, "done_at", None) is not None:
+            self._settle_watchdog = None
+            self._complete_chassis_settle(generation, action_id, motion_generation, resume_auto)
+
     def _complete_chassis_settle(
         self,
         connection_generation: int,
@@ -2318,10 +2409,12 @@ class NavigationApp:
         action = controller.pending
         if action is None or action.action_id != action_id:
             return
+        self._settle_watchdog = None
         should_resume = bool(
             resume_auto
             and self.running
-            and (not action.stop_requested or getattr(action, "obstacle_recovery_confirmed", False))
+            and (not action.stop_requested or getattr(action, "obstacle_recovery_confirmed", False)
+                 or getattr(action, "timeout_assumed_stopped", False))
             and self.motion_generation == motion_generation
         )
         if not controller.complete_settle(resume_auto=should_resume):
@@ -2481,7 +2574,7 @@ class NavigationApp:
         duration = float(self.config.get("hardware_settle_s", 0.2))
         if not math.isfinite(duration) or duration < 0:
             raise ValueError("停车等待时间必须是非负有限数")
-        return duration
+        return min(duration, 2.0)
 
     def _restart_hardware_scan(self, generation: int) -> None:
         if not self.running or generation != self.motion_generation:
@@ -2496,13 +2589,14 @@ class NavigationApp:
         self.rotation_endpoint.write_line("RESETCNT")
         self.rotation_endpoint.write_line("ON")
 
-    def _send_chassis_stop(self, wait: bool = False) -> bool:
+    def _send_chassis_stop(self, wait: bool = False, *, recover_result: bool = False) -> bool:
         if self.source != "hardware" or not self.chassis_endpoint.is_open:
             return False
         controller = getattr(self, "chassis_controller", None)
         if controller is None:
             return False
-        sent = bool(controller.request_stop(reason="上位机停止", now=time.perf_counter()))
+        options = {"recover_result": True} if recover_result else {}
+        sent = bool(controller.request_stop(reason="上位机停止", now=time.perf_counter(), **options))
         if wait:
             flush = getattr(self.chassis_endpoint, "flush", None)
             if callable(flush):

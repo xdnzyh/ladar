@@ -14,6 +14,17 @@ from scan_acquisition import HardwareObservation
 
 
 class MotionSafetyTests(unittest.TestCase):
+    def test_reported_091m_echo_with_uncertain_angle_does_not_stop(self):
+        config = resolve_runtime_config('hardware', 'navigation', {
+            'chassis_distance_control': True,
+        })
+        for estimate in (None, (0, math.radians(30)), (math.nan, 0)):
+            with self.subTest(estimate=estimate):
+                guard = MotionSafetyGuard(config)
+                guard.start(VelocityCommand(forward_mps=0.1, duration_s=1), 10)
+                self.assertIsNone(guard.observe(self.point(0.91), estimate, 10.11))
+                self.assertIsNotNone(guard.observe(self.point(0.2), estimate, 10.11))
+
     def test_distance_control_guards_whole_segment_without_speed_or_braking_fields(self):
         config = resolve_runtime_config('hardware', 'navigation', {
             'chassis_distance_control': True,
@@ -24,7 +35,8 @@ class MotionSafetyTests(unittest.TestCase):
             with self.subTest(angle=angle):
                 guard.start(VelocityCommand(right_mps=right, forward_mps=forward, duration_s=1), 10)
                 self.assertIsNone(guard.observe(self.point(2), (angle, 0), 10.1))
-                self.assertIsNotNone(guard.observe(self.point(0.3), (angle, 0), 10.1))
+                self.assertIsNone(guard.observe(self.point(0.3), (angle, 0), 10.1))
+                self.assertIsNotNone(guard.observe(self.point(0.25), (angle, 0), 10.1))
                 self.assertIsNone(guard.observe(self.point(0.3), (angle + math.pi, 0), 10.1))
                 self.assertIsNone(guard.poll(11))
                 guard.clear()

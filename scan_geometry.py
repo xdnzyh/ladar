@@ -63,13 +63,13 @@ def line_supported_indices(
     """Return indices belonging to locally straight, contiguous scan runs.
 
     The filter is intentionally local.  It keeps short wall fragments while
-    rejecting isolated echoes and small irregular clusters.  At least five
-    consecutive samples and a 12 mm near-range RMS bound are enforced even
-    if a legacy caller supplies looser values. Farther runs allow bounded
-    range scatter while retaining angular continuity and minimum support.
+    rejecting isolated echoes and small irregular clusters. At least five
+    consecutive samples are required. The caller's residual tolerance is
+    honored up to 5 cm; the default remains 12 mm. Windows grow to cover the
+    requested physical wall length even when samples are densely spaced.
     """
     min_window_points = max(5, int(min_window_points))
-    max_rms_m = min(0.012, float(max_rms_m))
+    max_rms_m = min(0.05, float(max_rms_m))
     max_angle_gap = math.radians(float(max_angle_gap_deg))
     if not all(math.isfinite(value) and value > 0 for value in (
             max_angle_gap, max_neighbor_gap_m, max_rms_m, min_span_m)):
@@ -114,8 +114,12 @@ def line_supported_indices(
         if len(run) < min_window_points:
             continue
         for start in range(0, len(run) - min_window_points + 1):
-            window = run[start:start + min_window_points]
+            end = start + min_window_points
+            while (end < len(run) and math.hypot(run[end - 1][2] - run[start][2],
+                                                run[end - 1][3] - run[start][3]) < min_span_m):
+                end += 1
+            window = run[start:end]
             distance = min(math.hypot(item[2], item[3]) for item in window)
-            if _window_is_linear(window, max_rms_m * range_tolerance_scale(distance), min_span_m):
+            if _window_is_linear(window, min(.05, max_rms_m * range_tolerance_scale(distance)), min_span_m):
                 supported.update(item[0] for item in window)
     return supported

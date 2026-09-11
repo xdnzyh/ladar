@@ -206,6 +206,56 @@ class ResultRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.writes(b"@MOVE,")), 1)
         self.assertEqual(len(self.writes(b"@PING,")), 1)
 
+    def test_obstacle_stop_idle_preserves_action_for_damaged_result_recovery(self):
+        action = self.start()
+        self.controller.request_stop(recover_result=True, now=self.now)
+        self.receive(result(reason=1)[3:], self.now + 0.2)
+        self.receive(b'IDLE X=0 Y=0 R=0 S=0\r\n', self.now + 0.2)
+        self.assertIs(self.controller.pending, action)
+        self.assertFalse(self.controller.allow_automatic())
+        self.poll(self.now + 0.4)
+        self.assertTrue(self.writes(b'@RESULT,'))
+        self.receive(result(reason=1), self.now + 0.1)
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.assertEqual(len([e for e in self.events if e[0] == 'chassis_done']), 1)
+        self.receive(b'IDLE X=0 Y=0 R=0 S=0\r\n', self.now + 0.1)
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.assertIs(self.controller.pending, action)
+        self.assert_no_motion_retry()
+
+    def test_stop_cleanup_error_after_result_does_not_cancel_recovery(self):
+        action = self.start()
+        self.controller.request_stop(recover_result=True, now=self.now)
+        self.receive(result(reason=1), self.now + .2)
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.receive(b'@ERR,BAD_CMD\r\n', self.now + .1)
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.assertIs(self.controller.pending, action)
+        self.assert_no_motion_retry()
+
+    def test_obstacle_stop_result_timeout_ends_wait_with_confirmed_idle(self):
+        self.start()
+        self.controller.request_stop(recover_result=True, now=self.now)
+        deadline = self.controller._stop_deadline
+        self.receive(b'IDLE X=0 Y=0 R=0 S=0\r\n', self.now + 0.2)
+        self.poll(deadline + 0.01)
+        self.assertEqual(self.controller.state, ChassisState.IDLE)
+        self.assertIsNone(self.controller.pending)
+        self.assertTrue(any(e[0] == 'chassis_stop_confirmed' for e in self.events))
+        self.assert_no_motion_retry()
+
+    def test_obstacle_recovery_scan_unlocks_the_next_automatic_move(self):
+        action = self.start()
+        action.source = 'auto'
+        self.controller.request_stop(recover_result=True, now=self.now)
+        self.receive(result(reason=1), self.now + 0.2)
+        action.obstacle_recovery_confirmed = True
+        self.assertTrue(self.controller.complete_settle(resume_auto=True))
+        self.assertFalse(self.controller.automatic_ready)
+        self.assertTrue(self.controller.mark_scan_ready())
+        self.assertTrue(self.controller.automatic_ready)
+        self.assertTrue(self.controller.request_move('W', 100, 'CNT', source='auto'))
+
     def test_auto_result_completes_immediately_without_ack_or_query(self):
         action = self.start()
         self.assertEqual(action.payload, checked("@MOVE,W,100,CNT,00000001"))
@@ -396,6 +446,33 @@ class ResultRecoveryTests(unittest.TestCase):
         self.assertFalse(self.writes(b"@RESULT,"))
         self.assert_no_motion_retry()
 
+    def test_configured_timeout_assumes_stop_and_releases_auto_after_a_new_scan(self):
+        self.config["chassis_total_timeout_s"] = 1.0
+        self.config["chassis_timeout_assume_stopped"] = True
+        action = self.start()
+        self.poll(self.controller._total_deadline)
+
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.assertTrue(action.timeout_assumed_stopped)
+        self.assertTrue(action.stop_requested)
+        self.assertEqual(action.done_at, self.now)
+        self.assertFalse(self.controller._motion_unconfirmed)
+        self.assertTrue(self.writes(b"!"))
+        self.assertFalse(any(kind == "chassis_timeout" for kind, *_ in self.events))
+        self.assertTrue(any(kind == "chassis_timeout_assumed_stopped" for kind, *_ in self.events))
+
+        # A completion that arrives after the logical stop is informational;
+        # it must not turn the resumed radar loop into a fault.
+        self.receive(result(), self.now + 0.01)
+        self.assertEqual(self.controller.state, ChassisState.SETTLING)
+        self.assertFalse(any(kind == "chassis_fault" for kind, *_ in self.events))
+
+        action.source = "auto"
+        self.assertTrue(self.controller.complete_settle(resume_auto=True))
+        self.assertEqual(self.controller.state, ChassisState.WAITING_SCAN)
+        self.assertTrue(self.controller.mark_scan_ready())
+        self.assertTrue(self.controller.allow_automatic())
+
     def test_stale_snapshot_cannot_complete_identical_next_request(self):
         first = self.start()
         self.receive(result(), self.now + 0.1)
@@ -565,6 +642,16 @@ class ResultConfigTests(unittest.TestCase):
         for bad in (1, "true", None):
             with self.assertRaises(RuntimeConfigError):
                 resolve_runtime_config("hardware", "navigation", {"chassis_result_recovery": bad})
+
+    def test_timeout_assume_stopped_is_opt_in_and_enabled_for_actual_navigation(self):
+        self.assertFalse(resolve_runtime_config("hardware", "navigation")["chassis_timeout_assume_stopped"])
+        root = Path(__file__).resolve().parents[1]
+        actual = json.loads((root / "navigation_config.json").read_text(encoding="utf-8"))
+        self.assertIs(actual["chassis_timeout_assume_stopped"], True)
+        self.assertIs(resolve_runtime_config("hardware", "navigation", actual)["chassis_timeout_assume_stopped"], True)
+        for bad in (1, "true", None):
+            with self.assertRaises(RuntimeConfigError):
+                resolve_runtime_config("hardware", "navigation", {"chassis_timeout_assume_stopped": bad})
 
 
 if __name__ == "__main__":

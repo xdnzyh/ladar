@@ -6,6 +6,9 @@ import secrets
 import statistics
 import threading
 import time
+import json
+from pathlib import Path
+from rotation_calibration import validate_calibration, goal_counts, angle_from_encoder
 from chassis_config1 import ConfigExchange, encode as encode_config, values_crc
 from typing import Callable, Mapping
 
@@ -80,10 +83,19 @@ class ChassisMotionAdapter:
     }
 
     def __init__(self, config: Mapping[str, object]) -> None:
-        self.config = config
+        self.update_config(config)
 
     def update_config(self, config: Mapping[str, object]) -> None:
         self.config = config
+        self.rotation_curve = None
+        if config.get('hardware_detour_rotation', False):
+            path = Path(str(config.get('chassis_rotation_calibration_file', 'control/参数工具/旋转停车补偿.json')))
+            if not path.is_absolute():
+                path = Path(__file__).resolve().parent / path
+            try:
+                self.rotation_curve = validate_calibration(json.loads(path.read_text(encoding='utf-8-sig')))
+            except (OSError, ValueError, TypeError) as exc:
+                raise MotionConversionError(f'无法读取导航旋转标定：{exc}') from exc
 
     @staticmethod
     def _finite(value: object) -> float | None:
@@ -181,6 +193,8 @@ class ChassisMotionAdapter:
                 if coefficient is None or coefficient <= 0:
                     reasons.append(f"{item} 方向缺少有效 CNT/mm 初值")
             elif item in {"R", "F"}:
+                if self.rotation_curve is not None:
+                    continue
                 entry = self._rotation_entry(item)
                 if not bool(entry.get("enabled", False)) or entry.get("status") != "validated":
                     reasons.append(f"{item} 旋转尚未标定并启用")
@@ -227,6 +241,11 @@ class ChassisMotionAdapter:
         automatic: bool = True,
     ) -> ChassisMoveRequest:
         mode = self.mode_for_command(command)
+        if bool(self.config.get("hardware_forward_turn_only", False)):
+            if (not command.recovery_translation and mode not in {"W", "R", "F"}):
+                raise MotionConversionError("正常导航仅允许前进和左右转向")
+            if command.recovery_translation and mode not in {"A", "D"}:
+                raise MotionConversionError("紧急避障仅允许纯横移")
         if automatic:
             ready, reasons = self.readiness(mode)
             if not ready:
@@ -271,6 +290,18 @@ class ChassisMotionAdapter:
                 raise MotionConversionError("CNT 请求超过当前发送上限")
             return ChassisMoveRequest(mode, counts, "CNT", counts, quantized_distance, "m")
 
+        if self.rotation_curve is not None:
+            angle = abs(command.yaw_rps * command.duration_s)
+            if angle > float(self.config.get('chassis_max_rotation_rad', .5)):
+                raise MotionConversionError('旋转角度超过当前底盘上限')
+            try:
+                goal, wire = goal_counts(self.rotation_curve, mode, angle)
+            except ValueError as exc:
+                raise MotionConversionError(str(exc)) from exc
+            if not int(self.config.get('chassis_min_counts', 1)) <= wire <= int(self.config.get('chassis_max_counts', 2000)):
+                raise MotionConversionError('旋转 CNT 超过发送范围')
+            return ChassisMoveRequest(mode, wire, 'CNT', wire,
+                                      angle_from_encoder(self.rotation_curve, mode, goal), 'rad')
         entry = self._rotation_entry(mode)
         if not bool(entry.get("enabled", False)) or entry.get("status") != "validated":
             raise MotionConversionError(f"{mode} 旋转尚未标定并启用")
@@ -291,6 +322,8 @@ class ChassisMotionAdapter:
         unit = str(unit).upper()
         if mode not in self._MODE_SIGNS:
             raise MotionConversionError(f"不支持底盘方向：{mode}")
+        if bool(self.config.get("hardware_forward_turn_only", False)) and mode not in {"W", "R", "F"}:
+            raise MotionConversionError("当前控制策略仅允许前进和左右转向")
         if isinstance(value, bool):
             raise MotionConversionError("人工动作请求量必须是正整数")
         try:
@@ -366,6 +399,12 @@ class ChassisMotionAdapter:
             amount = report.enc / coefficient / 1000.0
             uncertainty_rad = 0.0
         else:
+            if self.rotation_curve is not None:
+                amount = angle_from_encoder(self.rotation_curve, mode, report.enc)
+                return ExecutionEstimate(mode=mode, reason=report.reason, local_x_m=0, local_y_m=0,
+                                         yaw_rad=self._MODE_SIGNS[mode][2] * amount,
+                                         uncertainty_m=0, uncertainty_rad=math.radians(5),
+                                         trusted=report.reason == 'TARGET', report=report)
             entry = self._rotation_entry(mode)
             factor = self._finite(entry.get("counts_per_rad"))
             uncertainty_rad = self._finite(entry.get("uncertainty_rad"))
@@ -424,6 +463,8 @@ class ChassisAction:
     ack_missing: bool = False
     stop_requested: bool = False
     obstacle_recovery_confirmed: bool = False
+    recover_stop_result: bool = False
+    stop_idle_status: object | None = None
     move_may_have_started: bool = False
     write_ticket: object | None = None
     ping_write_ticket: object | None = None
@@ -434,6 +475,7 @@ class ChassisAction:
     result_queries: int = 0
     result_query_pending: bool = False
     result_query_ticket: object | None = None
+    timeout_assumed_stopped: bool = False
 
     @property
     def mode(self) -> str:
@@ -907,8 +949,24 @@ class ChassisController:
         if not self._idle_status_deferred:
             self._idle_status_pending = False
         self.last_idle = status
+        if (self.pending is not None and self.pending.stop_requested
+                and self.pending.done_at is not None
+                and self.state in {ChassisState.SETTLING, ChassisState.WAITING_SCAN}):
+            self._emit("chassis_status", (self.connection_generation,
+                       "停止结果已接收，忽略迟到的空闲查询回复"), stamp)
+            return
         if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE, ChassisState.UNKNOWN}:
             action = self.pending
+            if (action is not None and getattr(action, "recover_stop_result", False)
+                    and self.state == ChassisState.STOPPING
+                    and self._stop_deadline is not None and stamp < self._stop_deadline):
+                action.stop_idle_status = status
+                self._motion_unconfirmed = False
+                self.confirmed = True
+                self._status_sent = True
+                self._emit("chassis_status", (self.connection_generation,
+                           "已确认停车，正在补查同编号运动结果"), stamp)
+                return
             self._cancel_result_query()
             self.pending = None
             self._motion_unconfirmed = False
@@ -1052,6 +1110,14 @@ class ChassisController:
             self._emit("chassis_unmatched_done", (self.connection_generation, action, report), stamp)
             self._fault_and_stop("DONE 与当前动作的模式、请求量或单位不匹配", stamp)
             return
+        if action.timeout_assumed_stopped and self.state in {
+            ChassisState.SETTLING, ChassisState.WAITING_SCAN
+        }:
+            # This report confirms the controller's earlier stop fallback, but
+            # its odometry is deliberately not applied after the timeout.
+            self._emit("chassis_status", (self.connection_generation,
+                       "忽略超时按已停动作的迟到 DONE"), stamp)
+            return
         if action.handled_report_raw == report.raw or (
             self.state in {ChassisState.SETTLING, ChassisState.WAITING_SCAN}
             and self.last_done == report.raw
@@ -1087,6 +1153,17 @@ class ChassisController:
 
     def _handle_error(self, error, stamp: float) -> None:
         code = getattr(error, "code", "UNKNOWN")
+        action = self.pending
+        if (code == "BAD_CMD" and action is not None and action.stop_requested
+                and action.done_at is not None and 0 <= stamp - action.done_at <= self._stop_timeout()
+                and self.state in {ChassisState.SETTLING, ChassisState.WAITING_SCAN}
+                and not getattr(action, "stop_cleanup_error_seen", False)):
+            # STOP's parser-cleanup response can trail the matching RESULT.
+            # Consume only one response for this stopped transaction, never a
+            # BAD_CMD belonging to a new MOVE or an unconfirmed execution.
+            action.stop_cleanup_error_seen = True
+            self._emit("chassis_status", (self.connection_generation, "停止结果后的清理行返回预期 BAD_CMD"), stamp)
+            return
         if self._idle_preflight is not None and code != "BUSY":
             self._fail_idle_preflight(stamp)
             return
@@ -1219,7 +1296,8 @@ class ChassisController:
                 return True
             return False
 
-    def request_stop(self, *, reason: str = "用户停止", now: float | None = None) -> bool:
+    def request_stop(self, *, reason: str = "用户停止", now: float | None = None,
+                     recover_result: bool = False) -> bool:
         stamp = self._now(now)
         with self._lock:
             keep_verified = (self.config_verified and self.config_exchange is None
@@ -1252,6 +1330,14 @@ class ChassisController:
             epoch = self._tx_epoch
             self._clear_action_deadlines()
             self._stop_deadline = stamp + self._stop_timeout()
+            if (recover_result and action is not None and action.result_recovery
+                    and action.move_may_have_started and action.done_at is None
+                    and not action.result_invalidated):
+                self._cancel_result_query()
+                action.recover_stop_result = True
+                action.result_queries = 0
+                action.result_due_at = stamp + 0.5
+                self._total_deadline = self._stop_deadline
             self._status_due = stamp + self._stop_status_delay()
             self._status_sent = False
             state = ChassisState.STOPPING if self.move_may_have_started else ChassisState.STOPPING_IDLE
@@ -1338,7 +1424,8 @@ class ChassisController:
                 return False
             action = self.pending
             if (resume_auto and action.source == "auto"
-                    and (not action.stop_requested or action.obstacle_recovery_confirmed)):
+                    and (not action.stop_requested or action.obstacle_recovery_confirmed
+                         or action.timeout_assumed_stopped)):
                 self._state(ChassisState.WAITING_SCAN, "等待停稳后的新完整扫描", stamp)
                 self._emit("chassis_waiting_scan", (self.connection_generation, action), stamp)
                 return True
@@ -1358,9 +1445,12 @@ class ChassisController:
                 return False
             action = self.pending
             self.pending = None
-            self._state(ChassisState.IDLE, "新完整扫描已通过定位与地图更新", stamp)
+            # STOP locks automatic motion until both the execution report and
+            # a fresh post-settle scan have passed. This is that final gate.
+            self.automatic_locked = False
+            self._state(ChassisState.IDLE, "新的停车后扫描已通过导航动作检查", stamp)
             self._emit("chassis_ready", (
-                self.connection_generation, action, "新完整扫描已通过定位与地图更新"
+                self.connection_generation, action, "新的停车后扫描已通过导航动作检查"
             ), stamp)
             return True
 
@@ -1419,18 +1509,27 @@ class ChassisController:
                 and self._total_deadline is not None
                 and stamp >= self._total_deadline
             ):
-                self._emit("chassis_timeout", (
-                    self.connection_generation, action, "动作总时限到达，停止结果不明"
-                ), stamp)
-                self.request_stop(reason="动作总超时", now=stamp)
+                if self.config.get("chassis_timeout_assume_stopped", False):
+                    self._assume_stopped_after_timeout(action, stamp)
+                else:
+                    self._emit("chassis_timeout", (
+                        self.connection_generation, action, "动作总时限到达，停止结果不明"
+                    ), stamp)
+                    self.request_stop(reason="动作总超时", now=stamp)
             if (action is not None and self.pending is action
                     and self.state in {ChassisState.WAITING_ACK, ChassisState.WAITING_DONE}):
                 self._poll_result_recovery(action, stamp)
             if self.state in {ChassisState.STOPPING, ChassisState.STOPPING_IDLE}:
+                if action is not None and getattr(action, "recover_stop_result", False):
+                    self._poll_result_recovery(action, stamp)
                 if self._status_due is not None and not self._status_sent and stamp >= self._status_due:
                     self.request_status(stamp)
                 if self._stop_deadline is not None and stamp >= self._stop_deadline:
-                    self._mark_unknown("停止反馈超时，物理停止未确认", stamp)
+                    if action is not None and getattr(action, "stop_idle_status", None) is not None:
+                        action.recover_stop_result = False
+                        self._handle_idle(action.stop_idle_status, stamp)
+                    else:
+                        self._mark_unknown("停止反馈超时，物理停止未确认", stamp)
 
     def handle_transport_error(
         self,
@@ -1786,6 +1885,42 @@ class ChassisController:
         self._state(target, detail, stamp)
         self._emit("chassis_rejected", (self.connection_generation, detail), stamp)
 
+    def _assume_stopped_after_timeout(self, action: ChassisAction, stamp: float) -> None:
+        """Finish a bounded hardware move when its terminal report is missing.
+
+        This is enabled only by the deployed hardware profile.  A STOP is still
+        queued at high priority, but the missing reply cannot freeze automatic
+        navigation forever.  No encoder delta is invented; the next full radar
+        scan is the sole basis for the following move.
+        """
+        action.timeout_assumed_stopped = True
+        action.stop_requested = True
+        action.done_at = stamp
+        action.result_invalidated = True
+        self._cancel_motion_ping()
+        self._invalidate_idle_preflight()
+        self._clear_action_deadlines()
+        self._motion_unconfirmed = False
+        self._tx_epoch += 1
+        epoch = self._tx_epoch
+        if getattr(self.endpoint, "is_open", False):
+            self._queue_write(
+                STOP_SEQUENCE,
+                action_id=action.action_id,
+                epoch=epoch,
+                priority=True,
+                discard_pending=True,
+            )
+        else:
+            self._emit("chassis_status", (
+                self.connection_generation, "动作超时按已停处理；停止字节未发送（连接不可用）"
+            ), stamp)
+        detail = "动作总时限到达，按已停处理；已发送停止兜底，等待新扫描"
+        self._state(ChassisState.SETTLING, detail, stamp)
+        self._emit("chassis_timeout_assumed_stopped", (
+            self.connection_generation, action, detail
+        ), stamp)
+
     def _emit_fault(self, detail: str, stamp: float) -> None:
         if not self._fault_emitted:
             self._fault_emitted = True
@@ -2038,9 +2173,10 @@ class ChassisController:
         return max(0.1, self._number("chassis_ack_timeout_s", 2.0))
 
     def _total_timeout(self) -> float:
-        values = self.config.get("chassis_config1_values", [])
         configured = self._number("chassis_total_timeout_s", 12.0)
-        return max(configured, 14.0, values[76] / 1000.0 + 6.0) if values else max(0.5, configured)
+        # This deadline starts exactly when the MOVE begins writing.  It is a
+        # safety limit, so a legacy configuration profile cannot lengthen it.
+        return min(2.0, max(0.5, configured))
 
     def _stop_timeout(self) -> float:
         return max(0.5, self._number("chassis_stop_timeout_s", 3.0))

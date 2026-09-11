@@ -279,17 +279,16 @@ class IdlePreflightTests(unittest.TestCase):
         self.assertIsNone(self.controller.communication_check)
         self.assertFalse(self.controller.idle_preflight_ready)
 
-    def test_config_must_be_verified_and_sync_cancels_queued_preflight(self):
+    def test_unverified_config_allows_preflight_but_sync_cancels_it(self):
         config = resolve_runtime_config("hardware", "navigation", {
             **self.config, "chassis_config1_file": DEFAULT_PROFILE,
         })
         self.controller.update_config(config)
-        self.poll(0.5)
-        self.assertFalse(self.writes(b"@PING,"))
-        self.controller.config_verified = True
+        self.assertFalse(self.controller.config_verified)
         self.endpoint.defer_ping = True
         self.poll(0.5)
         old = self.endpoint.tickets[-1]
+        self.assertTrue(old.data.lstrip().startswith(b"@PING,"))
         self.assertTrue(self.controller.request_config_sync(apply=False))
         self.assertEqual(old.state, "cancelled")
         self.poll(0.5)

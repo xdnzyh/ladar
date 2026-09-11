@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import heapq
 import json
 import math
@@ -71,6 +71,7 @@ class ScanPoint:
     calibration_version: str | None = None
     source: str | None = None
     session: str | None = None
+    immediate_free: bool = False
 
     @property
     def x(self) -> float:
@@ -102,6 +103,7 @@ class VelocityCommand:
     right_mps: float = 0.0
     yaw_rps: float = 0.0
     duration_s: float = 0.0
+    recovery_translation: bool = False
 
     @property
     def stopped(self) -> bool:
@@ -312,6 +314,7 @@ class OccupancyGrid:
         hits = {}
         frees = {}
         measured_frees = set()
+        immediate_frees = set()
         out_of_bounds = 0
         valid_points = 0
         valid = [point for point in points
@@ -339,7 +342,8 @@ class OccupancyGrid:
                 for index in range(1, steps):
                     rays.append(ScanPoint(left.angle_rad + gap * index / steps,
                                           distance, quality, False,
-                                          source="assumed_open" if "assumed_open" in (left.source, right.source) else "free_space"))
+                                          source="assumed_open" if "assumed_open" in (left.source, right.source) else "free_space",
+                                          immediate_free=left.immediate_free and right.immediate_free))
         for point in rays:
             if (not math.isfinite(point.angle_rad) or not math.isfinite(point.quality)
                     or point.quality < self.MIN_QUALITY
@@ -360,16 +364,56 @@ class OccupancyGrid:
                 if add_only and self.state(*cell) == self.OCCUPIED:
                     break
                 frees[cell] = max(frees.get(cell, 0.0), evidence_weight)
+                if point.immediate_free and not has_hit:
+                    immediate_frees.add(cell)
                 if point.source != "assumed_open":
                     measured_frees.add(cell)
             if has_hit:
                 hit_log_odds = 2.25 if wall_model else self.HIT_LOG_ODDS
                 hit_weight = evidence_weight
-                if point.source and point.source.split(":", 1)[0] == "stable_wall":
+                if wall_model:
+                    # These endpoints already passed line span, support and RMS
+                    # checks. Raw range variance must not suppress that fitted
+                    # wall again; retain it on rays and in the motion guard.
                     hit_weight = min(1.0, max(0.0, point.quality)) * confidence
-                hits[end] = max(hits.get(end, 0.0), hit_log_odds * hit_weight)
+                amount = hit_log_odds * hit_weight
+                if wall_model and point.quality >= .9 and confidence >= .55:
+                    # Coherent fitted walls are direct obstacle evidence. One
+                    # high-quality observation supersedes old free-space odds.
+                    amount = max(amount, 4.5 - self.value(*end))
+                hits[end] = max(hits.get(end, 0.0), amount)
             if not self.in_bounds(*end):
                 out_of_bounds += 1
+        if immediate_frees:
+            # Bresenham rays can leave isolated unknown cells even with dense
+            # angular sampling. Fill only sectors bounded by two immediate
+            # free rays, up to their shorter range, with old-wall occlusion.
+            from bisect import bisect_right
+            ordered_free = sorted(valid, key=lambda p: p.angle_rad % math.tau)
+            angles = [p.angle_rad % math.tau for p in ordered_free]
+            reach = min(1.0, max(p.distance_m for p in valid if p.immediate_free))
+            radius_cells = math.ceil(reach / self.resolution_m) + 1
+            for row in range(max(0, start[1]-radius_cells), min(self.height, start[1]+radius_cells+1)):
+                for col in range(max(0, start[0]-radius_cells), min(self.width, start[0]+radius_cells+1)):
+                    cell = (col, row)
+                    if cell in immediate_frees or cell in hits or self.value(*cell) > 0:
+                        continue
+                    x, y = pose.world_to_local(*self.cell_to_world(col, row))
+                    distance = math.hypot(x, y)
+                    if distance > reach:
+                        continue
+                    angle = math.atan2(x, y) % math.tau
+                    index = bisect_right(angles, angle)
+                    left, right = ordered_free[index-1], ordered_free[index % len(angles)]
+                    gap = (right.angle_rad-left.angle_rad) % math.tau
+                    if (not left.immediate_free or not right.immediate_free
+                            or not 0 < gap <= math.radians(5)
+                            or distance > min(left.distance_m, right.distance_m)):
+                        continue
+                    if any(self.state(*c) == self.OCCUPIED for c in self._line_cells(start, cell)):
+                        continue
+                    frees[cell] = max(frees.get(cell, 0), confidence)
+                    immediate_frees.add(cell)
         if not hits and not frees:
             return MapUpdateSummary(out_of_bounds_points=out_of_bounds, known_cells=self._known_count,
                                     map_revision=self._revision)
@@ -386,14 +430,21 @@ class OccupancyGrid:
                 if was_assumed != (cell in self.assumed_free_cells):
                     self._revision += 1
                 before = self.state(*cell)
-                if self._add(*cell, -self.FREE_LOG_ODDS * weight):
+                amount = -self.FREE_LOG_ODDS * weight
+                if cell in immediate_frees:
+                    amount = min(amount, -2.0 - self.value(*cell))
+                if self._add(*cell, amount):
                     changed.add(cell)
                     if self.state(*cell) != before:
                         state_changed.add(cell)
         for cell, amount in hits.items():
+            before = self.state(*cell)
+            # No-return extrapolation is not evidence against a newly measured
+            # obstacle. Do not make a wall repay many scans of assumed vacancy.
+            if cell in self.assumed_free_cells and self.value(*cell) < 0:
+                self._add(*cell, -self.value(*cell))
             self.assumed_free_cells.discard(cell)
             self._measured_free_cells.discard(cell)
-            before = self.state(*cell)
             if self._add(*cell, amount):
                 changed.add(cell)
                 if self.state(*cell) != before:
@@ -920,6 +971,9 @@ class NavigationEngine:
     PARKING_SEARCH_STEP_M = 0.10
     PARKING_SEARCH_SPEED_MPS = 0.10
     PARKING_SEARCH_MAX_ATTEMPTS = 3
+    RADAR_GAP_MIN_WIDTH_M = 0.40
+    RADAR_GAP_LOCK_TOLERANCE_RAD = math.radians(30)
+    RADAR_GAP_DIRECT_TOLERANCE_RAD = math.radians(25)
 
     def __init__(
         self,
@@ -939,6 +993,13 @@ class NavigationEngine:
         unobserved_clear_range_m: float = 0.0,
         prefer_forward_exploration: bool = False,
         forward_only: bool = False,
+        local_probe_after_two_scans: bool = False,
+        rotation_enabled: bool = False,
+        immediate_navigation: bool = False,
+        prioritize_unexplored_gaps: bool = False,
+        radar_gap_steering: bool = False,
+        forward_turn_only: bool = False,
+        distance_controlled_motion: bool = False,
         course_model=None,
     ) -> None:
         self.grid = grid or OccupancyGrid()
@@ -946,6 +1007,21 @@ class NavigationEngine:
         self.unobserved_clear_range_m = min(max_range_m, max(0.0, unobserved_clear_range_m))
         self.prefer_forward_exploration = bool(prefer_forward_exploration)
         self.forward_only = bool(forward_only)
+        self.local_probe_after_two_scans = bool(local_probe_after_two_scans)
+        self.rotation_enabled = bool(rotation_enabled)
+        self.immediate_navigation = bool(immediate_navigation)
+        self.prioritize_unexplored_gaps = bool(prioritize_unexplored_gaps)
+        # In this hardware mode, a fresh complete radar circle chooses the
+        # direction.  Mapping remains only a confidence aid, never a route.
+        self.radar_gap_steering = bool(radar_gap_steering)
+        self.forward_turn_only = bool(forward_turn_only)
+        self.distance_controlled_motion = bool(distance_controlled_motion)
+        self._detour_heading = None
+        self._gap_world_heading = None
+        self._gap_origin = None
+        self._radar_gap_world_heading = None
+        self._detour_origin = None
+        self._stationary_scan_attempts = 0
         self.course_model = course_model
         self.min_range_m = min_range_m
         self.robot_radius_m = robot_radius_m
@@ -1039,6 +1115,10 @@ class NavigationEngine:
 
     def reset(self) -> None:
         self.recovery_requested = False
+        self._detour_heading = self._detour_origin = None
+        self._gap_world_heading = self._gap_origin = None
+        self._radar_gap_world_heading = None
+        self._stationary_scan_attempts = 0
         if self.course_model is not None:
             self.course_model.reset()
         self.grid.clear()
@@ -1083,6 +1163,10 @@ class NavigationEngine:
 
     def set_auto(self, enabled: bool) -> None:
         self.recovery_requested = False
+        self._detour_heading = self._detour_origin = None
+        self._gap_world_heading = self._gap_origin = None
+        self._radar_gap_world_heading = None
+        self._stationary_scan_attempts = 0
         self.auto_enabled = bool(enabled)
         if enabled:
             self.state = "准备探索"
@@ -1097,6 +1181,7 @@ class NavigationEngine:
         if command.stopped or command.duration_s <= 0:
             return
         self._motion_since_last_scan = True
+        self._stationary_scan_attempts = 0
         local_x = command.right_mps * command.duration_s
         local_y = command.forward_mps * command.duration_s
         diagonal = abs(local_x) > 1e-6 and abs(local_y) > 1e-6
@@ -1131,6 +1216,7 @@ class NavigationEngine:
         if translation <= 1e-9 and abs(yaw_rad) <= 1e-9:
             return
         self._motion_since_last_scan = True
+        self._stationary_scan_attempts = 0
         diagonal = abs(local_x_m) > 1e-6 and abs(local_y_m) > 1e-6
         self._diagonal_motion_since_last_scan = self._diagonal_motion_since_last_scan or diagonal
         self._translation_since_last_scan = self._translation_since_last_scan or translation > 1e-6
@@ -1149,6 +1235,7 @@ class NavigationEngine:
     def process_scan(self, points: Sequence[ScanPoint], *,
                      free_space_points: Sequence[ScanPoint] = (),
                      obstacle_points: Sequence[ScanPoint] = (),
+                     previous_wall_layer: Sequence[ScanPoint] = (),
                      add_only: bool = False) -> VelocityCommand:
         self._last_scan_had_motion = self._motion_since_last_scan
         self._last_scan_had_diagonal_motion = self._diagonal_motion_since_last_scan
@@ -1258,6 +1345,9 @@ class NavigationEngine:
         self._predicted_motion_uncertainty_m = 0.0
         self._predicted_rotation_rad = 0.0
         self._predicted_motion_uncertainty_rad = 0.0
+        if previous_wall_layer:
+            self.grid.update_scan(self._sensor_pose(), previous_wall_layer, self.max_range_m,
+                                  scan_confidence=score, add_only=add_only)
         summary = self.grid.update_scan(self._sensor_pose(), valid + list(free_space_points),
                                         self.max_range_m, scan_confidence=score, add_only=add_only)
         if summary.out_of_bounds_points:
@@ -1265,7 +1355,7 @@ class NavigationEngine:
         if initializing:
             self._map_initialized = (self.grid.update_count >= self.BOOTSTRAP_SCANS
                                      and len(self.grid.occupied_cells()) >= self.matcher.MIN_HIT_POINTS)
-        if not self._map_initialized:
+        if not self._map_initialized and not self.radar_gap_steering:
             self.state = "建图初始化"
             self.detail = "停车复测初始环境"
             return VelocityCommand()
@@ -1336,15 +1426,181 @@ class NavigationEngine:
         self.detail = detail
         self.path_cells.clear()
         self.target_cell = None
+        if self.auto_enabled and self.radar_gap_steering:
+            # A poor global match must not replace a fresh radar picture with
+            # a stale map route.  It only reduces the translation length.
+            command = self._radar_gap_command(map_confident=False)
+            if not command.stopped:
+                self.completed_scans += 1
+                return command
+        if self._two_scan_due():
+            command = self._two_scan_action()
+            if not command.stopped:
+                self.completed_scans += 1
+            return command
+        if (self.auto_enabled and (
+                (self.immediate_navigation and self._map_initialized)
+                or (self.local_probe_after_two_scans
+                    and max(self.match_failures, self._stationary_scan_attempts) >= 2))):
+            command = self._fresh_local_probe()
+            if not command.stopped:
+                # A usable local scan does not imply a successful global pose match.
+                self.completed_scans += 1
+                self.match_failures = 0
+                self.state = "局部短步探索"
+                self.detail = "按当前完整扫描的空闲空间直接短步移动；本圈未写入全局地图"
+                return command
+        return VelocityCommand()
+
+    def _fresh_local_probe(self, *, two_scan_action: bool = False) -> VelocityCommand:
+        from mapping_policy import complete_open_scan
+        if len(self.latest_scan) < 12:
+            return VelocityCommand()
+        size = max(80, math.ceil((self.max_range_m + self.robot_radius_m + .2) * 2 / self.grid.resolution_m))
+        local = NavigationEngine(OccupancyGrid(size, size, self.grid.resolution_m),
+                                 max_range_m=self.max_range_m, robot_radius_m=self.robot_radius_m,
+                                 sensor_offset_x_m=self.sensor_offset_x_m, sensor_offset_y_m=self.sensor_offset_y_m,
+                                 sensor_offset_yaw_rad=self.sensor_offset_yaw_rad,
+                                 translation_capabilities=self.translation_capabilities,
+                                 safety_clearance_m=self.safety_clearance_m,
+                                 safety_stop_distance_m=self.safety_stop_distance_m,
+                                 safety_max_observation_age_s=self.safety_max_observation_age_s,
+                                 safety_speed_upper_bound_mps=self.safety_speed_upper_bound_mps,
+                                 distance_controlled_motion=self.distance_controlled_motion,
+                                 prioritize_unexplored_gaps=self.prioritize_unexplored_gaps,
+                                 rotation_enabled=self.rotation_enabled,
+                                 forward_only=True)
+        local.start_pose.yaw = wrap_angle(self.start_pose.yaw - self.pose.yaw)
+        local.latest_scan = list(complete_open_scan(self.latest_scan, self.unobserved_clear_range_m,
+                                                   self.max_range_m, self.min_range_m, self.grid.resolution_m,
+                                                   front_angle_rad=-self.sensor_offset_yaw_rad))
+        # Local range geometry is fresh even if global localization is ambiguous.
+        # This confidence controls probe length only; it is never committed.
+        local.match_score = .8
+        local.grid.update_scan(local._sensor_pose(), local.latest_scan, local.max_range_m, add_only=True)
+        # This disposable grid represents current ray visibility, not accumulated
+        # wall confidence. Unknown cells remain unknown; raw hits stay blocked.
+        for row in range(size):
+            for col in range(size):
+                value = local.grid.value(col, row)
+                if value <= -.25:
+                    local.grid._add(col, row, -2)
+        if two_scan_action:
+            local.recovery_requested = self.recovery_requested
+            if self._gap_world_heading is not None:
+                local._gap_world_heading = wrap_angle(self._gap_world_heading - self.pose.yaw)
+            command = local._two_scan_action(allow_local=False)
+            self.state, self.detail = local.state, local.detail
+            self.recovery_requested = local.recovery_requested
+            return command
+        if self.recovery_requested:
+            local.recovery_requested = True
+            command = local._recovery_command()
+            if not command.stopped:
+                self.recovery_requested = False
+            return command
+        gaps = local._unexplored_gap_candidates() if local.prioritize_unexplored_gaps else []
+        if gaps:
+            for gap in gaps:
+                command = local._command_to_gap(gap)
+                if not command.stopped:
+                    return command
+            return VelocityCommand()
+        return local._largest_gap_command()
+
+    def _two_scan_due(self) -> bool:
+        return (self.auto_enabled and self.local_probe_after_two_scans
+                and self._stationary_scan_attempts >= 2)
+
+    def _two_scan_action(self, *, allow_local: bool = True) -> VelocityCommand:
+        """Bound stationary deliberation; never bypass the physical sweep guard."""
+        self._two_scan_action_attempted = True
+        if self.recovery_requested:
+            recovery = self._recovery_command()
+            if not recovery.stopped:
+                return recovery
+        reasons = []
+        for forward, right in ((1, 0), (1, 1), (1, -1), (0, 1), (0, -1)):
+            norm = math.hypot(forward, right)
+            command = VelocityCommand(.1 * forward / norm, .1 * right / norm, duration_s=1)
+            guarded, reason = self._translation_guard(command, allow_backtracking=True)
+            if not guarded.stopped:
+                self.recovery_requested = False
+                self.state = "两圈短步探索"
+                self.detail = "已完成两圈扫描，向前方 180° 内可通行方向移动 10 cm"
+                self.path_cells = self._motion_cells(guarded)
+                self.target_cell = self.path_cells[-1]
+                return guarded
+            reasons.append(reason)
+        sign = 1 if self._gap_world_heading is None or wrap_angle(self._gap_world_heading-self.pose.yaw) >= 0 else -1
+        for direction in (sign, -sign):
+            command = self._safe_rotation(direction * math.radians(20))
+            if not command.stopped:
+                self.recovery_requested = False
+                self.state = "两圈转向探索"
+                self.detail = "平移受限，执行已检查的 20° 旋转后重新扫描"
+                return command
+        self.recovery_requested = True
+        command = self._recovery_command()
+        if not command.stopped:
+            return command
+        self.recovery_requested = False
+        self.state = "两圈动作均受阻"
+        self.detail = "；".join(dict.fromkeys(reason for reason in reasons if reason))
+        if allow_local:
+            # Localization or accumulated grid uncertainty must not veto a
+            # fully checked action in the current robot-relative scan.
+            return self._fresh_local_probe(two_scan_action=True)
         return VelocityCommand()
 
     def _plan_next_command(self) -> VelocityCommand:
+        if self.radar_gap_steering:
+            # The legacy mapping/path planner remains for other runtime modes,
+            # but cannot select a direction in direct radar-gap control.
+            return self._radar_gap_command(
+                map_confident=self.match_score >= self.MAP_UPDATE_MIN_CONFIDENCE,
+            )
+        if self._two_scan_due():
+            return self._two_scan_action()
         if self.recovery_requested:
             return self._recovery_command()
+        gaps = self._unexplored_gap_candidates() if self.prioritize_unexplored_gaps else []
+        if gaps:
+            self._terminal_evidence_scans = self._empty_frontier_scans = 0
+            self._terminal_signature = self._parking_goal = None
+            self._detour_heading = self._detour_origin = None
+            if (self._gap_origin is not None
+                    and math.dist(self._gap_origin, (self.pose.x, self.pose.y)) >= .15):
+                self._gap_world_heading = self._gap_origin = None
+            if self._gap_world_heading is not None:
+                compatible = [gap for gap in gaps if abs(wrap_angle(
+                    self.pose.yaw + gap[1] - self._gap_world_heading)) <= math.radians(35)]
+                if compatible:
+                    preferred = min(compatible, key=lambda gap: abs(wrap_angle(
+                        self.pose.yaw + gap[1] - self._gap_world_heading)))
+                    gaps = [preferred] + [gap for gap in gaps if gap != preferred]
+            for gap in gaps:
+                command = self._command_to_gap(gap)
+                if not command.stopped:
+                    if (self._gap_world_heading is None or abs(wrap_angle(
+                            self.pose.yaw + gap[1] - self._gap_world_heading)) > math.radians(35)):
+                        self._gap_world_heading = wrap_angle(self.pose.yaw + gap[1])
+                        self._gap_origin = (self.pose.x, self.pose.y)
+                    return command
+            self.recovery_requested = True
+            escape = self._recovery_command()
+            if not escape.stopped:
+                return escape
+            self.recovery_requested = False
+            self.state = "缺口待通行"
+            self.detail = "发现大于 40 cm 的未探索缺口，当前动作空间不足；不判定停车完成"
+            return VelocityCommand()
+        self._gap_world_heading = self._gap_origin = None
+        if self.rotation_enabled and self._detour_heading is not None:
+            command = self._continue_detour()
+            if not command.stopped:
+                return command
         start = self.grid.world_to_cell(self.pose.x, self.pose.y)
-        clusters = self.grid.frontier_clusters()
-        self.frontier_count = len(clusters)
-        self.reachable_frontier_count = 0
 
         if self.course_model is not None and self._terminal_geometry_confirmed():
             self._terminal_evidence_scans += 1
@@ -1358,10 +1614,6 @@ class NavigationEngine:
                 self.state = "终点确认"
                 self.detail = "车位内固定姿态复测"
             return VelocityCommand()
-
-        parking = self._course_parking_command()
-        if not parking.stopped:
-            return parking
 
         if self.prefer_forward_exploration:
             forward = self._forward_exploration_command()
@@ -1379,6 +1631,17 @@ class NavigationEngine:
                 self.detail = f"前方可通行，优先直行 {self._command_distance(forward):.2f} m，停车后重扫"
                 return forward
 
+            turn = self._start_detour()
+            if not turn.stopped:
+                return turn
+
+        parking = self._course_parking_command()
+        if not parking.stopped:
+            return parking
+
+        clusters = self.grid.frontier_clusters()
+        self.frontier_count = len(clusters)
+        self.reachable_frontier_count = 0
         if clusters:
             candidates: list[tuple[float, list[tuple[int, int]], tuple[int, int]]] = []
             clearance = self.robot_radius_m + 0.02
@@ -1562,6 +1825,8 @@ class NavigationEngine:
         return self._collision_guard(command)
 
     def _terminal_geometry_confirmed(self) -> bool:
+        if self.prioritize_unexplored_gaps and self._unexplored_gap_candidates():
+            return False
         if self.course_model is not None and not self.course_model.parking_allowed(self.pose, self.start_pose):
             return False
         if self._terminal_evidence_scans == 0 and not self._last_scan_had_translation:
@@ -1608,10 +1873,387 @@ class NavigationEngine:
         self._terminal_signature = signature
         return True
 
+    def _radar_gap_candidates(self) -> list[tuple[float, float, float, float]]:
+        """Return openings in the course-forward, absolute 180-degree half-plane.
+
+        A missing bin is deliberately not treated as free: scan-completion
+        validation happens upstream, and this additional rule makes a dropped
+        group of measurements unable to create a fictitious opening.
+        """
+        observed = [
+            point for point in self.latest_scan
+            if (math.isfinite(point.angle_rad) and math.isfinite(point.distance_m)
+                and math.isfinite(point.quality) and point.quality >= self.grid.MIN_QUALITY
+                and self.min_range_m <= point.distance_m <= self.max_range_m)
+        ]
+        if len(observed) < 12:
+            return []
+        clearance = self.robot_radius_m + .035
+        safe_distance = clearance + .10
+        # ``start_pose.yaw`` is fixed when the vehicle is placed at the short
+        # edge of the long rectangular course.  Do not centre the search on
+        # ``pose.yaw``: that would redefine "forward" after every turn.
+        bins: list[tuple[float, float] | None] = []
+        for degrees in range(-90, 91, 5):
+            absolute_offset = math.radians(degrees)
+            target_world_heading = wrap_angle(self.start_pose.yaw + absolute_offset)
+            target = wrap_angle(target_world_heading - self.pose.yaw)
+            candidates = [
+                point for point in observed
+                if abs(wrap_angle(
+                    math.atan2(*self._sensor_to_body(point.x, point.y)) - target,
+                )) <= math.radians(13)
+            ]
+            if not candidates:
+                bins.append(None)
+                continue
+            # Select the angularly closest return for this direction. A wall
+            # just outside the bin is an opening edge, not evidence that the
+            # bin centre itself is blocked.
+            nearest = min(candidates, key=lambda point: (
+                abs(wrap_angle(math.atan2(*self._sensor_to_body(point.x, point.y)) - target)),
+                point.distance_m,
+            ))
+            body_x, body_y = self._sensor_to_body(nearest.x, nearest.y)
+            heading = math.atan2(body_x, body_y)
+            bins.append((absolute_offset, nearest.distance_m)
+                        if nearest.distance_m > safe_distance else None)
+
+        openings: list[tuple[float, float, float]] = []
+        start = 0
+        while start < len(bins):
+            if bins[start] is None:
+                start += 1
+                continue
+            end = start
+            while end + 1 < len(bins) and bins[end + 1] is not None:
+                end += 1
+            run = [item for item in bins[start:end + 1] if item is not None]
+            depth = min(item[1] for item in run)
+            absolute_offset = sum(item[0] for item in run) / len(run)
+            heading = wrap_angle(self.start_pose.yaw + absolute_offset - self.pose.yaw)
+            nearest_forward_offset = min((item[0] for item in run), key=abs)
+            # The opening width is measured at the nearest return, rather
+            # than inferred from an old wall segment in the global map.
+            span = math.radians(5 * (end - start + 1))
+            width = 2 * depth * math.sin(min(math.pi / 2, span / 2))
+            if width >= self.RADAR_GAP_MIN_WIDTH_M:
+                openings.append((width, heading, depth, nearest_forward_offset))
+            start = end + 1
+        return openings
+
+    def _radar_translation_guard(self, command: VelocityCommand) -> tuple[VelocityCommand, str | None]:
+        """Check a proposed radar-guided move without consulting map routes."""
+        if command.stopped:
+            return command, None
+        if self.forward_only and not self._normal_direction_allowed(command):
+            return VelocityCommand(), "动作会朝起点方向回退"
+        mode = self._translation_mode(command)
+        if mode is None:
+            return VelocityCommand(), "雷达缺口动作不是已标定的底盘方向"
+        capability = self._capability(mode)
+        distance = self._command_distance(command)
+        if (not capability["enabled"]
+                or distance + 1e-9 < float(capability["min_m"])
+                or distance > float(capability["max_m"]) + 1e-9):
+            return VelocityCommand(), f"{mode} 方向不支持该步长"
+        swept = self._swept_body_cells(self._motion_cells(command))
+        if any(not self.grid.in_bounds(*cell) for cell in swept):
+            return VelocityCommand(), "雷达缺口动作会越出地图边界"
+        if not self._command_has_clearance(command):
+            return VelocityCommand(), "预测行程内有雷达墙体"
+        return command, None
+
+    def _safe_radar_rotation(self, angle: float) -> VelocityCommand:
+        """Rotate from current radar clearance, without requiring mapped free cells."""
+        if (not self.rotation_enabled
+                or not math.radians(10) <= abs(angle) <= math.radians(25) + 1e-9
+                or len(self.latest_scan) < 12):
+            return VelocityCommand()
+        clearance = self.robot_radius_m + (.035 if self.distance_controlled_motion else self.safety_clearance_m)
+        for point in self.latest_scan:
+            if not point.has_echo(self.max_range_m):
+                continue
+            body_x, body_y = self._sensor_to_body(point.x, point.y)
+            margin = (point.distance_m * math.sin(min(math.pi / 2, max(0.0, point.angle_error_rad or 0.0)))
+                      + max(0.0, point.distance_error_m or 0.0))
+            if math.hypot(body_x, body_y) <= clearance + margin:
+                return VelocityCommand()
+        return VelocityCommand(yaw_rps=math.copysign(.25, angle), duration_s=abs(angle) / .25)
+
+    def _radar_gap_command(self, *, map_confident: bool) -> VelocityCommand:
+        """Commit to one front opening; abandon it only when this scan disproves it."""
+        gaps = self._radar_gap_candidates()
+        if not gaps:
+            self._radar_gap_world_heading = None
+            self.path_cells.clear()
+            self.target_cell = None
+            self.state = "前方无可信缺口"
+            self.detail = "本圈雷达前方 180° 没有足够宽且预测无墙的缺口"
+            return VelocityCommand()
+        # Any gap covering the course centreline wins over a wider lateral
+        # one.  Width only breaks ties within the same absolute-forward class.
+        gaps = sorted(gaps, key=lambda gap: (
+            abs(gap[3]) <= self.RADAR_GAP_DIRECT_TOLERANCE_RAD,
+            gap[0], gap[2], -abs(gap[3]),
+        ), reverse=True)
+
+        if self._radar_gap_world_heading is not None:
+            locked = [gap for gap in gaps if abs(wrap_angle(
+                self.pose.yaw + gap[1] - self._radar_gap_world_heading,
+            )) <= self.RADAR_GAP_LOCK_TOLERANCE_RAD]
+            if locked:
+                gaps = sorted(locked, key=lambda gap: abs(wrap_angle(
+                    self.pose.yaw + gap[1] - self._radar_gap_world_heading,
+                ))) + [gap for gap in gaps if gap not in locked]
+            else:
+                # The actual fresh circle no longer contains the chosen gap.
+                self._radar_gap_world_heading = None
+
+        for width, heading, depth, _ in gaps:
+            world_heading = wrap_angle(self.pose.yaw + heading)
+            turn_angle = wrap_angle(world_heading - self.pose.yaw)
+            if abs(turn_angle) >= math.radians(10):
+                turn = self._safe_radar_rotation(math.copysign(
+                    min(abs(turn_angle), math.radians(25)), turn_angle,
+                ))
+                if turn.stopped:
+                    continue
+                self._radar_gap_world_heading = world_heading
+                self.path_cells.clear()
+                self.target_cell = None
+                self.state = "对准雷达缺口"
+                self.detail = f"锁定 {width:.2f} m 缺口，旋转 {abs(math.degrees(turn_angle)):.0f}° 后前进"
+                return turn
+
+            capability = self._capability("W")
+            # A clear radar corridor takes the normal full 20 cm step.  Map
+            # confidence is only a supporting signal; it must not turn a
+            # physically clear path into needless short-step dithering.
+            desired = .20
+            distance = min(desired, float(capability["max_m"]))
+            minimum = float(capability["min_m"])
+            while distance + 1e-9 >= minimum:
+                command = VelocityCommand(forward_mps=.10, duration_s=distance / .10)
+                guarded, _ = self._radar_translation_guard(command)
+                if not guarded.stopped:
+                    self._radar_gap_world_heading = world_heading
+                    self.path_cells = self._motion_cells(guarded)
+                    self.target_cell = self.path_cells[-1]
+                    confidence = "尚可" if map_confident else "偏低，仅作辅助判断"
+                    self.state = "沿雷达缺口前进"
+                    self.detail = (f"锁定 {width:.2f} m 前方缺口，预测路径无墙；"
+                                   f"雷达图置信度{confidence}，前进 {distance:.2f} m")
+                    return guarded
+                if distance <= minimum + 1e-9:
+                    break
+                distance = max(minimum, distance - self.grid.resolution_m)
+
+            # This candidate is physically contradicted by the new scan; try
+            # another front gap instead of oscillating back to a stale target.
+            if self._radar_gap_world_heading == world_heading:
+                self._radar_gap_world_heading = None
+
+        self._radar_gap_world_heading = None
+        self.path_cells.clear()
+        self.target_cell = None
+        self.state = "雷达缺口受阻"
+        self.detail = "候选缺口的预测行程有墙或底盘步长不支持，本圈不执行危险动作"
+        return VelocityCommand()
+
+    def _unexplored_gap_candidates(self):
+        """Find >40 cm breaks between supported wall ends leading beyond known space."""
+        from mapping_policy import prepare_mapping_points
+        if len(self.latest_scan) < 12:
+            return []
+        fitted = prepare_mapping_points(self.latest_scan, self.max_range_m,
+                                        self.min_range_m, self.grid.resolution_m).points
+        points = sorted(fitted, key=lambda point: point.angle_rad % math.tau)
+        if len(points) < 4:
+            return []
+        candidates = []
+        for left, right in zip(points, points[1:] + points[:1]):
+            arc = (right.angle_rad - left.angle_rad) % math.tau
+            if arc < math.radians(12):
+                continue
+            width = math.hypot(right.x - left.x, right.y - left.y)
+            if width <= .40 + 1e-9:
+                continue
+            angle = wrap_angle(left.angle_rad + arc / 2)
+            depth = max(self.robot_radius_m + .10,
+                        min(left.distance_m, right.distance_m) * max(.3, math.cos(min(math.pi / 2, arc / 2))))
+            sx = math.sin(angle) * depth
+            sy = math.cos(angle) * depth
+            if arc < math.pi:
+                # Aim at the physical opening midpoint: an angular bisector
+                # skews toward the closer jamb when endpoint ranges differ.
+                sx, sy = (left.x + right.x) / 2, (left.y + right.y) / 2
+                depth = math.hypot(sx, sy)
+            bx, by = self._sensor_to_body(sx, sy)
+            heading = math.atan2(bx, by)
+            world_heading = self.pose.yaw + heading
+            unexplored = False
+            blocked = False
+            for extra in (.05, .15, .25, .35):
+                distance = math.hypot(bx, by) + extra
+                world = (self.pose.x + math.sin(world_heading) * distance,
+                         self.pose.y + math.cos(world_heading) * distance)
+                cell = self.grid.world_to_cell(*world)
+                if not self.grid.in_bounds(*cell):
+                    blocked = True
+                    break
+                state = self.grid.state(*cell)
+                if state == self.grid.OCCUPIED:
+                    blocked = True
+                    break
+                if state == self.grid.UNKNOWN or cell in self.grid.assumed_free_cells:
+                    unexplored = True
+            if unexplored and not blocked:
+                candidates.append((width, heading, depth))
+        return sorted(candidates, key=lambda item: (
+            abs(item[1]) <= math.radians(25), item[0], -abs(item[1])), reverse=True)
+
+    def _command_to_gap(self, gap) -> VelocityCommand:
+        width, heading, _ = gap
+        # A front opening need not be centred to sub-ten-degree precision.
+        # Test the full forward sweep before spending another action on yaw;
+        # the next scan will re-evaluate the approach after actual progress.
+        if abs(heading) <= math.radians(25):
+            capability = self._capability('W')
+            distance = min(.20, float(capability['max_m']))
+            if capability['enabled'] and distance >= max(.02, float(capability['min_m'])):
+                straight = VelocityCommand(forward_mps=.1, duration_s=distance / .1)
+                guarded, _ = self._translation_guard(straight, allow_backtracking=True)
+                if not guarded.stopped:
+                    self.state = "直行探索缺口"
+                    self.detail = f"前方扫掠空间足够，向 {width:.2f} m 缺口直行 {distance:.2f} m"
+                    self.path_cells = self._motion_cells(guarded)
+                    self.target_cell = self.path_cells[-1]
+                    return guarded
+        if self.rotation_enabled and abs(heading) >= math.radians(10):
+            # Re-evaluate the gap after every completed turn. Large heading
+            # changes are made as several calibrated small rotations.
+            angle = math.copysign(min(abs(heading), math.radians(25)), heading)
+            turn = self._safe_rotation(angle)
+            if not turn.stopped:
+                self.state = "转向未探索缺口"
+                self.detail = f"优先探索 {width:.2f} m 缺口，先{'右' if angle > 0 else '左'}转 {abs(math.degrees(angle)):.0f}°"
+                self.path_cells.clear()
+                self.target_cell = None
+                return turn
+        # Rotation is preferred; if unavailable/blocked, try a guarded
+        # translation in the gap's direction instead of declaring parking.
+        if abs(heading) < math.radians(10):
+            forward, right = .1, 0.
+        else:
+            forward, right = self._cardinal_translation(math.cos(heading), math.sin(heading), .1)
+        mode = self._translation_mode(VelocityCommand(forward, right, duration_s=1))
+        capability = self._capability(mode)
+        distance = min(.10, float(capability['max_m']))
+        minimum = max(.02, float(capability['min_m']))
+        while distance >= minimum - 1e-9:
+            command = VelocityCommand(forward, right, duration_s=distance / .1)
+            guarded, _ = self._translation_guard(command, allow_backtracking=True)
+            if not guarded.stopped:
+                self.state = "优先探索缺口"
+                self.detail = f"沿 {width:.2f} m 未探索缺口前进 {distance:.2f} m"
+                self.path_cells = self._motion_cells(command)
+                self.target_cell = self.path_cells[-1]
+                return command
+            if distance <= minimum + 1e-9:
+                break
+            distance = max(minimum, distance - self.grid.resolution_m)
+        return VelocityCommand()
+
     def _normal_direction_allowed(self, command: VelocityCommand) -> bool:
         angle = self.pose.yaw - self.start_pose.yaw
         progress = command.forward_mps * math.cos(angle) - command.right_mps * math.sin(angle)
         return command.forward_mps >= -1e-9 and progress >= -1e-9
+
+    def _safe_rotation(self, angle: float) -> VelocityCommand:
+        if not self.rotation_enabled or not math.radians(10) <= abs(angle) <= math.radians(25) + 1e-9:
+            return VelocityCommand()
+        if len(self.latest_scan) < 12:
+            return VelocityCommand()
+        center = self.grid.world_to_cell(self.pose.x, self.pose.y)
+        cells = self._swept_body_cells([center])
+        blocked = self.grid.inflated_obstacles(self.robot_radius_m + .035)
+        if center in blocked or any(self.grid.state(*cell) != self.grid.FREE for cell in cells):
+            return VelocityCommand()
+        for point in self.latest_scan:
+            if point.has_echo(self.max_range_m):
+                x, y = self._sensor_to_body(point.x, point.y)
+                margin = point.distance_m * math.sin(min(math.pi / 2, max(0, point.angle_error_rad or 0)))
+                margin += max(0, point.distance_error_m or 0)
+                clearance = .035 if self.distance_controlled_motion else max(.035, self.safety_clearance_m)
+                if math.hypot(x, y) <= self.robot_radius_m + clearance + margin:
+                    return VelocityCommand()
+        return VelocityCommand(yaw_rps=math.copysign(.25, angle), duration_s=abs(angle) / .25)
+
+    def _detour_forward(self) -> VelocityCommand:
+        capability = self._capability('W')
+        distance = min(.10, float(capability['max_m']))
+        command = VelocityCommand(forward_mps=.1, duration_s=distance / .1)
+        return self._translation_guard(command)[0]
+
+    def _start_detour(self) -> VelocityCommand:
+        if not self.rotation_enabled:
+            return VelocityCommand()
+        original_pose, original_scan = self.pose, self.latest_scan
+        candidates = []
+        for degrees in (15, -15, 20, -20, 25, -25):
+            angle = math.radians(degrees)
+            turn = self._safe_rotation(angle)
+            if turn.stopped:
+                continue
+            # Check the forward leg in the candidate body frame, including the
+            # sensor offset. Restore current geometry before returning a turn.
+            try:
+                self.pose = Pose2D(original_pose.x, original_pose.y, wrap_angle(original_pose.yaw + angle))
+                rotated = []
+                for point in original_scan:
+                    bx, by = self._sensor_to_body(point.x, point.y)
+                    x = bx * math.cos(angle) - by * math.sin(angle) - self.sensor_offset_x_m
+                    y = bx * math.sin(angle) + by * math.cos(angle) - self.sensor_offset_y_m
+                    rotated.append(replace(point, angle_rad=math.atan2(x, y) - self.sensor_offset_yaw_rad,
+                                           distance_m=math.hypot(x, y)))
+                self.latest_scan = rotated
+                forward = self._detour_forward()
+                distance = self._command_distance(forward)
+                margin = min((math.hypot(p.x, p.y - min(distance, max(0, p.y)))
+                              - max(0, p.distance_error_m or 0)
+                              - p.distance_m * math.sin(min(math.pi / 2, max(0, p.angle_error_rad or 0)))
+                              for p in rotated if p.has_echo(self.max_range_m) and p.y >= 0), default=self.max_range_m)
+            finally:
+                self.pose, self.latest_scan = original_pose, original_scan
+            if not forward.stopped:
+                candidates.append((margin, -abs(degrees), degrees, turn))
+        if candidates:
+            _, _, degrees, turn = max(candidates, key=lambda candidate: candidate[:3])
+            self._detour_heading = original_pose.yaw
+            self._detour_origin = (original_pose.x, original_pose.y)
+            self.state = "小角度绕行"
+            self.detail = f"向{'右' if degrees > 0 else '左'}转 {abs(degrees)}°，重扫后前进并回正"
+            return turn
+        return VelocityCommand()
+
+    def _continue_detour(self) -> VelocityCommand:
+        delta = wrap_angle(self._detour_heading - self.pose.yaw)
+        traveled = math.dist(self._detour_origin, (self.pose.x, self.pose.y))
+        if traveled < .05 and abs(delta) >= math.radians(8):
+            forward = self._detour_forward()
+            if not forward.stopped:
+                self.state = "绕行前进"
+                self.detail = "小角度转向后短步前进，随后回正"
+                return forward
+        if abs(delta) >= math.radians(10):
+            turn = self._safe_rotation(math.copysign(min(abs(delta), math.radians(25)), delta))
+            if not turn.stopped:
+                self.state = "绕行回正"
+                self.detail = "恢复绕行前朝向，停车后更新扫描"
+                return turn
+        self._detour_heading = self._detour_origin = None
+        return VelocityCommand()
 
     def _planning_steps(self) -> tuple[tuple[int, int, float], ...]:
         if not self.forward_only:
@@ -1636,8 +2278,12 @@ class NavigationEngine:
             distances = [p.distance_m for p in observed
                          if abs(wrap_angle(p.angle_rad + self.sensor_offset_yaw_rad
                                            - math.radians(degrees))) <= math.radians(10)]
-            ranges.append(min(distances) if distances else 0.0)
-        threshold = self.robot_radius_m + self.safety_clearance_m + 0.085
+            # No echo is not a wall. The full grid/footprint guard below still
+            # requires free space; an unobserved map cannot pass that guard.
+            ranges.append(min(distances) if distances else self.max_range_m)
+        threshold = (self.robot_radius_m + self.safety_clearance_m + .035 + .02
+                     + self.safety_stop_distance_m
+                     + max(.1, self.safety_speed_upper_bound_mps or 0) * self.safety_max_observation_age_s)
         candidates = []
         blocked = self.grid.inflated_obstacles(self.robot_radius_m + 0.02)
         for degrees in (-90, -45, 0, 45, 90):
@@ -1675,7 +2321,15 @@ class NavigationEngine:
                 distance = max(minimum, distance - self.grid.resolution_m)
         if not candidates:
             return VelocityCommand()
-        return max(candidates, key=lambda item: item[:3])[3]
+        command = max(candidates, key=lambda item: item[:3])[3]
+        heading = math.atan2(command.right_mps, command.forward_mps)
+        if self.rotation_enabled and abs(heading) >= math.radians(10):
+            turn = self._safe_rotation(math.copysign(min(abs(heading), math.radians(25)), heading))
+            if not turn.stopped:
+                self.state = "转向空隙"
+                self.detail = "优先旋转对准可通行空隙，再向前移动"
+                return turn
+        return command
 
     def _forward_exploration_command(self) -> VelocityCommand:
         capability = self._capability("W")
@@ -1876,6 +2530,13 @@ class NavigationEngine:
         distance = math.hypot(local_x, local_y)
         if distance < 1e-6:
             return VelocityCommand()
+        heading = math.atan2(local_x, local_y)
+        if self.rotation_enabled and distance >= .06 and abs(heading) >= math.radians(10):
+            turn = self._safe_rotation(math.copysign(min(abs(heading), math.radians(25)), heading))
+            if not turn.stopped:
+                self.state = "转向路径"
+                self.detail = "优先旋转对准规划路径，随后前进"
+                return turn
         speed = 0.14
         forward_hint = speed * local_y / distance
         right_hint = speed * local_x / distance
@@ -2070,7 +2731,16 @@ class NavigationEngine:
             self._last_motion_rejection_reason = reason
             return VelocityCommand(), reason
         if abs(command.yaw_rps) > 1e-9:
+            if abs(command.forward_mps) < 1e-9 and abs(command.right_mps) < 1e-9:
+                turn = self._safe_rotation(command.yaw_rps * command.duration_s)
+                if not turn.stopped:
+                    return turn, None
             reason = "当前底盘能力未开放旋转动作"
+            self._last_motion_rejection_reason = reason
+            return VelocityCommand(), reason
+        if (self.forward_turn_only and not command.recovery_translation
+                and (command.forward_mps <= 1e-9 or abs(command.right_mps) > 1e-9)):
+            reason = "正常导航仅允许前进；横移只允许用于紧急避障"
             self._last_motion_rejection_reason = reason
             return VelocityCommand(), reason
         mode = self._translation_mode(command)
@@ -2118,14 +2788,15 @@ class NavigationEngine:
             reason = "最新雷达回波显示车体扫过距离不足"
             self._last_motion_rejection_reason = reason
             return VelocityCommand(), reason
-        route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
-        route_distances, _ = self.grid.reachable_tree(route_start, blocked)
-        current = self.grid.world_to_cell(self.pose.x, self.pose.y)
-        current_progress = route_distances.get(current)
-        if not allow_backtracking and not self.forward_only and (current_progress is None or not self._is_forward_path(cells, route_distances, current_progress)):
-            reason = "动作不满足单向路线进度约束"
-            self._last_motion_rejection_reason = reason
-            return VelocityCommand(), reason
+        if not allow_backtracking and not self.forward_only:
+            route_start = self.grid.world_to_cell(self.start_pose.x, self.start_pose.y)
+            route_distances, _ = self.grid.reachable_tree(route_start, blocked)
+            current = self.grid.world_to_cell(self.pose.x, self.pose.y)
+            current_progress = route_distances.get(current)
+            if current_progress is None or not self._is_forward_path(cells, route_distances, current_progress):
+                reason = "动作不满足单向路线进度约束"
+                self._last_motion_rejection_reason = reason
+                return VelocityCommand(), reason
         self._last_motion_rejection_reason = ""
         return command, None
 
@@ -2231,6 +2902,20 @@ class NavigationEngine:
             lateral = abs(body_x * math.cos(travel_angle) - body_y * math.sin(travel_angle))
             error = max(0.0, point.angle_error_rad or 0.0)
             margin = point.distance_m * math.sin(min(math.pi / 2, error)) + max(0.0, point.distance_error_m or 0.0)
+            if self.distance_controlled_motion:
+                # A distance-controlled MOVE is a finite swept disk, not a
+                # velocity extrapolation plus a second full stopping envelope.
+                measured_extra = (self.safety_stop_distance_m
+                                  + (self.safety_speed_upper_bound_mps or 0) * self.safety_max_observation_age_s)
+                closest = min(travel_distance + measured_extra, max(0.0, along))
+                if (command.recovery_translation and travel_distance <= .05 + 1e-9
+                        and along < 0 and math.hypot(along, lateral) > self.robot_radius_m + .005 + margin):
+                    # Allow monotonically leaving only the comfort buffer;
+                    # actual body clearance plus measurement error still holds.
+                    continue
+                if math.hypot(along - closest, lateral) < footprint_radius + margin:
+                    return False
+                continue
             if -margin <= along < travel_distance + stopping_buffer + margin and lateral < footprint_radius + margin:
                 return False
         return True
@@ -2257,16 +2942,22 @@ class NavigationEngine:
         echoes = [self._sensor_to_body(p.x, p.y) for p in self.latest_scan if p.has_echo(self.max_range_m)]
         if not echoes:
             return self._set_motion_blocked("等待新的障碍测距，暂不执行避让")
-        initial = min(math.hypot(x, y) for x, y in echoes)
+        obstacle_x, obstacle_y = min(echoes, key=lambda xy: math.hypot(*xy))
+        initial = math.hypot(obstacle_x, obstacle_y)
         candidates = []
-        for forward, right in ((1, 0), (0, 1), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+        directions = ((0, 1), (0, -1)) if self.forward_turn_only else (
+            (1, 0), (0, 1), (0, -1), (-1, 0),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+        )
+        for forward, right in directions:
             norm = math.hypot(forward, right)
             velocity = VelocityCommand(0.1 * forward / norm, 0.1 * right / norm, duration_s=1)
             capability = self._capability(self._translation_mode(velocity))
             distance = min(0.05, float(capability['max_m']))
             if not capability['enabled'] or distance < float(capability['min_m']):
                 continue
-            command = VelocityCommand(velocity.forward_mps, velocity.right_mps, duration_s=distance / 0.1)
+            command = VelocityCommand(velocity.forward_mps, velocity.right_mps, duration_s=distance / 0.1,
+                                      recovery_translation=True)
             guarded, _ = self._translation_guard(command, allow_backtracking=True)
             if guarded.stopped:
                 continue
@@ -2274,9 +2965,12 @@ class NavigationEngine:
             end_clearance = min(math.hypot(x - dx, y - dy) for x, y in echoes)
             if end_clearance < initial - 0.005:
                 continue
-            candidates.append((end_clearance - initial + 0.01 * forward, command))
+            # Prefer translation opposite the closest obstacle, not a forward
+            # bias that can keep the robot alongside the same obstruction.
+            away = -(dx * obstacle_x + dy * obstacle_y) / max(initial * distance, 1e-9)
+            candidates.append((end_clearance - initial, away, command))
         if candidates:
-            command = max(candidates, key=lambda item: item[0])[1]
+            command = max(candidates, key=lambda item: (item[0], item[1]))[2]
             self.recovery_requested = False
             self.state = "平移避让"
             self.detail = "沿已扫描空闲区域短距离避让，随后重新规划"

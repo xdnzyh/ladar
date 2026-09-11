@@ -211,6 +211,13 @@ class ForwardOnlyTests(unittest.TestCase):
 
 
 class HardwareObstacleRecoveryTests(unittest.TestCase):
+    def test_rotation_obstacle_stop_keeps_auto_recovery_active(self):
+        app = self.app()
+        app._safety_stop('转向范围内存在近距离障碍，紧急停车')
+        app.stop.assert_not_called()
+        app._send_chassis_stop.assert_called_once_with(recover_result=True)
+        self.assertIsNotNone(app._obstacle_recovery_action)
+
     def app(self):
         app = test_shared_acquisition.SharedAcquisitionTests().app()
         app.navigator = NavigationEngine()
@@ -242,6 +249,31 @@ class HardwareObstacleRecoveryTests(unittest.TestCase):
         app.root.after.call_args.args[1]()
         app.chassis_controller.complete_settle.assert_called_once_with(resume_auto=True)
         app._restart_hardware_scan.assert_called_once()
+
+    def test_missing_stop_result_exits_moving_state_instead_of_freezing_mapping(self):
+        app = self.app()
+        app.disconnect_requested = False
+        app.moving = True
+        app._safety_stop('运动方向出现近距离障碍，紧急停车')
+        app._send_chassis_stop.assert_called_once_with(recover_result=True)
+        action = app.chassis_controller.pending
+        app.chassis_controller.pending = None
+        app._handle_event('chassis_stop_confirmed', (1, None, action), 10)
+        self.assertFalse(app.moving)
+        self.assertFalse(app.running)
+        self.assertFalse(app.accept_samples)
+        self.assertEqual(app.navigator.state, '位置待重新确认')
+        self.assertFalse(app.navigator.recovery_requested)
+
+    def test_stale_idle_does_not_cancel_current_obstacle_recovery(self):
+        app = self.app()
+        app.disconnect_requested = False
+        app.moving = True
+        app._safety_stop('运动方向出现近距离障碍，紧急停车')
+        action = app.chassis_controller.pending
+        app._handle_event('chassis_stop_confirmed', (0, None, action), 10)
+        self.assertTrue(app.moving)
+        self.assertTrue(app.running)
 
     def test_fault_report_or_stale_event_never_auto_resumes(self):
         for reason, stale in (('TIMEOUT', False), ('WRONG_DIRECTION', False), ('EMERGENCY', True)):

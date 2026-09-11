@@ -80,6 +80,33 @@ class FirmwareEndpoint:
 
 
 class Config1IntegrationTests(unittest.TestCase):
+    def test_successful_sync_is_saved_and_loaded_by_fresh_app(self):
+        from navigation_app import NavigationApp, load_configuration
+        from unittest.mock import Mock
+
+        controller = self.make_controller()
+        app = NavigationApp.__new__(NavigationApp)
+        app.config = controller.config
+        app.chassis_controller = controller
+        app._log = Mock()
+        app._verify_chassis_on_idle(self.generation, ChassisState.IDLE)
+        self.drain()
+        event = next(value for kind, value in self.events if kind == 'chassis_config_synced')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'navigation_config.json'
+            with patch('navigation_app.NAV_CONFIG_PATH', path):
+                app._handle_event('chassis_config_synced', event, self.endpoint.time)
+                self.assertTrue(json.loads(path.read_text(encoding='utf-8'))['chassis_initial_sync_completed'])
+                loaded = load_configuration('hardware', 'navigation')
+            fresh = NavigationApp.__new__(NavigationApp)
+            fresh.config = loaded
+            fresh.chassis_controller = ChassisController(self.endpoint, Mock(), loaded)
+            generation = fresh.chassis_controller.begin_connection()
+            fresh.chassis_controller.request_config_sync = Mock()
+            fresh._verify_chassis_on_idle(generation, ChassisState.IDLE)
+            self.assertTrue(fresh.chassis_controller.initial_sync_completed)
+            fresh.chassis_controller.request_config_sync.assert_not_called()
+
     def test_navigation_loads_terminal_profile_for_distance_control(self):
         from navigation_app import load_configuration
 
@@ -177,7 +204,7 @@ class Config1IntegrationTests(unittest.TestCase):
         self.drain()
         self.endpoint.writes.clear()
         self.assertTrue(controller.request_move(request, operator_authorized=True))
-        self.step(12)
+        self.step(4)
         self.assertEqual(self.moves(), [b' '*32+b'@MOVE,D,739,CNT\r\n'])
         done = b'@DONE,D,TARGET,REQ=739,UNIT=CNT,BRAKE=700,ENC=748,DX=0,DY=-748,DR=0,DS=0,Q1=-748,Q2=748,Q3=-748,Q4=748\r\n'
         controller.feed_data(done, self.endpoint.time, self.generation)
@@ -348,6 +375,10 @@ class Config1IntegrationTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertTrue(adapter.readiness(mode)[0])
                 self.assertTrue(navigator.translation_capabilities[mode]['enabled'])
+                if mode != 'W':
+                    with self.assertRaises(MotionConversionError):
+                        adapter.request_for_manual(mode, 100, 'MM')
+                    continue
                 request = adapter.request_for_manual(mode, 100, 'MM')
                 command = NavigationApp._command_for_chassis_request(request)
                 auto_request = adapter.request_for_command(command)
@@ -355,7 +386,8 @@ class Config1IntegrationTests(unittest.TestCase):
                 self.assertEqual(auto_request.unit, 'CNT')
                 self.assertLessEqual(abs(auto_request.target - 0.1), 0.001)
         for mode in 'RF':
-            self.assertFalse(adapter.readiness(mode)[0])
+            self.assertTrue(adapter.readiness(mode)[0])
+        self.assertTrue(navigator.rotation_enabled)
         with self.assertRaises(MotionConversionError):
             adapter.request_for_command(VelocityCommand(forward_mps=1, duration_s=1))
         app = NavigationApp.__new__(NavigationApp)
@@ -484,7 +516,7 @@ class Config1IntegrationTests(unittest.TestCase):
         self.assertEqual(adapter.request_for_manual('D', 100, 'MM').request_value, 800)
         request = adapter.request_for_command(VelocityCommand(0, 0.1, 0, 1), automatic=False)
         self.assertEqual((request.unit, request.request_value), ('CNT', 800))
-        self.assertEqual(config['chassis_total_timeout_s'], 21)
+        self.assertEqual(config['chassis_total_timeout_s'], 2)
 
     def test_invalid_profile_does_not_silently_use_defaults(self):
         with self.assertRaises(RuntimeConfigError):
