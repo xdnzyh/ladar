@@ -481,6 +481,7 @@ class NavigationApp:
         self._post_motion_map_revision: int | None = None
         self._post_motion_scan_count: int | None = None
         self._action_commands: dict[int, VelocityCommand] = {}
+        self._sequence_continuation: tuple[int, int, int, VelocityCommand] | None = None
 
         self.calibration = CalibrationModel.from_dict(self.config.get("calibration"))
         self.ccd_parser = CCDFrameParser(str(self.config.get("measurement_mode", "fffe")))
@@ -2000,6 +2001,18 @@ class NavigationApp:
             if self.running and self.moving and self.simulation is not None and value == self.simulation.generation:
                 self.motion_safety.clear()
                 self.moving = False
+                next_action = getattr(getattr(self, "navigator", None), "next_radar_gap_action", None)
+                if not callable(next_action):
+                    self.accept_samples = True
+                    return
+                if hasattr(self, "mapping_lock"):
+                    with self.mapping_lock:
+                        continuation = next_action()
+                else:
+                    continuation = next_action()
+                if not continuation.stopped:
+                    self._execute_navigation_command(continuation)
+                    return
                 self.accept_samples = True
         elif kind == "range" and self.accept_samples:
             distance, pixel, sequence = value  # type: ignore[misc]
@@ -2266,6 +2279,22 @@ class NavigationApp:
                 self._log(str(exc))
                 self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
                 return
+        continuation = VelocityCommand()
+        if (action.source == "auto" and report.reason == "TARGET"
+                and not action.stop_requested and self.running and estimate is not None
+                and estimate.trusted):
+            with self.mapping_lock:
+                continuation = self.navigator.next_radar_gap_action()
+        if not continuation.stopped:
+            # Preserve the action identity through the physical-settle timer;
+            # only then may the controller accept the translation half.
+            self._sequence_continuation = (
+                generation, action.action_id, self.motion_generation, continuation,
+            )
+            self.navigator.state = "转向完成，准备平移"
+            self.navigator.detail = "同一完整雷达扫描已排定安全平移，等待底盘停稳"
+            self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
+            return
         obstacle_recovery = bool(
             getattr(self, "_obstacle_recovery_action", None)
             == (generation, action.action_id, self.motion_generation)
@@ -2417,7 +2446,18 @@ class NavigationApp:
                  or getattr(action, "timeout_assumed_stopped", False))
             and self.motion_generation == motion_generation
         )
-        if not controller.complete_settle(resume_auto=should_resume):
+        continuation = getattr(self, "_sequence_continuation", None)
+        sequence_command = None
+        if (continuation is not None
+                and continuation[:3] == (connection_generation, action_id, motion_generation)
+                and self.running):
+            sequence_command = continuation[3]
+        elif continuation is not None and continuation[:2] == (connection_generation, action_id):
+            self._sequence_continuation = None
+        settle_args = {"resume_auto": should_resume}
+        if sequence_command is not None:
+            settle_args["continue_sequence"] = True
+        if not controller.complete_settle(**settle_args):
             return
         if should_resume:
             self._restart_hardware_scan(motion_generation)
@@ -2426,6 +2466,10 @@ class NavigationApp:
         self.motion_safety.clear()
         self.moving = False
         self.manual_motion = False
+        if sequence_command is not None:
+            self._sequence_continuation = None
+            self._execute_navigation_command(sequence_command)
+            return
         if getattr(self, "_resume_radar_on_settle", False) and self.running:
             self._resume_radar_on_settle = False
             self._resume_radar_after_mode_switch(motion_generation)

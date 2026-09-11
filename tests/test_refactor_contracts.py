@@ -17,7 +17,7 @@ class RuntimeConfigContractTests(unittest.TestCase):
     def test_mode_defaults_are_centered_and_share_engine_builder(self):
         hardware = resolve_runtime_config("hardware", "radar", {}, prefer_mode_defaults=True)
         simulation = resolve_runtime_config("simulation", "navigation", {}, prefer_mode_defaults=True)
-        self.assertEqual((hardware["map_width_cells"], hardware["map_height_cells"]), (360, 560))
+        self.assertEqual((hardware["map_width_cells"], hardware["map_height_cells"]), (260, 760))
         self.assertEqual(hardware["map_resolution_m"], 0.02)
         self.assertEqual(hardware["hardware_sample_rate_hz"], 100.0)
         self.assertEqual((hardware["min_range_m"], hardware["max_range_m"]), (0.15, 1.0))
@@ -26,7 +26,7 @@ class RuntimeConfigContractTests(unittest.TestCase):
         self.assertEqual(simulation["map_resolution_m"], 0.04)
         self.assertEqual(simulation["simulation_sample_rate_hz"], 100.0)
         self.assertEqual(build_navigation_engine(simulation).path_turn_penalty, 0.75)
-        self.assertEqual(build_navigation_engine(hardware).grid.origin_row, 280)
+        self.assertEqual(build_navigation_engine(hardware).grid.origin_row, 699)
         self.assertEqual(build_navigation_engine(simulation).grid.origin_row, 140)
         custom = resolve_runtime_config(
             "simulation",

@@ -1020,6 +1020,14 @@ class NavigationEngine:
         self._gap_world_heading = None
         self._gap_origin = None
         self._radar_gap_world_heading = None
+        # A full radar sweep may choose a turn followed by a translation.  The
+        # chassis protocol deliberately accepts one primitive MOVE at a time,
+        # so keep the already safety-checked translation here until the turn
+        # reports DONE.  It is not a route cache: a new scan or a failed guard
+        # cancels it immediately.
+        self._pending_radar_translation: tuple[float, float, float] | None = None
+        self._radar_gap_stable_heading: float | None = None
+        self._radar_gap_stable_scans = 0
         self._detour_origin = None
         self._stationary_scan_attempts = 0
         self.course_model = course_model
@@ -1118,6 +1126,9 @@ class NavigationEngine:
         self._detour_heading = self._detour_origin = None
         self._gap_world_heading = self._gap_origin = None
         self._radar_gap_world_heading = None
+        self._pending_radar_translation = None
+        self._radar_gap_stable_heading = None
+        self._radar_gap_stable_scans = 0
         self._stationary_scan_attempts = 0
         if self.course_model is not None:
             self.course_model.reset()
@@ -1166,6 +1177,9 @@ class NavigationEngine:
         self._detour_heading = self._detour_origin = None
         self._gap_world_heading = self._gap_origin = None
         self._radar_gap_world_heading = None
+        self._pending_radar_translation = None
+        self._radar_gap_stable_heading = None
+        self._radar_gap_stable_scans = 0
         self._stationary_scan_attempts = 0
         self.auto_enabled = bool(enabled)
         if enabled:
@@ -1279,6 +1293,7 @@ class NavigationEngine:
         if len(matching_points) < self.matcher.MIN_HIT_POINTS or len(sectors) < 3:
             return self._reject_scan(0.0, "有效障碍回波不足，等待重扫")
         initializing = not self._map_initialized
+        map_update_allowed = True
         if (self.grid.update_count == 0
                 or (not self._map_initialized and not self.grid.occupied_cells()
                     and not self._last_scan_had_motion)):
@@ -1314,7 +1329,15 @@ class NavigationEngine:
                 match_result = ScanMatchResult(corrected_sensor, score)
             self.last_match_result = match_result
             if not math.isfinite(score) or score < self.MAP_UPDATE_MIN_CONFIDENCE:
-                return self._reject_scan(score, "本圈未写入地图，停车重扫")
+                if not self.radar_gap_steering:
+                    return self._reject_scan(score, "本圈未写入地图，停车重扫")
+                # In direct radar-gap mode an old, drifting map is not allowed
+                # to veto a fresh, complete local observation.  Retain the
+                # executed-motion prior and skip this map write; the current
+                # scan remains the only source used for this cycle's gap and
+                # footprint checks.
+                corrected = self._body_pose_from_sensor(predicted_sensor)
+                map_update_allowed = False
             correction_distance = math.hypot(
                 corrected_sensor.x - predicted_sensor.x,
                 corrected_sensor.y - predicted_sensor.y,
@@ -1324,9 +1347,12 @@ class NavigationEngine:
                 correction_distance <= max(2.0 * self.grid.resolution_m, 0.05) + self._predicted_motion_uncertainty_m
                 and correction_yaw <= math.radians(3.0) + self._predicted_motion_uncertainty_rad
             )
-            if not initializing and match_result.degenerate and not prior_aligned:
+            if (not map_update_allowed):
+                pass
+            elif not initializing and match_result.degenerate and not prior_aligned:
                 return self._reject_scan(score, match_result.rejection_reason or "本圈几何定位不充分，停车重扫")
-            corrected = self._body_pose_from_sensor(corrected_sensor)
+            else:
+                corrected = self._body_pose_from_sensor(corrected_sensor)
         if self.course_model is not None:
             corrected = self.course_model.fuse(
                 corrected, obstacle_points or matching_points, self.start_pose,
@@ -1345,12 +1371,14 @@ class NavigationEngine:
         self._predicted_motion_uncertainty_m = 0.0
         self._predicted_rotation_rad = 0.0
         self._predicted_motion_uncertainty_rad = 0.0
-        if previous_wall_layer:
+        if map_update_allowed and previous_wall_layer:
             self.grid.update_scan(self._sensor_pose(), previous_wall_layer, self.max_range_m,
                                   scan_confidence=score, add_only=add_only)
-        summary = self.grid.update_scan(self._sensor_pose(), valid + list(free_space_points),
-                                        self.max_range_m, scan_confidence=score, add_only=add_only)
-        if summary.out_of_bounds_points:
+        summary = None
+        if map_update_allowed:
+            summary = self.grid.update_scan(self._sensor_pose(), valid + list(free_space_points),
+                                            self.max_range_m, scan_confidence=score, add_only=add_only)
+        if summary is not None and summary.out_of_bounds_points:
             self.detail = f"本圈有 {summary.out_of_bounds_points} 个回波超出地图范围"
         if initializing:
             self._map_initialized = (self.grid.update_count >= self.BOOTSTRAP_SCANS
@@ -1557,6 +1585,17 @@ class NavigationEngine:
         if self.radar_gap_steering:
             # The legacy mapping/path planner remains for other runtime modes,
             # but cannot select a direction in direct radar-gap control.
+            if self.course_model is not None and self._terminal_geometry_confirmed():
+                self._terminal_evidence_scans += 1
+                self.path_cells.clear()
+                self.target_cell = self.grid.world_to_cell(self.pose.x, self.pose.y)
+                if self._terminal_evidence_scans >= 3:
+                    self.state = "泊车完成"
+                    self.detail = "雷达终点几何已连续确认"
+                else:
+                    self.state = "终点确认"
+                    self.detail = "雷达缺口模式下固定姿态复测终点"
+                return VelocityCommand()
             return self._radar_gap_command(
                 map_confident=self.match_score >= self.MAP_UPDATE_MIN_CONFIDENCE,
             )
@@ -1773,7 +1812,8 @@ class NavigationEngine:
     def _parking_search_command(self) -> VelocityCommand:
         if self.course_model is not None and not self.course_model.parking_allowed(self.pose, self.start_pose):
             return VelocityCommand()
-        if self.match_score < 0.55 or len(self.latest_scan) < 12:
+        if ((self.match_score < 0.55 and not self.radar_gap_steering)
+                or len(self.latest_scan) < 12):
             return VelocityCommand()
         sectors = []
         for center in (0.0, math.pi / 2, -math.pi / 2, math.pi):
@@ -1825,13 +1865,15 @@ class NavigationEngine:
         return self._collision_guard(command)
 
     def _terminal_geometry_confirmed(self) -> bool:
-        if self.prioritize_unexplored_gaps and self._unexplored_gap_candidates():
+        if (self.prioritize_unexplored_gaps and not self.radar_gap_steering
+                and self._unexplored_gap_candidates()):
             return False
         if self.course_model is not None and not self.course_model.parking_allowed(self.pose, self.start_pose):
             return False
         if self._terminal_evidence_scans == 0 and not self._last_scan_had_translation:
             return False
-        if self.match_score < 0.55 or len(self.latest_scan) < 12:
+        if ((self.match_score < 0.55 and not self.radar_gap_steering)
+                or len(self.latest_scan) < 12):
             return False
         approach = next((point for point in reversed(self.trajectory)
                          if math.dist(point, (self.pose.x, self.pose.y)) >= 0.15), None)
@@ -1942,7 +1984,12 @@ class NavigationEngine:
             start = end + 1
         return openings
 
-    def _radar_translation_guard(self, command: VelocityCommand) -> tuple[VelocityCommand, str | None]:
+    def _radar_translation_guard(
+        self,
+        command: VelocityCommand,
+        *,
+        scan_heading: float | None = None,
+    ) -> tuple[VelocityCommand, str | None]:
         """Check a proposed radar-guided move without consulting map routes."""
         if command.stopped:
             return command, None
@@ -1960,7 +2007,7 @@ class NavigationEngine:
         swept = self._swept_body_cells(self._motion_cells(command))
         if any(not self.grid.in_bounds(*cell) for cell in swept):
             return VelocityCommand(), "雷达缺口动作会越出地图边界"
-        if not self._command_has_clearance(command):
+        if not self._command_has_clearance(command, scan_heading=scan_heading):
             return VelocityCommand(), "预测行程内有雷达墙体"
         return command, None
 
@@ -1991,12 +2038,28 @@ class NavigationEngine:
             self.state = "前方无可信缺口"
             self.detail = "本圈雷达前方 180° 没有足够宽且预测无墙的缺口"
             return VelocityCommand()
-        # Any gap covering the course centreline wins over a wider lateral
-        # one.  Width only breaks ties within the same absolute-forward class.
-        gaps = sorted(gaps, key=lambda gap: (
-            abs(gap[3]) <= self.RADAR_GAP_DIRECT_TOLERANCE_RAD,
-            gap[0], gap[2], -abs(gap[3]),
-        ), reverse=True)
+        # The centreline gets a useful advantage, not an unconditional veto.
+        # A shallow marginal slit straight ahead must lose to a deep, wide,
+        # repeatedly observed front-side corridor.  Every term is bounded so
+        # the decision remains explainable during field debugging.
+        def gap_score(gap: tuple[float, float, float, float]) -> float:
+            width, heading, depth, absolute_offset = gap
+            world_heading = wrap_angle(self.pose.yaw + heading)
+            forward_progress = max(0.0, math.cos(absolute_offset))
+            width_score = min(1.0, max(0.0, (width - self.RADAR_GAP_MIN_WIDTH_M) / .60))
+            depth_score = min(1.0, depth / max(self.max_range_m, .01))
+            turn_cost = min(1.0, abs(heading) / (math.pi / 2))
+            locked = (self._radar_gap_world_heading is not None and abs(wrap_angle(
+                world_heading - self._radar_gap_world_heading,
+            )) <= self.RADAR_GAP_LOCK_TOLERANCE_RAD)
+            stable = (self._radar_gap_stable_heading is not None and abs(wrap_angle(
+                world_heading - self._radar_gap_stable_heading,
+            )) <= self.RADAR_GAP_LOCK_TOLERANCE_RAD)
+            return (1.20 * forward_progress + 1.40 * width_score + 1.10 * depth_score
+                    - .35 * turn_cost + (.55 if locked else 0.0)
+                    + (min(.30, .10 * self._radar_gap_stable_scans) if stable else 0.0))
+
+        gaps = sorted(gaps, key=gap_score, reverse=True)
 
         if self._radar_gap_world_heading is not None:
             locked = [gap for gap in gaps if abs(wrap_angle(
@@ -2012,6 +2075,18 @@ class NavigationEngine:
 
         for width, heading, depth, _ in gaps:
             world_heading = wrap_angle(self.pose.yaw + heading)
+            if (self._radar_gap_stable_heading is not None and abs(wrap_angle(
+                    world_heading - self._radar_gap_stable_heading,
+            )) <= self.RADAR_GAP_LOCK_TOLERANCE_RAD):
+                self._radar_gap_stable_scans += 1
+                self._radar_gap_stable_heading = wrap_angle(
+                    self._radar_gap_stable_heading + .35 * wrap_angle(
+                        world_heading - self._radar_gap_stable_heading,
+                    ),
+                )
+            else:
+                self._radar_gap_stable_heading = world_heading
+                self._radar_gap_stable_scans = 1
             turn_angle = wrap_angle(world_heading - self.pose.yaw)
             if abs(turn_angle) >= math.radians(10):
                 turn = self._safe_radar_rotation(math.copysign(
@@ -2020,10 +2095,20 @@ class NavigationEngine:
                 if turn.stopped:
                     continue
                 self._radar_gap_world_heading = world_heading
+                # Keep the original scan-frame target for the final sweep.
+                # If the calibrated chassis needs several <=25-degree turns,
+                # they remain one decision sequence and end in this planned
+                # translation before a new full radar scan is requested.
+                capability = self._capability("W")
+                distance = min(.20, float(capability["max_m"]), max(.10, depth - self.robot_radius_m - .035))
+                if distance + 1e-9 >= float(capability["min_m"]):
+                    self._pending_radar_translation = (world_heading, heading, distance)
+                else:
+                    self._pending_radar_translation = None
                 self.path_cells.clear()
                 self.target_cell = None
                 self.state = "对准雷达缺口"
-                self.detail = f"锁定 {width:.2f} m 缺口，旋转 {abs(math.degrees(turn_angle)):.0f}° 后前进"
+                self.detail = f"锁定 {width:.2f} m 缺口，旋转后执行本圈已计划的安全前进"
                 return turn
 
             capability = self._capability("W")
@@ -2038,6 +2123,7 @@ class NavigationEngine:
                 guarded, _ = self._radar_translation_guard(command)
                 if not guarded.stopped:
                     self._radar_gap_world_heading = world_heading
+                    self._pending_radar_translation = None
                     self.path_cells = self._motion_cells(guarded)
                     self.target_cell = self.path_cells[-1]
                     confidence = "尚可" if map_confident else "偏低，仅作辅助判断"
@@ -2055,11 +2141,57 @@ class NavigationEngine:
                 self._radar_gap_world_heading = None
 
         self._radar_gap_world_heading = None
+        self._pending_radar_translation = None
         self.path_cells.clear()
         self.target_cell = None
         self.state = "雷达缺口受阻"
         self.detail = "候选缺口的预测行程有墙或底盘步长不支持，本圈不执行危险动作"
         return VelocityCommand()
+
+    def next_radar_gap_action(self) -> VelocityCommand:
+        """Return the translation committed by the preceding radar sweep.
+
+        This is called only after a TURN_TO_GAP action has a trusted DONE
+        report and the chassis has physically settled.  It deliberately does
+        not call the planner or inspect the accumulated occupancy map.
+        """
+        pending = self._pending_radar_translation
+        self._pending_radar_translation = None
+        if pending is None or not self.auto_enabled or not self.radar_gap_steering:
+            return VelocityCommand()
+        world_heading, scan_heading, distance = pending
+        remaining_turn = wrap_angle(world_heading - self.pose.yaw)
+        if abs(remaining_turn) >= math.radians(10):
+            turn = self._safe_radar_rotation(math.copysign(
+                min(abs(remaining_turn), math.radians(25)), remaining_turn,
+            ))
+            if turn.stopped:
+                self._radar_gap_world_heading = None
+                self.state = "雷达缺口转后受阻"
+                self.detail = "后续对准旋转未通过当前车体安全间距检查"
+                return VelocityCommand()
+            self._pending_radar_translation = pending
+            self.state = "继续对准雷达缺口"
+            self.detail = "同一完整雷达扫描继续分段对准，随后仍将执行已计划平移"
+            return turn
+        # The original scan is expressed in the body frame before turning.
+        # Verify the actual short forward sweep against that observed bearing,
+        # while map bounds and no-return policy use the post-turn pose.
+        command = VelocityCommand(forward_mps=.10, duration_s=distance / .10)
+        guarded, reason = self._radar_translation_guard(command, scan_heading=scan_heading)
+        if guarded.stopped:
+            self._radar_gap_world_heading = None
+            self.path_cells.clear()
+            self.target_cell = None
+            self.state = "雷达缺口转后受阻"
+            self.detail = reason or "转向后原计划平移未通过最新安全检查"
+            return VelocityCommand()
+        self._radar_gap_world_heading = world_heading
+        self.path_cells = self._motion_cells(guarded)
+        self.target_cell = self.path_cells[-1]
+        self.state = "沿雷达缺口前进"
+        self.detail = f"同一圈雷达：转向完成后按已验证走廊前进 {distance:.2f} m"
+        return guarded
 
     def _unexplored_gap_candidates(self):
         """Find >40 cm breaks between supported wall ends leading beyond known space."""
@@ -2880,13 +3012,19 @@ class NavigationEngine:
                 return guarded
         return None
 
-    def _command_has_clearance(self, command: VelocityCommand) -> bool:
+    def _command_has_clearance(
+        self,
+        command: VelocityCommand,
+        *,
+        scan_heading: float | None = None,
+    ) -> bool:
         if command.stopped:
             return True
         speed = math.hypot(command.forward_mps, command.right_mps)
         if speed < 1e-9:
             return True
-        travel_angle = math.atan2(command.right_mps, command.forward_mps)
+        travel_angle = (math.atan2(command.right_mps, command.forward_mps)
+                        if scan_heading is None else scan_heading)
         travel_distance = speed * command.duration_s
         footprint_radius = self.robot_radius_m + 0.035
         stopping_buffer = (self.robot_radius_m + self.safety_clearance_m

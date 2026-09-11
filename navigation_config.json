@@ -58,8 +58,9 @@
   "radar_period_s": 1.5,
   "fusion_delay_ms": 80.0,
   "map_resolution_m": 0.02,
-  "map_width_cells": 360,
-  "map_height_cells": 560,
+  "map_width_cells": 260,
+  "map_height_cells": 760,
+  "hardware_map_rear_margin_m": 1.2,
   "radar_offset_x_m": 0.0,
   "radar_offset_y_m": 0.0,
   "radar_offset_yaw_deg": 0.0,
@@ -340,8 +341,8 @@
     "length_boards": 23
   },
   "hardware_map_resolution_m": 0.02,
-  "hardware_map_width_cells": 360,
-  "hardware_map_height_cells": 560,
+  "hardware_map_width_cells": 260,
+  "hardware_map_height_cells": 760,
   "simulation_map_resolution_m": 0.04,
   "simulation_map_width_cells": 180,
   "simulation_map_height_cells": 280

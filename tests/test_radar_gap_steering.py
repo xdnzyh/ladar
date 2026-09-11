@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest.mock import patch
 
 from navigation_core import NavigationEngine, OccupancyGrid, ScanPoint, VelocityCommand
 
@@ -87,6 +88,80 @@ class RadarGapSteeringTests(unittest.TestCase):
         ]
         second = engine._plan_next_command()
         self.assertGreater(second.yaw_rps, 0)
+
+    def test_turn_then_translation_is_one_radar_decision_cycle(self):
+        engine = self.engine()
+        # A left/right offset corridor needs a calibrated turn first.  Its
+        # translation must already be committed from this sweep, not selected
+        # by a later sweep.
+        engine.latest_scan = [
+            ScanPoint(math.radians(degrees), 1 if -10 <= degrees <= 90 else .25,
+                      is_echo=not (-10 <= degrees <= 90))
+            for degrees in range(-180, 180, 5)
+        ]
+
+        turn = engine._plan_next_command()
+        self.assertGreater(turn.yaw_rps, 0)
+        self.assertIsNotNone(engine._pending_radar_translation)
+        for _ in range(4):
+            engine.predict_motion(turn)  # trusted chassis DONE prior
+            translation = engine.next_radar_gap_action()
+            if translation.forward_mps > 0:
+                break
+            self.assertGreater(translation.yaw_rps, 0)
+            turn = translation
+
+        self.assertGreater(translation.forward_mps, 0)
+        self.assertGreater(engine._command_distance(translation), 0)
+        self.assertEqual(engine.state, "沿雷达缺口前进")
+
+    def test_deep_wide_side_gap_can_beat_a_marginal_front_slit(self):
+        engine = self.engine()
+        engine.latest_scan = [
+            ScanPoint(
+                math.radians(degrees),
+                .50 if -25 <= degrees <= 25 else (1.0 if 40 <= degrees <= 80 else .25),
+                is_echo=not (-25 <= degrees <= 25 or 40 <= degrees <= 80),
+            )
+            for degrees in range(-180, 180, 5)
+        ]
+
+        command = engine._plan_next_command()
+
+        self.assertGreater(command.yaw_rps, 0)
+
+    def test_old_map_mismatch_does_not_veto_fresh_radar_gap_cycle(self):
+        engine = self.engine()
+        engine.grid.update_scan(engine.pose, [ScanPoint(0, .5)], engine.max_range_m)
+        engine.predict_motion(VelocityCommand(forward_mps=.1, duration_s=.2))
+        with patch.object(engine.matcher, "match", return_value=(engine._sensor_pose(), .1)):
+            command = engine.process_scan(self.full_open_scan())
+
+        self.assertEqual(engine.completed_scans, 1)
+        self.assertGreater(command.forward_mps, 0)
+
+    def test_radar_mode_reaches_finished_instead_of_bypassing_terminal_checks(self):
+        engine = self.engine()
+        engine.course_model = object()
+        engine._terminal_geometry_confirmed = lambda: True
+
+        commands = [engine._plan_next_command() for _ in range(3)]
+
+        self.assertTrue(all(command.stopped for command in commands))
+        self.assertEqual(engine.state, "泊车完成")
+
+    def test_gap_behind_initial_forward_half_plane_is_not_a_candidate(self):
+        engine = self.engine()
+        engine.latest_scan = [
+            ScanPoint(math.radians(degrees), 1 if 115 <= degrees <= 165 else .25,
+                      is_echo=not (115 <= degrees <= 165))
+            for degrees in range(-180, 180, 5)
+        ]
+
+        command = engine._plan_next_command()
+
+        self.assertTrue(command.stopped)
+        self.assertEqual(engine.state, "前方无可信缺口")
 
     def test_absolute_forward_gap_beats_a_wider_side_gap_after_turning(self):
         engine = self.engine()

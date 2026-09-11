@@ -1417,7 +1417,13 @@ class ChassisController:
             self._state(ChassisState.CHECKING, f"通信检查 0/{count}", stamp)
             return True
 
-    def complete_settle(self, *, resume_auto: bool, now: float | None = None) -> bool:
+    def complete_settle(
+        self,
+        *,
+        resume_auto: bool,
+        continue_sequence: bool = False,
+        now: float | None = None,
+    ) -> bool:
         stamp = self._now(now)
         with self._lock:
             if self.state != ChassisState.SETTLING or self.pending is None:
@@ -1428,6 +1434,19 @@ class ChassisController:
                          or action.timeout_assumed_stopped)):
                 self._state(ChassisState.WAITING_SCAN, "等待停稳后的新完整扫描", stamp)
                 self._emit("chassis_waiting_scan", (self.connection_generation, action), stamp)
+                return True
+            if (continue_sequence and action.source == "auto"
+                    and not action.stop_requested):
+                # A navigation decision may intentionally contain TURN then
+                # TRANSLATE.  The app only requests this branch after a
+                # trusted DONE and physical settle; unlock the next primitive
+                # without inserting an unnecessary complete radar sweep.
+                self.pending = None
+                self.automatic_locked = False
+                self._state(ChassisState.IDLE, "同一导航周期继续下一段动作", stamp)
+                self._emit("chassis_ready", (
+                    self.connection_generation, action, "同一导航周期继续下一段动作"
+                ), stamp)
                 return True
             self.pending = None
             self.automatic_locked = True

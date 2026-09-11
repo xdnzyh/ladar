@@ -103,8 +103,12 @@ RUNTIME_DEFAULTS = {
     "radar_period_s": 1.5,
     "fusion_delay_ms": 80,
     "map_resolution_m": 0.02,
-    "map_width_cells": 360,
-    "map_height_cells": 560,
+    # Hardware course: 5.2 m wide and 15.2 m long at 2 cm.  The start is
+    # placed 1.2 m from the rear map edge so the full 12 m race direction has
+    # usable cells ahead of it rather than only half the map.
+    "map_width_cells": 260,
+    "map_height_cells": 760,
+    "hardware_map_rear_margin_m": 1.2,
     "radar_offset_x_m": 0.0,
     "radar_offset_y_m": 0.0,
     "radar_offset_yaw_deg": 0.0,
@@ -514,7 +518,7 @@ def resolve_runtime_config(
     config["max_range_m"] = config["hardware_max_range_m"]
 
     mode_defaults = {
-        "hardware": (360, 560, 0.02),
+        "hardware": (260, 760, 0.02),
         "simulation": (180, 280, 0.04),
     }
     mode_prefix = f"{source}_map_"
@@ -548,6 +552,7 @@ def resolve_runtime_config(
         "fusion_delay_ms", "sync_interval_s", "sync_max_age_s", "keepalive_interval_s",
         "display_preview_min_ratio",
         "hardware_unobserved_clear_range_m", "simulation_unobserved_clear_range_m",
+        "hardware_map_rear_margin_m",
     ):
         _set_number(config, key, nonnegative=True)
     for key in ("min_range_m", "max_range_m", "hardware_min_range_m", "hardware_max_range_m"):
@@ -574,6 +579,8 @@ def resolve_runtime_config(
         raise RuntimeConfigError("硬件可信距离范围下限必须小于上限")
     if config["simulation_min_range_m"] >= config["simulation_max_range_m"]:
         raise RuntimeConfigError("仿真距离范围下限必须小于上限")
+    if source == "hardware" and config["hardware_map_rear_margin_m"] < .5:
+        raise RuntimeConfigError("硬件地图起点后方余量不能小于 0.5 m")
 
     for key in ("map_width_cells", "map_height_cells"):
         try:
@@ -811,8 +818,9 @@ def build_navigation_engine(config: Mapping[str, object]):
         height,
         float(resolved["map_resolution_m"]),
     )
-    if course_model is not None:
-        grid.origin_row = height - 1 - math.ceil(1.2 / grid.resolution_m)
+    if resolved["runtime_source"] == "hardware":
+        rear_margin = float(resolved["hardware_map_rear_margin_m"])
+        grid.origin_row = height - 1 - math.ceil(rear_margin / grid.resolution_m)
     if resolved["runtime_source"] == "hardware":
         raw_capabilities = resolved.get("chassis_translation_capabilities", {})
         global_maximum = min(

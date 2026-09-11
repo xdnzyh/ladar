@@ -127,8 +127,9 @@ class NavigationReviewTests(unittest.TestCase):
 
     def test_hardware_navigation_map_covers_reference_route_independently_of_display_radius(self):
         engine = build_navigation_engine(resolve_runtime_config("hardware", "navigation", {"display_radius_m": 1.1}))
-        self.assertTrue(engine.grid.in_bounds(*engine.grid.world_to_cell(0, 4.5)))
-        self.assertGreater(engine.grid.cell_to_world(0, 0)[1], 4.5 + engine.robot_radius_m)
+        self.assertTrue(engine.grid.in_bounds(*engine.grid.world_to_cell(0, 12.0)))
+        self.assertGreater(engine.grid.cell_to_world(0, 0)[1], 12.0 + engine.robot_radius_m)
+        self.assertGreaterEqual(engine.grid.origin_row, engine.grid.height - 1 - 60)
 
 
 if __name__ == "__main__":
