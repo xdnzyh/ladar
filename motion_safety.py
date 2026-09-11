@@ -38,7 +38,7 @@ class MotionSafetyGuard:
             return None
         age = now - packet.device_timestamp
         maximum_age = float(self.config.get("safety_max_observation_age_s", 0.5))
-        if (packet.source != "range" or packet.status not in {"ok", "over_range"}
+        if (packet.source != "range" or packet.status != "ok"
                 or packet.distance is None or not math.isfinite(packet.distance) or packet.distance <= 0
                 or not math.isfinite(packet.uncertainty) or packet.uncertainty < 0
                 or packet.device_timestamp < self.started_at or not 0 <= age <= maximum_age):
@@ -49,22 +49,26 @@ class MotionSafetyGuard:
         speed = self.speed_mps
         distance_control = (str(self.config.get("runtime_source", "")).lower() == "hardware"
                             and bool(self.config.get("chassis_distance_control", False)))
-        if speed is None and not distance_control:
-            return "底盘实际速度上界未标定，停止自动运动"
         speed = max(0.0, speed or 0.0)
         configured_stop_distance = self.config.get("safety_stop_distance_m")
-        if configured_stop_distance is None:
-            if str(self.config.get("runtime_source", "")).lower() == "hardware" and not distance_control:
-                return "底盘制动距离未标定，停止自动运动"
-            configured_stop_distance = 0.0
         try:
-            stop_distance = float(configured_stop_distance)
+            stop_distance = float(configured_stop_distance or 0.0)
         except (TypeError, ValueError, OverflowError):
-            return "底盘制动距离配置无效，停止自动运动"
+            return None
         if not math.isfinite(stop_distance) or stop_distance < 0:
-            return "底盘制动距离配置无效，停止自动运动"
-        if estimate is None or estimate[1] > math.radians(float(self.config.get("safety_max_angle_error_deg", 15))):
-            return "近距离回波方位不确定，紧急停车"
+            return None
+        lookahead = speed * age + stop_distance
+        if distance_control:
+            lookahead = max(lookahead, (self.direction_speed_mps or 0.0) * self.command.duration_s)
+        limit = radius + clearance + lookahead
+        sensor_offset = math.hypot(float(self.config.get("radar_offset_x_m", 0.0)),
+                                   float(self.config.get("radar_offset_y_m", 0.0)))
+        if (estimate is None or not all(math.isfinite(value) for value in estimate)
+                or estimate[1] < 0
+                or estimate[1] > math.radians(float(self.config.get("safety_max_angle_error_deg", 15)))):
+            if packet.distance <= limit + sensor_offset:
+                return "雷达检测到近距离障碍，紧急停车"
+            return None
         angle, error = estimate
         sensor_x = packet.distance * math.sin(angle)
         sensor_y = packet.distance * math.cos(angle)
@@ -75,10 +79,6 @@ class MotionSafetyGuard:
         y = -sensor_x * sine + sensor_y * cosine + float(self.config.get("radar_offset_y_m", 0.0))
         point_distance = math.hypot(x, y)
         margin = packet.distance * math.sin(min(math.pi / 2, max(0, error)))
-        lookahead = speed * age + stop_distance
-        if distance_control:
-            lookahead = max(lookahead, (self.direction_speed_mps or 0.0) * self.command.duration_s)
-        limit = radius + clearance + lookahead
         if point_distance > limit + margin:
             return None
         direction_speed = self.direction_speed_mps or 0.0
@@ -95,7 +95,4 @@ class MotionSafetyGuard:
         return None
 
     def poll(self, now):
-        if (self.command is not None and self.last_observation is not None
-                and now - self.last_observation > float(self.config.get("safety_blind_timeout_s", 0.75))):
-            return "运动期间测距更新中断，紧急停车"
         return None

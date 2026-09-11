@@ -26,7 +26,7 @@ class MotionSafetyTests(unittest.TestCase):
                 self.assertIsNone(guard.observe(self.point(2), (angle, 0), 10.1))
                 self.assertIsNotNone(guard.observe(self.point(0.3), (angle, 0), 10.1))
                 self.assertIsNone(guard.observe(self.point(0.3), (angle + math.pi, 0), 10.1))
-                self.assertIsNotNone(guard.poll(11))
+                self.assertIsNone(guard.poll(11))
                 guard.clear()
                 self.assertIsNone(guard.poll(12))
 
@@ -37,7 +37,7 @@ class MotionSafetyTests(unittest.TestCase):
         guard.start(VelocityCommand(forward_mps=0.1, duration_s=1), 10)
         self.assertIsNone(guard.observe(self.point(0.2, 9), (0, 0), 10.1))
         self.assertIsNotNone(guard.observe(self.point(0.2), None, 10.1))
-        self.assertIsNotNone(guard.poll(11))
+        self.assertIsNone(guard.poll(11))
 
     def test_near_obstacle_recovery_chooses_translation_away_after_scan(self):
         config = resolve_runtime_config('simulation', 'navigation', {}, prefer_mode_defaults=True)
@@ -121,11 +121,11 @@ class MotionSafetyTests(unittest.TestCase):
         app._safety_stop.assert_not_called()
         self.assertAlmostEqual(app.motion_safety.last_observation, 11)
 
-    def test_simulation_missing_measurements_still_stops(self):
+    def test_missing_measurements_do_not_trigger_obstacle_stop(self):
         app = self.simulation_app()
         app._poll()
         app._runtime_fault.assert_not_called()
-        app._safety_stop.assert_called_once_with("运动期间测距更新中断，紧急停车")
+        app._safety_stop.assert_not_called()
 
     def test_simulation_timeout_uses_captured_clock_not_later_producer_time(self):
         app = self.simulation_app(10.1)
@@ -178,17 +178,15 @@ class MotionSafetyTests(unittest.TestCase):
         self.assertIsNone(guard.observe(self.point(distance=0.30), (math.pi / 2, 0), 10.1))
         self.assertIsNotNone(guard.observe(self.point(distance=0.30), (0, 0), 10.1))
 
-    def test_missing_hardware_stop_distance_fails_closed(self):
+    def test_missing_stop_distance_does_not_turn_far_echo_into_obstacle(self):
         guard = MotionSafetyGuard({
             "runtime_source": "hardware",
             "safety_speed_upper_bound_mps": 0.30,
             "safety_stop_distance_m": None,
         })
         guard.start(VelocityCommand(forward_mps=0.10, duration_s=1), 10)
-        self.assertEqual(
-            guard.observe(self.point(distance=2.0), (0, 0), 10.1),
-            "底盘制动距离未标定，停止自动运动",
-        )
+        self.assertIsNone(guard.observe(self.point(distance=2.0), (0, 0), 10.1))
+        self.assertIsNotNone(guard.observe(self.point(distance=0.2), (0, 0), 10.1))
 
     def test_forward_near_obstacle_stops_without_a_complete_sweep(self):
         guard = self.guard(forward_mps=0.14)
@@ -211,11 +209,11 @@ class MotionSafetyTests(unittest.TestCase):
         self.assertIsNone(guard.observe(self.point(stamp=9.9), (0, 0), 10.11))
         self.assertIsNone(guard.observe(self.point(), (0, 0), 11))
 
-    def test_no_return_and_stale_replay_do_not_reset_blind_timeout(self):
+    def test_no_return_and_stale_replay_do_not_trigger_obstacle_stop(self):
         guard = self.guard(forward_mps=0.1)
         guard.observe(replace(self.point(), status="no_return", distance=None), (0, 0), 10.2)
         guard.observe(self.point(stamp=9.9), (0, 0), 10.3)
-        self.assertIsNotNone(guard.poll(10.76))
+        self.assertIsNone(guard.poll(10.76))
         guard.clear()
         self.assertIsNone(guard.poll(20))
 

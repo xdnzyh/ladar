@@ -62,6 +62,8 @@
   "simulation_unobserved_clear_range_m": 0.0,
   "hardware_prefer_forward_exploration": true,
   "simulation_prefer_forward_exploration": false,
+  "hardware_forward_only": true,
+  "simulation_forward_only": false,
   "simulation_estimated_sweeps": true,
   "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
   "chassis_capability_mode": "mm_ping_v1",
@@ -321,6 +323,11 @@
   "mapping_resolution_weight": 1.0,
   "mapping_queue_size": 2,
   "mapping_poll_budget_ms": 4.0,
+  "hardware_course_model": {
+    "board_width_m": 0.55,
+    "width_boards": 3,
+    "length_boards": 23
+  },
   "hardware_map_resolution_m": 0.02,
   "hardware_map_width_cells": 360,
   "hardware_map_height_cells": 560,

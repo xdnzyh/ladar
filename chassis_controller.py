@@ -423,6 +423,7 @@ class ChassisAction:
     done_at: float | None = None
     ack_missing: bool = False
     stop_requested: bool = False
+    obstacle_recovery_confirmed: bool = False
     move_may_have_started: bool = False
     write_ticket: object | None = None
     ping_write_ticket: object | None = None
@@ -524,6 +525,7 @@ class ChassisController:
         self._lock = threading.RLock()
         self.config_exchange = None
         self.config_verified = False
+        self.initial_sync_completed = bool(config.get("chassis_initial_sync_completed", False))
         self._idle_preflight: IdlePreflight | None = None
         self._idle_preflight_failed = False
         self._idle_preflight_announced = False
@@ -591,7 +593,6 @@ class ChassisController:
             and self.pending is None
             and self.communication_check is None
             and self.config_exchange is None and not self._idle_status_pending
-            and (not self.config.get("chassis_config1_file") or self.config_verified)
         )
 
     @property
@@ -606,7 +607,6 @@ class ChassisController:
             and self.pending is None and not self._motion_unconfirmed
             and self.config_exchange is None and self.communication_check is None
             and not self._idle_status_pending
-            and (not self.config.get("chassis_config1_file") or self.config_verified)
             and self._effective_capability_mode() == "mm_ping_v1"
             and callable(getattr(self.endpoint, "write_ticket", None))
             and callable(getattr(self.endpoint, "cancel_write", None))
@@ -1125,10 +1125,6 @@ class ChassisController:
             if not getattr(self.endpoint, "is_open", False):
                 self._emit("chassis_rejected", (self.connection_generation, "底盘串口未打开"), stamp)
                 return False
-            if self.config.get("chassis_config1_file") and not self.config_verified:
-                self._emit("chassis_rejected", (self.connection_generation,
-                           "参数尚未确认，请先读取或同步一次；后续动作沿用确认状态"), stamp)
-                return False
             if source == "auto" and not self.automatic_ready:
                 self._emit("chassis_rejected", (self.connection_generation, "底盘尚未满足自动动作准入"), stamp)
                 return False
@@ -1218,7 +1214,6 @@ class ChassisController:
                 and self.capability_ready
                 and not self._motion_unconfirmed
                 and self.config_exchange is None
-                and (not self.config.get("chassis_config1_file") or self.config_verified)
             ):
                 self.automatic_locked = False
                 return True
@@ -1342,7 +1337,8 @@ class ChassisController:
             if self.state != ChassisState.SETTLING or self.pending is None:
                 return False
             action = self.pending
-            if resume_auto and action.source == "auto" and not action.stop_requested:
+            if (resume_auto and action.source == "auto"
+                    and (not action.stop_requested or action.obstacle_recovery_confirmed)):
                 self._state(ChassisState.WAITING_SCAN, "等待停稳后的新完整扫描", stamp)
                 self._emit("chassis_waiting_scan", (self.connection_generation, action), stamp)
                 return True
@@ -1514,6 +1510,9 @@ class ChassisController:
                 self._emit("chassis_status", (self.connection_generation, error), self.clock())
                 return
             self.config_verified = actual == list(target)
+            if self.config_verified:
+                self.initial_sync_completed = True
+                self._emit("chassis_config_synced", (self.connection_generation, values_crc(actual)), self.clock())
             detail = (f"底盘参数 CRC={values_crc(actual)}；"
                       f"与电脑不同项 {sum(a != b for a, b in zip(actual, target))}")
             self._emit("chassis_status", (self.connection_generation, detail), self.clock())
@@ -1580,9 +1579,6 @@ class ChassisController:
             # Consume only after the PING write has completed. An active serial
             # write cannot be cancelled; the endpoint serializes it before MOVE.
             self._invalidate_idle_preflight()
-        if self.config.get("chassis_config1_file") and not self.config_verified:
-            self._abort_before_move("参数确认状态已失效，请重新读取或同步", stamp)
-            return
         if action.result_recovery:
             try:
                 # The successful idle PING arms this exact ID. Never fall back

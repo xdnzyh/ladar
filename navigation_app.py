@@ -791,7 +791,9 @@ class NavigationApp:
     def _verify_chassis_on_idle(self, generation: int, state: str) -> None:
         controller = getattr(self, "chassis_controller", None)
         if (controller is None or generation != controller.connection_generation
-                or not self.config.get("chassis_config1_file")):
+                or not self.config.get("chassis_config1_file")
+                or self.config.get("chassis_initial_sync_completed", False)
+                or controller.initial_sync_completed):
             return
         if state == ChassisState.CONNECTED_WAITING:
             self._chassis_config_read_generation = None
@@ -799,7 +801,7 @@ class NavigationApp:
               and getattr(self, "_chassis_config_read_generation", None) != generation):
             if controller.config_verified or controller.config_exchange is not None:
                 self._chassis_config_read_generation = generation
-            elif controller.request_config_sync(apply=False):
+            elif controller.request_config_sync(apply=True):
                 self._chassis_config_read_generation = generation
 
     def _start_chassis_communication_check(self) -> None:
@@ -1190,17 +1192,12 @@ class NavigationApp:
             adapter_detail = "；".join(adapter_reasons)
         else:
             adapter_ready, adapter_detail = False, "底盘控制器未初始化"
-        config_reading = controller is not None and controller.config_exchange is not None
         checks = (
             (self.connected, "设备未连接", "请先连接测距、旋转串口。"),
             (bool(self.calibration.ready), "标定不可用", calibration_detail),
             (bool(self.config.get("synchronized_acquisition", True)), "采集模式不支持导航", "自动导航需要同步观测和实时安全检测。"),
             (chassis_open, "底盘未连接", "自动导航需要连接底盘串口。"),
             (chassis_confirmed, "底盘状态未确认", "请先读取底盘状态，并核对或保存固件能力。"),
-            (not self.config.get("chassis_config1_file") or bool(getattr(controller, "config_verified", False)),
-             "底盘参数核对中" if config_reading else "底盘参数未同步",
-             "正在读取底盘参数，请等待核对完成后再开始。" if config_reading
-             else "请停止导航，在展开串口与指令中点击重载并同步参数，等待不同项为 0。"),
             (adapter_ready, "底盘标定未完成", adapter_detail),
         )
         for ok, title, detail in checks:
@@ -1350,6 +1347,7 @@ class NavigationApp:
         self._log("开始自动导航" if self.view_mode.get() == "navigation" else "开始雷达扫描")
 
     def stop(self) -> None:
+        self._obstacle_recovery_action = None
         self.motion_safety.clear()
         self.motion_generation += 1
         self.mapping_generation += 1
@@ -1801,9 +1799,27 @@ class NavigationApp:
                 self._safety_stop(reason)
 
     def _safety_stop(self, reason):
+        controller = getattr(self, "chassis_controller", None)
+        action = getattr(controller, "pending", None)
+        if (getattr(self, "source", None) == "hardware" and self.running
+                and action is not None and action.source == "auto"
+                and not action.stop_requested
+                and reason in {"运动方向出现近距离障碍，紧急停车", "雷达检测到近距离障碍，紧急停车"}):
+            self.motion_generation += 1
+            self.mapping_generation += 1
+            self._obstacle_recovery_action = (controller.connection_generation, action.action_id, self.motion_generation)
+            self.accept_samples = False
+            self.motion_safety.clear()
+            with self.mapping_lock:
+                self._clear_mapping_tasks()
+            if self._send_chassis_stop():
+                self.navigator.state = "近障碍停车"
+                self.navigator.detail = "等待停止报告，停稳重扫后微移避让"
+                return
+            self._obstacle_recovery_action = None
         if (getattr(self, "source", None) == "simulation" and self.running
                 and self.motion_safety.command is not None
-                and reason == "运动方向出现近距离障碍，紧急停车"):
+                and reason in {"运动方向出现近距离障碍，紧急停车", "雷达检测到近距离障碍，紧急停车"}):
             command = self.motion_safety.command
             with self.simulation.lock:
                 elapsed = self.simulation.hardware.time - self.motion_safety.started_at
@@ -2125,6 +2141,18 @@ class NavigationApp:
             self._log(str(value))
         elif kind == "rotation_status":
             self._log(f"旋转  {value}")
+        elif kind == "chassis_config_synced":
+            generation, crc = value
+            controller = getattr(self, "chassis_controller", None)
+            if controller is not None and generation == controller.connection_generation:
+                self.config["chassis_initial_sync_completed"] = True
+                controller.config["chassis_initial_sync_completed"] = True
+                try:
+                    save_configuration(self.config)
+                except OSError as exc:
+                    self._log(f"同步成功，记录保存失败：{exc}")
+                else:
+                    self._log(f"底盘参数已同步并保存，CRC={crc}；后续连接不再自动同步")
         elif kind == "chassis_status":
             if isinstance(value, tuple) and len(value) == 2:
                 self._log(f"底盘  {value[1]}")
@@ -2209,7 +2237,18 @@ class NavigationApp:
                 self._log(str(exc))
                 self._finish_chassis_action_after_settle(action, generation, timestamp, resume_auto=False)
                 return
-        can_resume = bool(
+        obstacle_recovery = bool(
+            getattr(self, "_obstacle_recovery_action", None)
+            == (generation, action.action_id, self.motion_generation)
+            and action.source == "auto" and action.stop_requested
+            and report.reason in {"EMERGENCY", "TARGET"}
+            and estimate is not None and self.running
+        )
+        if obstacle_recovery:
+            with self.mapping_lock:
+                self.navigator.recovery_requested = True
+            action.obstacle_recovery_confirmed = True
+        can_resume = obstacle_recovery or bool(
             action.source == "auto"
             and report.reason == "TARGET"
             and not action.stop_requested
@@ -2282,7 +2321,7 @@ class NavigationApp:
         should_resume = bool(
             resume_auto
             and self.running
-            and not action.stop_requested
+            and (not action.stop_requested or getattr(action, "obstacle_recovery_confirmed", False))
             and self.motion_generation == motion_generation
         )
         if not controller.complete_settle(resume_auto=should_resume):

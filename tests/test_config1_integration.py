@@ -148,7 +148,7 @@ class Config1IntegrationTests(unittest.TestCase):
         controller = self.make_controller()
         self.assertEqual(crc(b'123456789'), 0x29B1)
         self.assertEqual(values_crc(self.endpoint.values), controller.config['chassis_config1_crc'])
-        self.assertFalse(controller.allow_automatic())
+        self.assertTrue(controller.allow_automatic())
         self.assertTrue(controller.request_config_sync(apply=False))
         self.assertFalse(controller.request_communication_check())
         self.assertFalse(controller.request_status())
@@ -173,7 +173,6 @@ class Config1IntegrationTests(unittest.TestCase):
         adapter = ChassisMotionAdapter(controller.config)
         request = adapter.request_for_manual('D', 100, 'MM')
         self.assertEqual((request.unit, request.request_value), ('CNT', 739))
-        self.assertFalse(controller.request_move(request, operator_authorized=True))
         self.assertTrue(controller.request_config_sync(apply=False))
         self.drain()
         self.endpoint.writes.clear()
@@ -191,7 +190,7 @@ class Config1IntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.moves()), 2)
         self.assertFalse(any(b'@CFG,' in wire for wire in self.endpoint.writes))
 
-    def test_mismatch_damaged_reply_and_silence_each_prevent_move(self):
+    def test_failed_sync_is_not_remembered_and_does_not_lock_motion(self):
         for failure in ('mismatch', 'corrupt', 'drop'):
             with self.subTest(failure=failure):
                 controller = self.make_controller()
@@ -202,10 +201,11 @@ class Config1IntegrationTests(unittest.TestCase):
                 request = ChassisMotionAdapter(controller.config).request_for_manual('Q', 100, 'MM')
                 self.assertTrue(controller.request_config_sync(apply=False))
                 self.drain()
-                self.assertFalse(controller.request_move(request, operator_authorized=True))
                 self.assertFalse(self.moves())
                 self.assertIsNone(controller.pending)
                 self.assertFalse(controller.config_verified)
+                self.assertFalse(controller.initial_sync_completed)
+                self.assertTrue(controller.request_move(request, operator_authorized=True))
 
     def test_reload_same_execution_values_keeps_cache_but_changes_invalidate(self):
         controller = self.make_controller()
@@ -298,7 +298,7 @@ class Config1IntegrationTests(unittest.TestCase):
         self.assertIsNone(config['safety_speed_upper_bound_mps'])
         self.assertIsNone(config['safety_stop_distance_m'])
         self.assertTrue(controller.update_config(config))
-        self.assertFalse(controller.allow_automatic())
+        self.assertTrue(controller.allow_automatic())
         self.assertTrue(controller.request_config_sync())
         self.drain()
         navigator = build_navigation_engine(config)
@@ -369,7 +369,7 @@ class Config1IntegrationTests(unittest.TestCase):
         app.chassis_controller.allow_automatic.return_value = True
         self.assertTrue(app._navigation_preflight())
         app.chassis_controller.config_verified = False
-        self.assertFalse(app._navigation_preflight())
+        self.assertTrue(app._navigation_preflight())
         app.chassis_controller.config_verified = True
         app.chassis_controller.allow_automatic.return_value = False
         self.assertFalse(app._navigation_preflight())
@@ -435,7 +435,7 @@ class Config1IntegrationTests(unittest.TestCase):
         controller.handle_transport_error(self.generation, 'connection lost', self.endpoint.time)
         self.assertFalse(controller.config_verified)
 
-    def test_app_reads_parameters_once_per_connection_and_restart_without_applying(self):
+    def test_app_syncs_once_then_skips_reconnection_and_board_restart(self):
         from navigation_app import NavigationApp
         from unittest.mock import Mock
 
@@ -451,8 +451,8 @@ class Config1IntegrationTests(unittest.TestCase):
         self.drain()
         self.assertTrue(controller.config_verified)
         app._verify_chassis_on_idle(self.generation, ChassisState.IDLE)
-        controller.request_config_sync.assert_called_once_with(apply=False)
-        self.assertFalse(any(b'@CFG,C,' in data or b'@CFG,S,' in data for data in self.endpoint.writes))
+        controller.request_config_sync.assert_called_once_with(apply=True)
+        self.assertTrue(controller.initial_sync_completed)
         controller.feed_data(b'MECANUM UNIVERSAL V6.3 COMM READY\r\n', self.endpoint.time, self.generation)
         app._verify_chassis_on_idle(self.generation, ChassisState.CONNECTED_WAITING)
         controller.feed_data(b'IDLE X=0 Y=0 R=0 S=0\r\n', self.endpoint.time, self.generation)
@@ -461,7 +461,13 @@ class Config1IntegrationTests(unittest.TestCase):
         self.drain()
         self.assertFalse(controller.config_verified)
         app._verify_chassis_on_idle(self.generation, ChassisState.IDLE)
-        self.assertEqual(controller.request_config_sync.call_count, 2)
+        self.assertEqual(controller.request_config_sync.call_count, 1)
+        controller.disconnect()
+        self.generation = controller.begin_connection()
+        controller.feed_data(b'IDLE X=0 Y=0 R=0 S=0\r\n', self.endpoint.time, self.generation)
+        app._verify_chassis_on_idle(self.generation, ChassisState.IDLE)
+        self.assertEqual(controller.request_config_sync.call_count, 1)
+        self.assertTrue(controller.allow_automatic())
         self.assertFalse(self.moves())
 
     def test_external_profile_changes_manual_auto_and_timeout(self):

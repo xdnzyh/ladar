@@ -107,10 +107,13 @@ RUNTIME_DEFAULTS = {
     "simulation_unobserved_clear_range_m": 0.0,
     "hardware_prefer_forward_exploration": True,
     "simulation_prefer_forward_exploration": False,
+    "hardware_forward_only": True,
+    "simulation_forward_only": False,
     "simulation_estimated_sweeps": True,
     "chassis_protocol_version": "MECANUM UNIVERSAL V6.3 COMM",
     "chassis_capability_mode": "unknown",
     "chassis_firmware_confirmed": False,
+    "chassis_initial_sync_completed": False,
     "chassis_result_recovery": False,
     "chassis_idle_preflight": False,
     "chassis_preferred_translation_unit": "MM",
@@ -473,9 +476,11 @@ def resolve_runtime_config(
 
     for key in (
         "synchronized_acquisition", "clockwise", "chassis_firmware_confirmed",
+        "chassis_initial_sync_completed",
         "chassis_speed_validated", "chassis_braking_validated", "chassis_raw_log_enabled",
         "chassis_result_recovery", "chassis_idle_preflight", "chassis_distance_control",
         "hardware_prefer_forward_exploration", "simulation_prefer_forward_exploration",
+        "hardware_forward_only", "simulation_forward_only",
         "simulation_estimated_sweeps",
     ):
         config[key] = _strict_bool(config, key)
@@ -754,6 +759,7 @@ def resolve_runtime_config(
 
 def build_navigation_engine(config: Mapping[str, object]):
     from navigation_core import NavigationEngine, OccupancyGrid
+    from course_model import BoardCourseModel
 
     resolved = resolve_runtime_config(
         str(config.get("runtime_source", "simulation")),
@@ -763,11 +769,26 @@ def build_navigation_engine(config: Mapping[str, object]):
         # connecting, so its construction cannot prevent configuration editing.
         validate_port_assignments=False,
     )
+    course_model = None
+    course_config = resolved.get("hardware_course_model")
+    if resolved["runtime_source"] == "hardware" and course_config:
+        if not isinstance(course_config, Mapping):
+            raise RuntimeConfigError("赛道模型配置必须为对象")
+        try:
+            course_model = BoardCourseModel(course_config["board_width_m"],
+                                           course_config["width_boards"], course_config["length_boards"])
+        except (KeyError, ValueError) as exc:
+            raise RuntimeConfigError(f"赛道模型配置无效：{exc}") from exc
+    height = int(resolved["map_height_cells"])
+    if course_model is not None:
+        height = max(height, math.ceil((course_model.length_m + 2.4) / float(resolved["map_resolution_m"])))
     grid = OccupancyGrid(
         int(resolved["map_width_cells"]),
-        int(resolved["map_height_cells"]),
+        height,
         float(resolved["map_resolution_m"]),
     )
+    if course_model is not None:
+        grid.origin_row = height - 1 - math.ceil(1.2 / grid.resolution_m)
     if resolved["runtime_source"] == "hardware":
         raw_capabilities = resolved.get("chassis_translation_capabilities", {})
         global_maximum = min(
@@ -817,8 +838,10 @@ def build_navigation_engine(config: Mapping[str, object]):
         }
     return NavigationEngine(
         grid,
+        course_model=course_model,
         unobserved_clear_range_m=float(resolved[f"{resolved['runtime_source']}_unobserved_clear_range_m"]),
         prefer_forward_exploration=resolved[f"{resolved['runtime_source']}_prefer_forward_exploration"],
+        forward_only=resolved[f"{resolved['runtime_source']}_forward_only"],
         max_range_m=float(resolved["max_range_m"] if resolved["runtime_source"] == "hardware" else resolved["simulation_max_range_m"]),
         robot_radius_m=float(resolved["robot_radius_m"]),
         sensor_offset_x_m=float(resolved["radar_offset_x_m"]),
